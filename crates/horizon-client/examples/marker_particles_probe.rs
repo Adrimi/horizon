@@ -74,6 +74,8 @@ fn main() -> Result<()> {
             biomes: &biomes,
             registry: assets.registry,
             raining_at: &|_| false,
+            raw_brightness: &|_| 15,
+            firefly_sounds: &|_| false,
             falling_leaves: 0.0,
             marker: target.map(|name| (name, &options as &dyn Fn(_) -> _)),
         };

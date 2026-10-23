@@ -47,6 +47,9 @@ enum Animate {
     EnchantingTable,
     EndRod([i32; 3]),
     SporeBlossom,
+    /// `FireflyBushBlock.animateTick`: an idle sound at night under the open
+    /// sky, and fireflies where it is dark.
+    FireflyBush,
     CryingObsidian,
     Mycelium,
     Candles(u8),
@@ -138,6 +141,7 @@ fn classify(name: &str, prop: &dyn Fn(&str) -> Option<String>) -> Animate {
         "enchanting_table" => Animate::EnchantingTable,
         "end_rod" => Animate::EndRod(facing()),
         "spore_blossom" => Animate::SporeBlossom,
+        "firefly_bush" => Animate::FireflyBush,
         "crying_obsidian" => Animate::CryingObsidian,
         "mycelium" => Animate::Mycelium,
         "brewing_stand" => Animate::BrewingStand,
@@ -291,6 +295,12 @@ pub struct AnimateContext<'a> {
     pub registry: &'a BlockRegistry,
     /// `Level.isRainingAt`.
     pub raining_at: &'a dyn Fn([i32; 3]) -> bool,
+    /// `Level.getMaxLocalRawBrightness` at a position (sky light less the
+    /// darkness of the sky, or block light, whichever is more).
+    pub raw_brightness: &'a dyn Fn([i32; 3]) -> i32,
+    /// `EnvironmentAttributes.FIREFLY_BUSH_SOUNDS` is on at the position and
+    /// nothing but leaves is above it (`MOTION_BLOCKING_NO_LEAVES`).
+    pub firefly_sounds: &'a dyn Fn([i32; 3]) -> bool,
     /// Horizon's falling leaves: times vanilla's leaf chance
     /// (`falling_leaves_multiplier`), 0 when off.
     pub falling_leaves: f32,
@@ -898,6 +908,29 @@ fn block_animate_tick(
                         f64::from(a[2]) + r.next_double(),
                     ];
                     add(engine, T::SporeBlossomAir, p, [0.0; 3]);
+                }
+            }
+        }
+        Animate::FireflyBush => {
+            let r = engine.random();
+            if next_int(r, 30) == 0 && (ctx.firefly_sounds)(pos) {
+                sound(
+                    engine,
+                    "minecraft:block.firefly_bush.idle",
+                    [fx + 0.5, fy + 0.5, fz + 0.5],
+                    1.0,
+                    1.0,
+                );
+            }
+            if (ctx.raw_brightness)(pos) <= 13 {
+                let r = engine.random();
+                if r.next_double() <= 0.7 {
+                    let p = [
+                        fx + r.next_double() * 10.0 - 5.0,
+                        fy + r.next_double() * 5.0,
+                        fz + r.next_double() * 10.0 - 5.0,
+                    ];
+                    add(engine, T::Firefly, p, [0.0; 3]);
                 }
             }
         }

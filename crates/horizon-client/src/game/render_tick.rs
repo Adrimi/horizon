@@ -332,7 +332,22 @@ impl Game<'_> {
                 && motion_blocking(world, facts, p[0], p[2], p[1] + 64) <= p[1]
                 && rains_at(world, biomes, p[0], p[1], p[2])
         };
+        let darken = self.sky_darken();
+        let raw_brightness = |p: [i32; 3]| {
+            let light = world.light(p[0], p[1], p[2]);
+            i32::from(light & 15).max(i32::from(light >> 4) - darken)
+        };
+        let day_time = self.world.day_time.rem_euclid(24000);
+        let overworld = self.dim == Dim::Overworld;
+        let firefly_sounds = |p: [i32; 3]| {
+            // `minecraft:timeline/day`: on from tick 12600 to 23401.
+            overworld
+                && (12600..23401).contains(&day_time)
+                && motion_blocking(world, facts, p[0], p[2], p[1] + 64) <= p[1]
+        };
         let ctx = AnimateContext {
+            raw_brightness: &raw_brightness,
+            firefly_sounds: &firefly_sounds,
             world,
             facts,
             collision: self.collision,
