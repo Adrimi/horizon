@@ -247,6 +247,19 @@ impl Game<'_> {
                 if action == "tap" {
                     self.extras_key(physical, false, false);
                 }
+                // A panel a mod painted over the inventory takes the keys it asked
+                // for, whatever the key binds say (API 0.1.5).
+                {
+                    let action = arg(2)?;
+                    let down = action != "up";
+                    if self.mod_overlay_key(physical, None, down) {
+                        if action == "tap" {
+                            self.mod_overlay_key(physical, None, false);
+                            self.physical_keys.remove(&physical);
+                        }
+                        return ok();
+                    }
+                }
                 // Text screens consume raw presses; releases follow key binds.
                 let typing = matches!(self.screen, Screen::Chat | Screen::Options);
                 let key = if typing && arg(2)? != "up" {
