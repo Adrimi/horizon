@@ -113,7 +113,11 @@ fn scan_column(chunk: &Chunk, palette: &Palette, x: i32, z: i32, top: i32) -> (u
 
 /// Scan one chunk's columns.
 pub fn scan_chunk(chunk: &Chunk, palette: &Palette, air: u32) -> Columns {
-    let top = top_of(chunk, air);
+    scan_chunk_from(chunk, palette, air, i32::MAX)
+}
+/// `scan_chunk` going down from the height `from` (a cave map).
+pub fn scan_chunk_from(chunk: &Chunk, palette: &Palette, air: u32, from: i32) -> Columns {
+    let top = top_of(chunk, air).min(from);
     let mut columns = Columns {
         color: [0; 256],
         height: [MIN_Y as i16; 256],

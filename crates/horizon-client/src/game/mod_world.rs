@@ -80,6 +80,23 @@ impl WorldAccess for ModWorld {
             biome,
         })
     }
+    fn chunk_columns(&self, cx: i32, cz: i32, y: i32) -> Option<ChunkSurface> {
+        let chunk = self.chunks.get(&(cx, cz))?;
+        let columns = mod_scan::scan_chunk_from(chunk, &self.palette, self.air, y);
+        let biome = (0..16)
+            .flat_map(|z| (0..16).map(move |x| (x, z)))
+            .map(|(x, z)| {
+                let i = (z * 16 + x) as usize;
+                chunk.biome(x, columns.height[i] as i32, z)
+            })
+            .collect();
+        Some(ChunkSurface {
+            color: columns.color.to_vec(),
+            y: columns.height.iter().map(|h| i32::from(*h)).collect(),
+            depth: columns.depth.to_vec(),
+            biome,
+        })
+    }
     fn biome(&self, pos: &BlockPos) -> Option<horizon_mods::Biome> {
         let chunk = self.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
         let info = self

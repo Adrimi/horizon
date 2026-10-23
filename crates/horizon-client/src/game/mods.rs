@@ -63,6 +63,14 @@ pub(super) struct ModsState {
     /// the names the mods' numbers stand for (API 0.1.6).
     particle_patches: Vec<Patch>,
     particle_names: HashMap<u32, String>,
+    /// The bars the game drew in the last frame, and the camera it drew with
+    /// (`hud.get-bars`, `overlay`; API 0.1.7).
+    pub(super) bars: Option<horizon_mods::Bars>,
+    projection: Option<Projection>,
+    /// The atlas slot of each mod's overlay image, by (mod, image).
+    overlay_slots: HashMap<(String, u32), usize>,
+    /// The version uploaded to each overlay slot.
+    overlay_versions: HashMap<usize, u64>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
@@ -98,7 +106,7 @@ impl ModScreen {
         }
         let slot = self.slots.len();
         // The last slot of the atlas' reserved row is the particle sheet.
-        if slot >= MOD_TEXTURE_SLOTS - 1 {
+        if slot >= 8 {
             return None;
         }
         self.slots.insert(id, slot);
@@ -907,7 +915,12 @@ impl Game<'_> {
     /// What mods read of the screens, once per frame.
     fn sync_mod_ui(&mut self) {
         let mods = &self.mods.mods;
-        if !(mods.uses(Capability::Screen) || mods.uses(Capability::InventoryEdit)) {
+        if !(mods.uses(Capability::Screen)
+            || mods.uses(Capability::InventoryEdit)
+            || mods.uses(Capability::Overlay)
+            || mods.uses(Capability::GameRead)
+            || mods.uses(Capability::Hud))
+        {
             return;
         }
         let Some(size) = self
@@ -973,6 +986,19 @@ impl Game<'_> {
             slots,
             text_widths: Some(widths),
             can_give: self.creative && self.remote.is_none() && self.player.is_some(),
+            hud: self.player.is_some().then_some(horizon_mods::HudState {
+                screen_open: self.screen != Screen::Playing,
+                debug: self.debug,
+                hidden: self.ui.hide_gui,
+            }),
+            bars: self.mods.bars.clone(),
+            seed: (self.remote.is_none() && self.player.is_some())
+                .then_some(self.level.seed as u64),
+            fov: self.mods.projection.map(|p| p.fov),
+            size: Some(horizon_mods::ScreenSize {
+                width: batch.width,
+                height: batch.height,
+            }),
         };
         self.mods.mods.set_ui(ui);
     }
@@ -1137,6 +1163,25 @@ impl Game<'_> {
         elements: &[ScreenElement],
         pictures: bool,
     ) {
+        self.draw_elements(batch, pictures.then_some(None), elements);
+    }
+    /// The elements of a mod's overlay, whose images are the overlay's.
+    fn draw_mod_elements_of(
+        &mut self,
+        batch: &mut HudBatch,
+        mod_id: Option<&str>,
+        elements: &[ScreenElement],
+    ) {
+        self.draw_elements(batch, Some(mod_id), elements);
+    }
+    /// `pictures`: none for no images, `Some(None)` for the screen's,
+    /// `Some(Some(id))` for the overlay of the mod `id`.
+    fn draw_elements(
+        &mut self,
+        batch: &mut HudBatch,
+        pictures: Option<Option<&str>>,
+        elements: &[ScreenElement],
+    ) {
         let mut tips: Vec<(Vec<(String, u32)>, f32, f32)> = Vec::new();
         for element in elements {
             match element {
@@ -1171,8 +1216,16 @@ impl Game<'_> {
                         argb(s.tint),
                     );
                 }
-                ScreenElement::Picture(p) if pictures => {
-                    let Some(slot) = self.mods.screen.slot_of(p.texture) else {
+                ScreenElement::Picture(p) if pictures.is_some() => {
+                    let slot = match pictures {
+                        Some(Some(mod_id)) => self
+                            .mods
+                            .overlay_slots
+                            .get(&(mod_id.to_owned(), p.texture))
+                            .copied(),
+                        _ => self.mods.screen.slot_of(p.texture),
+                    };
+                    let Some(slot) = slot else {
                         continue;
                     };
                     let Some(rect) = self
@@ -1503,5 +1556,181 @@ impl Game<'_> {
         };
         fog.environmental_end *= 1.0 - h.density;
         fog.color = horizon_client::rain::mix_fog(fog.color, [h.red, h.green, h.blue], h.amount);
+    }
+}
+
+/// The camera of a frame: where it is, where it looks and its field of view.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Projection {
+    camera: glam::DVec3,
+    yaw: f32,
+    pitch: f32,
+    fov: f32,
+}
+/// The overlay's images take the atlas slots after the screen's.
+const OVERLAY_FIRST_SLOT: usize = 8;
+
+impl Game<'_> {
+    /// The camera the overlay's world elements are projected with.
+    pub(super) fn set_mod_projection(
+        &mut self,
+        camera: glam::DVec3,
+        yaw: f32,
+        pitch: f32,
+        fov: f32,
+    ) {
+        self.mods.projection = Some(Projection {
+            camera,
+            yaw,
+            pitch,
+            fov,
+        });
+    }
+    /// A point of the world in GUI pixels; none behind the camera.
+    fn project_to_gui(&self, batch: &HudBatch, p: [f64; 3]) -> Option<(f32, f32)> {
+        let c = self.mods.projection?;
+        let rel = glam::Vec3::new(
+            (p[0] - c.camera.x) as f32,
+            (p[1] - c.camera.y) as f32,
+            (p[2] - c.camera.z) as f32,
+        );
+        let v = horizon_client::camera::view_matrix(c.yaw, c.pitch) * rel.extend(1.0);
+        let depth = -v.z;
+        if depth <= 0.05 {
+            return None;
+        }
+        let tan = (c.fov.to_radians() / 2.0).tan();
+        let aspect = batch.width / batch.height.max(1.0);
+        let ndc = (v.x / depth / (tan * aspect), v.y / depth / tan);
+        if ndc.0.abs() > 1.5 || ndc.1.abs() > 1.5 {
+            return None;
+        }
+        Some((
+            (ndc.0 * 0.5 + 0.5) * batch.width,
+            (1.0 - (ndc.1 * 0.5 + 0.5)) * batch.height,
+        ))
+    }
+    /// The atlas slot of a mod's overlay image, with the image uploaded.
+    fn overlay_slot(&mut self, mod_id: &str, id: u32) -> Option<usize> {
+        let key = (mod_id.to_owned(), id);
+        if let Some(slot) = self.mods.overlay_slots.get(&key) {
+            return Some(*slot);
+        }
+        let slot = OVERLAY_FIRST_SLOT + self.mods.overlay_slots.len();
+        if slot >= MOD_TEXTURE_SLOTS - 1 {
+            return None;
+        }
+        self.mods.overlay_slots.insert(key, slot);
+        Some(slot)
+    }
+    /// What the mods painted in a layer of the HUD (API 0.1.7).
+    pub(super) fn draw_mod_overlay(
+        &mut self,
+        batch: &mut HudBatch,
+        layer: horizon_mods::OverlayLayer,
+    ) {
+        if !self.mods.mods.is_running() || !self.mods.mods.uses(Capability::Overlay) {
+            return;
+        }
+        // Upload the images the mods changed.
+        let textures: Vec<(String, Vec<horizon_mods::Texture>)> = self
+            .mods
+            .mods
+            .overlay_textures()
+            .into_iter()
+            .map(|(id, t)| (id.to_owned(), t.to_vec()))
+            .collect();
+        let atlas_height = self.gui.atlas.height;
+        for (mod_id, list) in &textures {
+            for t in list {
+                let Some(slot) = self.overlay_slot(mod_id, t.id) else {
+                    continue;
+                };
+                if self.mods.overlay_versions.get(&slot) == Some(&t.version) {
+                    continue;
+                }
+                self.mods.overlay_versions.insert(slot, t.version);
+                batch.patches.push(Patch {
+                    x: slot as u32 * MOD_TEXTURE_SIDE,
+                    y: atlas_height - MOD_TEXTURE_SIDE,
+                    width: t.width,
+                    height: t.height,
+                    rgba: t.pixels.clone(),
+                });
+            }
+        }
+        let layers: Vec<(String, Vec<ScreenElement>)> = self
+            .mods
+            .mods
+            .overlay_layer(layer)
+            .into_iter()
+            .map(|(id, e)| (id.to_owned(), e.to_vec()))
+            .collect();
+        for (mod_id, elements) in layers {
+            self.draw_mod_elements_of(batch, Some(&mod_id), &elements);
+        }
+    }
+    /// What the mods drew at points of the world (API 0.1.7).
+    pub(super) fn draw_mod_world(&mut self, batch: &mut HudBatch) {
+        if !self.mods.mods.is_running() || !self.mods.mods.uses(Capability::Overlay) {
+            return;
+        }
+        let worlds: Vec<horizon_mods::WorldElement> = self
+            .mods
+            .mods
+            .overlay_world()
+            .into_iter()
+            .flat_map(|(_, e)| e.to_vec())
+            .collect();
+        for e in worlds {
+            use horizon_mods::WorldElement as W;
+            match e {
+                W::Label(l) => {
+                    let Some((x, y)) = self.project_to_gui(batch, [l.x, l.y, l.z]) else {
+                        continue;
+                    };
+                    let w = HudBatch::text_width(&self.gui.atlas, &l.text) * l.scale.max(0.1);
+                    let start = batch.vertices.len();
+                    batch.text(
+                        &self.gui.atlas,
+                        &l.text,
+                        x - w / 2.0 / l.scale.max(0.1),
+                        y + l.offset_y,
+                        argb(l.color),
+                        l.shadow,
+                    );
+                    if l.scale > 0.0 && l.scale != 1.0 && l.scale.is_finite() {
+                        batch.scale_since(start, x, y + l.offset_y, l.scale, l.scale);
+                    }
+                }
+                W::Sprite(s) => {
+                    let Some((x, y)) = self.project_to_gui(batch, [s.x, s.y, s.z]) else {
+                        continue;
+                    };
+                    batch.sprite_scaled(
+                        &self.gui.atlas,
+                        &s.name,
+                        x - s.width / 2.0,
+                        y - s.height / 2.0 + s.offset_y,
+                        s.width,
+                        s.height,
+                        argb(s.tint),
+                    );
+                }
+                W::Fill(f) => {
+                    let Some((x, y)) = self.project_to_gui(batch, [f.x, f.y, f.z]) else {
+                        continue;
+                    };
+                    batch.fill(
+                        &self.gui.atlas,
+                        x - f.width / 2.0,
+                        y - f.height / 2.0 + f.offset_y,
+                        f.width,
+                        f.height,
+                        argb(f.color),
+                    );
+                }
+            }
+        }
     }
 }

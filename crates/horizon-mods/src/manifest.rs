@@ -114,12 +114,14 @@ pub enum Capability {
     Particles,
     /// The mod's haze in the fog (API 0.1.6).
     Atmosphere,
+    /// The mod's graphics over the world, in the HUD (API 0.1.7).
+    Overlay,
     /// New blocks and items from the mod's `data/` (API 0.2): no WIT
     /// interface, the game reads them before the world loads.
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 19] = [
+    pub const ALL: [Capability; 20] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -138,6 +140,7 @@ impl Capability {
         Capability::SettingsRead,
         Capability::Particles,
         Capability::Atmosphere,
+        Capability::Overlay,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -161,6 +164,7 @@ impl Capability {
             Capability::SettingsRead => "settings",
             Capability::Particles => "particles",
             Capability::Atmosphere => "atmosphere",
+            Capability::Overlay => "overlay",
             Capability::Registries => "registries",
         }
     }
@@ -185,6 +189,7 @@ impl Capability {
             Capability::SettingsRead => "read your settings (particles)",
             Capability::Particles => "add particles of its own",
             Capability::Atmosphere => "change the haze in the fog",
+            Capability::Overlay => "draw over the world on your HUD",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -234,6 +239,7 @@ impl fmt::Display for Capability {
             Capability::SettingsRead => "settings-read",
             Capability::Particles => "particles",
             Capability::Atmosphere => "atmosphere",
+            Capability::Overlay => "overlay",
             Capability::Registries => "registries",
         };
         f.write_str(name)

@@ -20,10 +20,12 @@ mod bindings {
 pub use bindings::horizon::mods::{
     atmosphere::Haze,
     game::{Clock, FoodStats, Player},
+    hud::{BarIcon, Bars},
     hud::{Corner, Line},
     inventory::{Food, Stack},
     items::Item,
     keys::KeyEvent,
+    overlay::{HudState, Layer as OverlayLayer, WorldElement},
     particles::{
         Color as ParticleColor, Fade as ParticleFade, Landing, Options as ParticleOptions,
         SizeCurve as ParticleSizeCurve,
@@ -42,8 +44,8 @@ use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
     horizon::mods::{
-        atmosphere, chat, game, hotbar, hud, inventory, items, keys, log as mod_log, particles,
-        recipes, screen, settings, storage, target, weather, world,
+        atmosphere, chat, game, hotbar, hud, inventory, items, keys, log as mod_log, overlay,
+        particles, recipes, screen, settings, storage, target, weather, world,
     },
 };
 
@@ -78,6 +80,9 @@ const STORAGE_DIR: &str = ".horizon-mod-data";
 pub const SCREEN_SHAPES: usize = 4096;
 /// How many elements `paint` takes per call, and how many keys a panel names.
 pub const SCREEN_ELEMENTS: usize = 4096;
+/// How many images and world elements a mod's overlay holds.
+pub const OVERLAY_TEXTURES: usize = 7;
+const OVERLAY_WORLD_ELEMENTS: usize = 512;
 const PANEL_KEYS: usize = 64;
 /// How many tooltip lines an element carries.
 const TIP_LINES: usize = 32;
@@ -192,6 +197,14 @@ pub struct Ui {
     pub text_widths: Option<Arc<Vec<f32>>>,
     /// The player is in creative in a world this game runs: `give` works.
     pub can_give: bool,
+    /// What the HUD is doing, and the bars the game drew (API 0.1.7).
+    pub hud: Option<HudState>,
+    pub bars: Option<Bars>,
+    /// The world's seed and the field of view of the last frame (`game`).
+    pub seed: Option<u64>,
+    pub fov: Option<f32>,
+    /// The screen's size in GUI pixels (`overlay`).
+    pub size: Option<ScreenSize>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -207,6 +220,11 @@ impl Default for Ui {
             slots: Vec::new(),
             text_widths: None,
             can_give: false,
+            hud: None,
+            bars: None,
+            seed: None,
+            fov: None,
+            size: None,
         }
     }
 }
@@ -262,6 +280,10 @@ pub trait WorldAccess: Send + Sync {
     fn biome_names(&self) -> Vec<String>;
     /// The map's colours by id, as 0xRRGGBB (API 0.1.4).
     fn map_colors(&self) -> Vec<u32>;
+    /// As `chunk_surface`, scanning down from the height `y` (API 0.1.7).
+    fn chunk_columns(&self, _cx: i32, _cz: i32, _y: i32) -> Option<ChunkSurface> {
+        None
+    }
     /// The biome at `pos` (API 0.1.6); none where no chunk is loaded.
     fn biome(&self, _pos: &BlockPos) -> Option<Biome> {
         None
@@ -460,6 +482,11 @@ struct State {
     landings: Vec<Landing>,
     /// The mod's haze (`atmosphere`).
     haze: Option<Haze>,
+    /// What the mod painted in the HUD's layers, at points of the world, and
+    /// the images it uploaded for it (`overlay`, API 0.1.7).
+    overlay_layers: [Vec<ScreenElement>; 2],
+    overlay_world: Vec<WorldElement>,
+    overlay_textures: Vec<Texture>,
     /// What the mod has asked to give in the current call.
     given: u32,
     /// The next screen id this mod gets.
@@ -655,6 +682,9 @@ impl Mods {
             owned_sprites: Vec::new(),
             landings: Vec::new(),
             haze: None,
+            overlay_layers: [Vec::new(), Vec::new()],
+            overlay_world: Vec::new(),
+            overlay_textures: Vec::new(),
             next_screen: 1,
             binds: Vec::new(),
             key_events: Vec::new(),
@@ -774,6 +804,40 @@ impl Mods {
                 }
             }
         }
+    }
+    /// What the running mods painted in an overlay layer, by mod id (API
+    /// 0.1.7).
+    pub fn overlay_layer(&self, layer: OverlayLayer) -> Vec<(&str, &[ScreenElement])> {
+        let i = layer as usize;
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let d = e.run.as_ref()?.store.data();
+                (!d.overlay_layers[i].is_empty())
+                    .then_some((d.id.as_str(), d.overlay_layers[i].as_slice()))
+            })
+            .collect()
+    }
+    /// What the running mods drew at points of the world, by mod id.
+    pub fn overlay_world(&self) -> Vec<(&str, &[WorldElement])> {
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let d = e.run.as_ref()?.store.data();
+                (!d.overlay_world.is_empty()).then_some((d.id.as_str(), d.overlay_world.as_slice()))
+            })
+            .collect()
+    }
+    /// The images the running mods uploaded for their overlays, by mod id.
+    pub fn overlay_textures(&self) -> Vec<(&str, &[Texture])> {
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let d = e.run.as_ref()?.store.data();
+                (!d.overlay_textures.is_empty())
+                    .then_some((d.id.as_str(), d.overlay_textures.as_slice()))
+            })
+            .collect()
     }
     /// The haze of the running mods that set one (API 0.1.6).
     pub fn hazes(&self) -> Vec<Haze> {
@@ -1155,6 +1219,12 @@ impl game::Host for State {
     fn get_food_stats(&mut self) -> Option<FoodStats> {
         self.snapshot.food
     }
+    fn get_seed(&mut self) -> Option<u64> {
+        self.ui.seed
+    }
+    fn get_fov(&mut self) -> Option<f32> {
+        self.ui.fov
+    }
 }
 impl chat::Host for State {
     fn show(&mut self, text: String) {
@@ -1389,6 +1459,28 @@ fn clean_area(a: Area) -> Area {
         height: fix(a.height).max(0.0),
     }
 }
+/// Elements the game draws: capped in number, their text and tips in length.
+fn clean_elements(elements: Vec<ScreenElement>) -> Vec<ScreenElement> {
+    elements
+        .into_iter()
+        .take(SCREEN_ELEMENTS)
+        .map(|e| match e {
+            ScreenElement::Label(mut l) => {
+                l.text = clip(l.text);
+                ScreenElement::Label(l)
+            }
+            ScreenElement::Tooltip(mut t) => {
+                t.extra = clean_tip(t.extra);
+                ScreenElement::Tooltip(t)
+            }
+            ScreenElement::Tip(mut t) => {
+                t.lines = clean_tip(t.lines);
+                ScreenElement::Tip(t)
+            }
+            other => other,
+        })
+        .collect()
+}
 /// Tooltip lines the game draws: capped in number and length.
 fn clean_tip(lines: Vec<TipLine>) -> Vec<TipLine> {
     lines
@@ -1484,25 +1576,7 @@ impl screen::Host for State {
         let Some(screen) = self.surface(id) else {
             return;
         };
-        screen.elements = elements
-            .into_iter()
-            .take(SCREEN_ELEMENTS)
-            .map(|e| match e {
-                ScreenElement::Label(mut l) => {
-                    l.text = clip(l.text);
-                    ScreenElement::Label(l)
-                }
-                ScreenElement::Tooltip(mut t) => {
-                    t.extra = clean_tip(t.extra);
-                    ScreenElement::Tooltip(t)
-                }
-                ScreenElement::Tip(mut t) => {
-                    t.lines = clean_tip(t.lines);
-                    ScreenElement::Tip(t)
-                }
-                other => other,
-            })
-            .collect();
+        screen.elements = clean_elements(elements);
     }
     fn get_text_width(&mut self, text: String) -> f32 {
         let Some(widths) = self.ui.text_widths.as_ref() else {
@@ -1619,6 +1693,9 @@ impl world::Host for State {
             .as_ref()
             .map_or_else(Vec::new, |w| w.map_colors())
     }
+    fn get_chunk_columns(&mut self, cx: i32, cz: i32, y: i32) -> Option<ChunkSurface> {
+        self.world.as_ref()?.chunk_columns(cx, cz, y)
+    }
     fn get_biome(&mut self, pos: BlockPos) -> Option<Biome> {
         self.world.as_ref()?.biome(&pos)
     }
@@ -1660,6 +1737,78 @@ impl hud::Host for State {
     }
     fn clear(&mut self) {
         self.panel = None;
+    }
+    fn get_bars(&mut self) -> Option<Bars> {
+        self.ui.bars.clone()
+    }
+}
+impl overlay::Host for State {
+    fn paint(&mut self, layer: OverlayLayer, elements: Vec<ScreenElement>) {
+        self.overlay_layers[layer as usize] = clean_elements(elements);
+    }
+    fn clear(&mut self, layer: OverlayLayer) {
+        self.overlay_layers[layer as usize].clear();
+    }
+    fn paint_world(&mut self, elements: Vec<WorldElement>) {
+        self.overlay_world = elements
+            .into_iter()
+            .take(OVERLAY_WORLD_ELEMENTS)
+            .map(|e| match e {
+                WorldElement::Label(mut l) => {
+                    l.text = clip(l.text);
+                    WorldElement::Label(l)
+                }
+                other => other,
+            })
+            .collect();
+    }
+    fn clear_world(&mut self) {
+        self.overlay_world.clear();
+    }
+    fn get_size(&mut self) -> Option<ScreenSize> {
+        self.ui.size
+    }
+    fn get_text_width(&mut self, text: String) -> f32 {
+        screen::Host::get_text_width(self, text)
+    }
+    fn upload_texture(
+        &mut self,
+        id: u32,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        if id as usize >= OVERLAY_TEXTURES {
+            return Err(format!("an image's id is 0 to {}", OVERLAY_TEXTURES - 1));
+        }
+        if width == 0 || height == 0 || width > SCREEN_TEXTURE_SIDE || height > SCREEN_TEXTURE_SIDE
+        {
+            return Err(format!(
+                "an image is 1 to {SCREEN_TEXTURE_SIDE} pixels wide and high"
+            ));
+        }
+        if rgba.len() != (width * height * 4) as usize {
+            return Err("an image has width * height * 4 bytes".into());
+        }
+        match self.overlay_textures.iter_mut().find(|t| t.id == id) {
+            Some(texture) => {
+                texture.width = width;
+                texture.height = height;
+                texture.pixels = rgba;
+                texture.version += 1;
+            }
+            None => self.overlay_textures.push(Texture {
+                id,
+                width,
+                height,
+                pixels: rgba,
+                version: 1,
+            }),
+        }
+        Ok(())
+    }
+    fn get_hud_state(&mut self) -> Option<HudState> {
+        self.ui.hud
     }
 }
 impl State {

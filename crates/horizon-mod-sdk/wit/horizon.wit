@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.6;
+package horizon:mods@0.1.7;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -51,6 +51,12 @@ interface game {
     }
     /// None on the title screen (API 0.1.2).
     get-food-stats: func() -> option<food-stats>;
+    /// The world's seed; none when the game does not know it, as in
+    /// another's world (API 0.1.7).
+    get-seed: func() -> option<u64>;
+    /// The field of view the game drew the last frame with, in degrees, the
+    /// vertical one; none outside a world (API 0.1.7).
+    get-fov: func() -> option<f32>;
 }
 
 /// Capability `chat`: messages only the local player sees.
@@ -75,6 +81,28 @@ interface hud {
     }
     set-panel: func(corner: corner, lines: list<line>);
     clear: func();
+    /// One icon of a status bar as the game drew it (API 0.1.7).
+    record bar-icon {
+        /// The top left corner in GUI pixels, after the shaking of the bar.
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        /// The sprite the game drew (`hud/food_empty`, `hud/heart/container`,
+        /// ...).
+        name: string,
+    }
+    /// The health and hunger bars as the game drew them in the last frame.
+    record bars {
+        /// The container of each hunger icon, in the order the game drew
+        /// them.
+        food: list<bar-icon>,
+        /// The container of each heart, in the order the game drew them.
+        health: list<bar-icon>,
+    }
+    /// Where the bars are; none when the game draws none (creative,
+    /// spectator, the HUD hidden). One frame old (API 0.1.7).
+    get-bars: func() -> option<bars>;
 }
 
 /// Capability `target`: the block the player looks at, and the one they
@@ -585,6 +613,10 @@ interface %world {
     /// The colours of the map (`MapColor`) by id, as 0xRRGGBB; the id is
     /// the one `get-chunk-surface` gives. Empty outside a world.
     get-map-colors: func() -> list<u32>;
+    /// As `get-chunk-surface`, but the scan goes down from the height `y`
+    /// instead of the top of the chunk: the highest block with a map colour
+    /// at `y` or below, for a cave map (API 0.1.7).
+    get-chunk-columns: func(cx: s32, cz: s32, y: s32) -> option<chunk-surface>;
     /// A biome as a mod reads it (API 0.1.6).
     record biome {
         /// `minecraft:desert`, ...
@@ -816,6 +848,98 @@ interface atmosphere {
     set-haze: func(haze: option<haze>);
 }
 
+/// Capability `overlay`: the mod's own graphics over the world, in the HUD's
+/// layer, without taking the mouse or the keyboard (API 0.1.7). It draws the
+/// elements `screen.paint` does.
+interface overlay {
+    use screen.{element, size};
+    /// Where in the HUD an element goes.
+    enum layer {
+        /// Before the game draws its status bars (health, hunger, armour,
+        /// air, experience): the bars are drawn over it.
+        under-bars,
+        /// After them, over every other part of the HUD but the chat and the
+        /// screens.
+        over-bars,
+    }
+    /// A point of the world with a picture drawn at it (a waypoint).
+    variant world-element {
+        label(world-label),
+        sprite(world-sprite),
+        fill(world-fill),
+    }
+    /// A line of text drawn at a point of the world, always facing the
+    /// camera, at a size that does not change with the distance. Its
+    /// middle is at the point, `offset-y` GUI pixels down.
+    record world-label {
+        x: f64,
+        y: f64,
+        z: f64,
+        text: string,
+        /// 0xAARRGGBB.
+        color: u32,
+        shadow: bool,
+        scale: f32,
+        offset-y: f32,
+    }
+    /// A sprite of the GUI atlas drawn at a point of the world, its middle
+    /// at the point.
+    record world-sprite {
+        x: f64,
+        y: f64,
+        z: f64,
+        width: f32,
+        height: f32,
+        name: string,
+        /// 0xAARRGGBB.
+        tint: u32,
+        offset-y: f32,
+    }
+    /// A filled rectangle drawn at a point of the world, its middle at the
+    /// point.
+    record world-fill {
+        x: f64,
+        y: f64,
+        z: f64,
+        width: f32,
+        height: f32,
+        /// 0xAARRGGBB.
+        color: u32,
+        offset-y: f32,
+    }
+    /// What the HUD is doing.
+    record hud-state {
+        /// A screen (the inventory, the chat, the pause menu) is open.
+        screen-open: bool,
+        /// The debug screen (F3) is on.
+        debug: bool,
+        /// The HUD is hidden (F1).
+        hidden: bool,
+    }
+    /// What to paint in a layer in the next frames; the elements of the last
+    /// call stay until the mod paints again or clears. `picture` elements
+    /// use the images of `upload-texture`.
+    paint: func(layer: layer, elements: list<element>);
+    /// Removes what the mod painted in the layer.
+    clear: func(layer: layer);
+    /// What to draw at points of the world; stays until the next call.
+    /// The game projects the points with the camera of the last frame and
+    /// leaves out those behind it.
+    paint-world: func(elements: list<world-element>);
+    /// Removes what the mod drew in the world.
+    clear-world: func();
+    /// The screen's size in GUI pixels; none when the game has no window.
+    get-size: func() -> option<size>;
+    /// The width of the text in GUI pixels at the game's font.
+    get-text-width: func(text: string) -> f32;
+    /// Uploads an RGBA image (`width * height * 4` bytes) under the id `id`
+    /// (0 to 6); it is drawn by `picture` elements of the overlay. At most
+    /// 7 images of 256x256 pixels shared by all the mods' overlays.
+    upload-texture: func(id: u32, width: u32, height: u32, rgba: list<u8>) -> result<_, string>;
+    /// What the HUD is doing; none outside a world.
+    get-hud-state: func() -> option<hud-state>;
+}
+
 /// What the game calls. Only the hooks `init` asks for are ever called.
 interface events {
     record registration {
@@ -855,6 +979,7 @@ world horizon-mod {
     import settings;
     import particles;
     import atmosphere;
+    import overlay;
     import %world;
     export events;
 }

@@ -4613,6 +4613,8 @@ impl Game<'_> {
             } else {
                 self.draw_mount_hud(&mut batch, wi, hi)
             };
+            self.mods.bars = None;
+            self.draw_mod_overlay(&mut batch, horizon_mods::OverlayLayer::UnderBars);
             if !self.creative
                 && !spectator
                 && let Some(p) = &mut self.player
@@ -4672,8 +4674,11 @@ impl Game<'_> {
                     vehicle_hearts,
                 };
                 let draws = self.health_hud.layout(&inputs, wi, hi);
+                self.mods.bars = bars_of(&draws);
                 hud_layout::paint(&mut batch, atlas, &draws);
             }
+            self.draw_mod_world(&mut batch);
+            self.draw_mod_overlay(&mut batch, horizon_mods::OverlayLayer::OverBars);
             if !spectator {
                 self.draw_selected_name(&mut batch, !self.creative);
             }
@@ -9388,6 +9393,12 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
+        if self.mods.mods.uses(horizon_mods::Capability::Overlay)
+            || self.mods.mods.uses(horizon_mods::Capability::GameRead)
+        {
+            let fov = self.fov_degrees(alpha as f32, camera.to_array());
+            self.set_mod_projection(camera, view_yaw, view_pitch, fov);
+        }
         let mut hud = horizon_client::spans::time("hud", || self.hud(size));
         // Map textures changed since the last drawn frame (game/maps.rs).
         hud.patches.append(&mut self.map_patches);
@@ -12991,4 +13002,31 @@ mod tests {
             }
         }
     }
+}
+
+/// The status bars of a frame's draws, for `hud.get-bars` (API 0.1.7): the
+/// container of every hunger icon and heart, after the shaking.
+fn bars_of(draws: &[hud_layout::GuiDraw]) -> Option<horizon_mods::Bars> {
+    let (mut food, mut health) = (Vec::new(), Vec::new());
+    for d in draws {
+        let hud_layout::GuiDraw::Sprite {
+            sprite, x, y, w, h, ..
+        } = d
+        else {
+            continue;
+        };
+        let icon = || horizon_mods::BarIcon {
+            x: *x as f32,
+            y: *y as f32,
+            width: *w as f32,
+            height: *h as f32,
+            name: sprite.to_string(),
+        };
+        if sprite.starts_with("hud/food_empty") {
+            food.push(icon());
+        } else if sprite.starts_with("hud/heart/container") {
+            health.push(icon());
+        }
+    }
+    (!food.is_empty() || !health.is_empty()).then_some(horizon_mods::Bars { food, health })
 }

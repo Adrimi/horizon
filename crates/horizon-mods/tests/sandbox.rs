@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -620,6 +620,11 @@ impl horizon_mods::WorldAccess for FakeWorld {
             tags,
         })
     }
+    fn chunk_columns(&self, cx: i32, cz: i32, y: i32) -> Option<horizon_mods::ChunkSurface> {
+        let mut surface = self.chunk_surface(cx, cz)?;
+        surface.y.fill(y);
+        Some(surface)
+    }
     fn biome(&self, pos: &BlockPos) -> Option<horizon_mods::Biome> {
         (pos.x.abs() < 16).then(|| horizon_mods::Biome {
             id: "minecraft:plains".into(),
@@ -928,6 +933,7 @@ fn the_browser_api_paints_a_panel_and_reads_items_recipes_and_gives() {
         slots: vec![([16.0, 16.0, 18.0, 18.0], "minecraft:stick".into())],
         text_widths: Some(Arc::new(vec![6.0; 512])),
         can_give: true,
+        ..Ui::default()
     });
     assert!(mods.command("browser"));
     let out = mods.drain();
@@ -1040,4 +1046,59 @@ fn the_weather_particles_and_haze_apis() {
         matches!(&out[0], Output::Feedback { text, .. } if text.ends_with("landed 1")),
         "{out:?}"
     );
+}
+
+#[test]
+fn the_overlay_api_paints_layers_and_the_world_and_reads_the_hud() {
+    use horizon_mods::{Bars, HudState, OverlayLayer, Point, ScreenElement, Ui};
+    use std::sync::Arc;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_world(Some(Arc::new(FakeWorld)));
+    mods.set_snapshot(player());
+    let icon = |name: &str| horizon_mods::BarIcon {
+        x: 1.0,
+        y: 2.0,
+        width: 9.0,
+        height: 9.0,
+        name: name.into(),
+    };
+    mods.set_ui(Ui {
+        hud: Some(HudState {
+            screen_open: true,
+            debug: false,
+            hidden: false,
+        }),
+        bars: Some(Bars {
+            food: vec![icon("hud/food_empty"); 10],
+            health: vec![icon("hud/heart/container"); 10],
+        }),
+        seed: Some(42),
+        fov: Some(70.0),
+        size: Some(horizon_mods::ScreenSize {
+            width: 320.0,
+            height: 240.0,
+        }),
+        cursor: Point { x: 0.0, y: 0.0 },
+        text_widths: Some(Arc::new(vec![6.0; 512])),
+        ..Ui::default()
+    });
+    assert!(mods.command("overlayfx"));
+    let out = mods.drain();
+    assert_eq!(
+        out,
+        [feedback(
+            "overlay true true size Some((320.0, 240.0)) hud Some((true, false, false)) bars Some((10, 10)) seed Some(42) fov Some(70.0) columns Some(256) width 12"
+        )]
+    );
+    // The first layer was cleared by the mod, the second stays.
+    assert!(mods.overlay_layer(OverlayLayer::UnderBars).is_empty());
+    let over = mods.overlay_layer(OverlayLayer::OverBars);
+    assert_eq!(over.len(), 1);
+    assert_eq!(over[0].0, "test_guest");
+    assert_eq!(over[0].1.len(), 2);
+    assert!(matches!(over[0].1[0], ScreenElement::Picture(_)));
+    assert_eq!(mods.overlay_world().len(), 1);
+    let textures = mods.overlay_textures();
+    assert_eq!(textures[0].1.len(), 1);
+    assert_eq!(textures[0].1[0].width, 2);
 }

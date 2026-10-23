@@ -6,8 +6,8 @@
 //! `tick` and `frame` do nothing, to measure the cost of
 //! a call.
 use horizon_mod_sdk::{
-    Mod, Registration, atmosphere, chat, game, hotbar, inventory, items, keys, particles, recipes,
-    screen, settings, storage, target, weather, world,
+    Mod, Registration, atmosphere, chat, game, hotbar, hud, inventory, items, keys, overlay,
+    particles, recipes, screen, settings, storage, target, weather, world,
 };
 
 struct Guest {
@@ -47,6 +47,7 @@ impl Mod for Guest {
             "browser",
             "giveitem",
             "weatherfx",
+            "overlayfx",
             "save",
             "load",
             "save_key",
@@ -385,6 +386,69 @@ impl Mod for Guest {
                     "weather {:?} setting {} biome {biome:?} ground {ground:?} solid {solid} sprite {sprite} spawned {spawned} unknown {nobody} landed {landed}",
                     state.map(|w| (w.rain, w.thunder)),
                     settings::get_particles(),
+                )))
+            }
+            "overlayfx" => {
+                // Two layers, the world, an image, the HUD's state, the bars,
+                // the seed, the fov and a cave scan.
+                overlay::paint(
+                    overlay::Layer::UnderBars,
+                    &[screen::Element::Fill(screen::FillElement {
+                        x: 1.0,
+                        y: 2.0,
+                        width: 3.0,
+                        height: 4.0,
+                        top: 0xFF00_0000,
+                        bottom: 0xFF00_0000,
+                    })],
+                );
+                overlay::paint(
+                    overlay::Layer::OverBars,
+                    &[
+                        screen::Element::Picture(screen::PictureElement {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 8.0,
+                            height: 8.0,
+                            texture: 0,
+                            u: 0.0,
+                            v: 0.0,
+                            u_width: 2.0,
+                            v_height: 2.0,
+                            tint: 0xFFFF_FFFF,
+                        }),
+                        screen::Element::Fill(screen::FillElement {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                            top: 0,
+                            bottom: 0,
+                        }),
+                    ],
+                );
+                overlay::paint_world(&[overlay::WorldElement::Label(overlay::WorldLabel {
+                    x: 1.0,
+                    y: 65.0,
+                    z: 1.0,
+                    text: "home".into(),
+                    color: 0xFFFF_FFFF,
+                    shadow: true,
+                    scale: 1.0,
+                    offset_y: -4.0,
+                })]);
+                let uploaded = overlay::upload_texture(0, 2, 2, &[255; 16]).is_ok();
+                let refused = overlay::upload_texture(7, 2, 2, &[255; 16]).is_err();
+                let size = overlay::get_size().map(|s| (s.width, s.height));
+                let state = overlay::get_hud_state().map(|h| (h.screen_open, h.debug, h.hidden));
+                let bars = hud::get_bars().map(|b| (b.food.len(), b.health.len()));
+                let columns = world::get_chunk_columns(0, 0, 60).map(|c| c.y.len());
+                overlay::clear(overlay::Layer::UnderBars);
+                Ok(Some(format!(
+                    "overlay {uploaded} {refused} size {size:?} hud {state:?} bars {bars:?} seed {:?} fov {:?} columns {columns:?} width {}",
+                    game::get_seed(),
+                    game::get_fov(),
+                    overlay::get_text_width("ab"),
                 )))
             }
             "giveitem" => {
