@@ -23,10 +23,13 @@ pub use bindings::horizon::mods::{
     chat_decorate::{Picture as ChatPicture, Region as ChatRegion, Source as ChatSource},
     entity::{Entity as WorldEntity, EntityKind, Face},
     game::{Clock, FoodStats, Player},
-    game::{Health, Session},
+    game::{Health, InputState, Session},
     hud::{BarIcon, Bars},
     hud::{Corner, Line},
-    inventory::{Crafting, Food, ItemStack as InventoryStack, PlayerInventory, Stack},
+    inventory::{
+        Crafting, Food, ItemStack as InventoryStack, PlayerInventory, Slot as InventorySlot, Stack,
+        Tool as InventoryTool,
+    },
     items::Item,
     keys::KeyEvent,
     overlay::{HudState, Layer as OverlayLayer, WorldElement},
@@ -130,6 +133,11 @@ pub struct Snapshot {
     pub hotbar_food: Vec<Option<Food>>,
     /// Blocks broken since the previous tick (`world-read`, API 0.1.2).
     pub broken: Vec<BlockBroken>,
+    /// The hotbar's tools, the inventory's slots and the player's keys
+    /// (API 0.1.16).
+    pub tools: Vec<Option<InventoryTool>>,
+    pub slots: Vec<InventorySlot>,
+    pub input: Option<InputState>,
     /// Chat messages received since the last tick (`chat`, API 0.1.15);
     /// filled by `Mods`.
     pub chat: Vec<ChatMessage>,
@@ -244,6 +252,9 @@ pub struct Ui {
     pub text_widths: Option<Arc<Vec<f32>>>,
     /// The player is in creative in a world this game runs: `give` works.
     pub can_give: bool,
+    /// Items may be moved in the player's inventory (a world this game
+    /// runs): `move-item` works (API 0.1.16).
+    pub can_move: bool,
     /// What the HUD is doing, and the bars the game drew (API 0.1.7).
     pub hud: Option<HudState>,
     pub bars: Option<Bars>,
@@ -272,6 +283,7 @@ impl Default for Ui {
             },
             slots: Vec::new(),
             text_widths: None,
+            can_move: false,
             can_give: false,
             hud: None,
             bars: None,
@@ -460,6 +472,10 @@ pub enum Output {
     /// `inventory.give` (API 0.1.5): put `count` of the item in the
     /// player's inventory, dropping what does not fit.
     Give { id: String, count: u32 },
+    /// `inventory.move-item` (API 0.1.16): move or swap two slots.
+    MoveItem { from: u32, to: u32 },
+    /// `hud.show-action-bar` (API 0.1.16).
+    ActionBar { text: String, color: u32 },
 }
 
 /// A mod's text panel, drawn every frame until it changes.
@@ -572,6 +588,8 @@ struct State {
     overlay_textures: Vec<Texture>,
     /// What the mod has asked to give in the current call.
     given: u32,
+    /// Moves queued in the current call (API 0.1.16).
+    moved: u32,
     /// The next screen id this mod gets.
     next_screen: u32,
     /// The mod's key bindings (`keys`).
@@ -785,6 +803,7 @@ impl Mods {
             can_give: m.capabilities.contains(&crate::Capability::InventoryEdit),
             can_edit_entities: m.capabilities.contains(&crate::Capability::EntityEdit),
             given: 0,
+            moved: 0,
             new_sprites: Vec::new(),
             new_particles: Vec::new(),
             spawned: 0,
@@ -1257,6 +1276,7 @@ impl Mods {
         data.breaking.clear();
         data.worn = 0;
         data.given = 0;
+        data.moved = 0;
         data.spawned = 0;
         // An average over about the last 64 calls.
         entry.cost = (entry.cost * 63 + started.elapsed()) / 64;
@@ -1476,6 +1496,9 @@ impl game::Host for State {
     fn get_session(&mut self) -> Option<Session> {
         self.snapshot.session
     }
+    fn get_input_state(&mut self) -> Option<InputState> {
+        self.snapshot.input
+    }
     fn get_health(&mut self) -> Option<Health> {
         self.snapshot.health
     }
@@ -1544,6 +1567,35 @@ impl inventory::Host for State {
             .as_ref()
             .and_then(|f| f.get(&id))
             .is_some_and(|(_, harmful)| *harmful)
+    }
+    fn get_tools(&mut self) -> Vec<Option<InventoryTool>> {
+        self.snapshot.tools.clone()
+    }
+    fn get_slots(&mut self) -> Vec<InventorySlot> {
+        self.snapshot.slots.clone()
+    }
+    fn move_item(&mut self, from: u32, to: u32) -> bool {
+        // WIT's `source-slot` and `target-slot`.
+        let filled = |i: u32| {
+            self.snapshot
+                .slots
+                .iter()
+                .any(|s| s.index == i && !s.id.is_empty())
+        };
+        let ok = self.can_give
+            && self.ui.can_move
+            && self.moved < 64
+            && from != to
+            && from <= 40
+            && to <= 40
+            && !(36..40).contains(&from)
+            && !(36..40).contains(&to)
+            && filled(from);
+        if ok {
+            self.moved += 1;
+            self.out.push(Output::MoveItem { from, to });
+        }
+        ok
     }
     fn get_offhand(&mut self) -> Option<Stack> {
         self.snapshot.offhand.clone()
@@ -2339,6 +2391,19 @@ impl hud::Host for State {
     }
     fn clear(&mut self) {
         self.panel = None;
+    }
+    fn show_action_bar(&mut self, text: String, color: u32) {
+        let shown = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::ActionBar { .. }))
+            .count();
+        if !text.is_empty() && shown < CHAT_PER_CALL {
+            self.out.push(Output::ActionBar {
+                text: clip(text),
+                color: color & 0xFF_FFFF,
+            });
+        }
     }
     fn get_bars(&mut self) -> Option<Bars> {
         self.ui.bars.clone()

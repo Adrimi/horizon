@@ -61,6 +61,7 @@ impl Mod for Guest {
             "lightfx",
             "texfx",
             "said",
+            "toolfx",
             "resfx",
             "save",
             "load",
@@ -670,6 +671,32 @@ impl Mod for Guest {
                     inventory::get_offhand().is_some(),
                     keys::is_down("key.keyboard.left.shift"),
                     tooltip::get_hovered().map_or("none".into(), |h| h.item),
+                )))
+            }
+            "toolfx" => {
+                // Tools, slots, input, moving items, the action bar.
+                let tools: Vec<String> = inventory::get_tools()
+                    .iter()
+                    .map(|t| {
+                        t.as_ref().map_or("-".to_owned(), |t| {
+                            format!("{}:{}:{}", t.id, t.damage_per_block, t.enchantments.len())
+                        })
+                    })
+                    .collect();
+                let slots = inventory::get_slots();
+                let input = game::get_input_state().map(|i| (i.sneaking, i.attacking));
+                let moved = match args.split_once(' ') {
+                    Some((a, b)) => Some(inventory::move_item(
+                        a.parse().map_err(|_| "slot")?,
+                        b.parse().map_err(|_| "slot")?,
+                    )),
+                    None => None,
+                };
+                hud::show_action_bar("Tool swap mode: on", 0x55FF55);
+                Ok(Some(format!(
+                    "tools {} slots {} input {input:?} moved {moved:?}",
+                    tools.join(","),
+                    slots.len()
                 )))
             }
             "giveitem" => {

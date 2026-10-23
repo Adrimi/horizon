@@ -470,6 +470,18 @@ impl Game<'_> {
             });
         }
         if inventory && self.player.is_some() {
+            snapshot.tools = (0..9).map(|i| self.mod_tool(i)).collect();
+            snapshot.slots = self.mod_slots();
+        }
+        if mods.uses(Capability::GameRead)
+            && let Some(p) = self.player.as_ref()
+        {
+            snapshot.input = Some(horizon_mods::InputState {
+                sneaking: p.pose == horizon_client::pose::Pose::Crouching,
+                attacking: self.left,
+            });
+        }
+        if inventory && self.player.is_some() {
             snapshot.inventory = Some(self.mod_inventory());
             snapshot.crafting = self.mod_crafting();
         }
@@ -1032,6 +1044,15 @@ impl Game<'_> {
                     }
                     continue;
                 }
+                Output::MoveItem { from, to } => {
+                    self.mod_move_item(from as usize, to as usize);
+                    continue;
+                }
+                Output::ActionBar { text, color } => {
+                    self.titles
+                        .set_overlay(Text::literal(text).with_color(color), false);
+                    continue;
+                }
                 Output::Give { id, count } => {
                     self.mod_give(&id, count);
                     continue;
@@ -1182,6 +1203,7 @@ impl Game<'_> {
             slots,
             text_widths: Some(widths),
             can_give: self.creative && self.remote.is_none() && self.player.is_some(),
+            can_move: self.remote.is_none() && self.player.is_some(),
             hud: self.player.is_some().then_some(horizon_mods::HudState {
                 screen_open: self.screen != Screen::Playing,
                 debug: self.debug,
@@ -2144,6 +2166,65 @@ impl Game<'_> {
                 .as_ref()
                 .map_or_else(String::new, |extra| format!("{extra:?}")),
         }
+    }
+    /// The tool in hotbar slot `slot` (`inventory.get-tools`, API 0.1.16).
+    fn mod_tool(&self, slot: usize) -> Option<horizon_mods::InventoryTool> {
+        let stack = self.stack_in(slot)?;
+        let damage_per_block = self.res.items().get(&stack.item)?.tool_damage_per_block?;
+        Some(horizon_mods::InventoryTool {
+            id: stack.item.to_string(),
+            has_tool: true,
+            damage_per_block,
+            enchantments: stack
+                .enchantments()
+                .iter()
+                .map(|(id, level)| (id.to_string(), *level))
+                .collect(),
+        })
+    }
+    /// Every slot of the inventory by its index (`inventory.get-slots`):
+    /// 0 to 35, the armour from the feet up at 36 to 39, the off hand at 40.
+    fn mod_slots(&self) -> Vec<horizon_mods::InventorySlot> {
+        let items = self.res.items();
+        let slot = |index: usize, stack: Option<&horizon_client::items::ItemStack>| {
+            horizon_mods::InventorySlot {
+                index: index as u32,
+                id: stack.map_or_else(String::new, |s| s.item.to_string()),
+                count: stack.map_or(0, |s| s.count),
+                damage: stack.map_or(0, |s| s.damage),
+                max_damage: stack
+                    .and_then(|s| items.get(&s.item))
+                    .map_or(0, |i| i.max_damage),
+            }
+        };
+        let mut out: Vec<_> = (0..36)
+            .map(|i| slot(i, self.inventory.get(i).and_then(|s| s.as_ref())))
+            .collect();
+        // `armor` runs head first; the slots run from the feet.
+        for i in 0..4 {
+            out.push(slot(36 + i, self.armor[3 - i].as_ref()));
+        }
+        out.push(slot(40, self.offhand.as_ref()));
+        out
+    }
+    /// `inventory.move-item`: moves or swaps two slots of the inventory, in a
+    /// world this game runs.
+    fn mod_move_item(&mut self, from: usize, to: usize) {
+        let allowed = |i: usize| i < 36 || i == 40;
+        if self.remote.is_some()
+            || self.player.is_none()
+            || from == to
+            || !allowed(from)
+            || !allowed(to)
+        {
+            return;
+        }
+        let moved = self.stack_in_mut(from).take();
+        if moved.is_none() {
+            return;
+        }
+        let there = std::mem::replace(self.stack_in_mut(to), moved);
+        *self.stack_in_mut(from) = there;
     }
     fn mod_inventory(&self) -> horizon_mods::PlayerInventory {
         let stack =

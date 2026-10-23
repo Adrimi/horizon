@@ -1253,6 +1253,65 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
 }
 
 #[test]
+fn the_tool_slot_input_and_action_bar_apis() {
+    use horizon_mods::{InputState, InventorySlot, InventoryTool, Output, Snapshot, Ui};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let slot = |index: u32, id: &str| InventorySlot {
+        index,
+        id: id.to_owned(),
+        count: u32::from(!id.is_empty()),
+        damage: 0,
+        max_damage: 0,
+    };
+    mods.set_snapshot(Snapshot {
+        tools: vec![
+            Some(InventoryTool {
+                id: "minecraft:iron_pickaxe".into(),
+                has_tool: true,
+                damage_per_block: 1,
+                enchantments: vec![("minecraft:efficiency".into(), 3)],
+            }),
+            None,
+        ],
+        slots: vec![slot(0, "minecraft:iron_pickaxe"), slot(1, ""), slot(9, "")],
+        input: Some(InputState {
+            sneaking: true,
+            attacking: false,
+        }),
+        ..player()
+    });
+    mods.set_ui(Ui {
+        can_move: true,
+        ..Ui::default()
+    });
+    assert!(mods.command("toolfx 0 9"));
+    let out = mods.drain();
+    assert_eq!(
+        out,
+        [
+            Output::MoveItem { from: 0, to: 9 },
+            Output::ActionBar {
+                text: "Tool swap mode: on".into(),
+                color: 0x55FF55,
+            },
+            feedback(
+                "tools minecraft:iron_pickaxe:1:1,- slots 3 input Some((true, false)) moved Some(true)"
+            ),
+        ]
+    );
+    // An empty source, the armour and the same slot are refused.
+    for args in ["toolfx 1 9", "toolfx 0 36", "toolfx 0 0", "toolfx 41 0"] {
+        assert!(mods.command(args));
+        assert!(
+            mods.drain()
+                .iter()
+                .all(|o| !matches!(o, Output::MoveItem { .. })),
+            "{args}"
+        );
+    }
+}
+
+#[test]
 fn the_chat_api_lists_messages_and_takes_a_picture() {
     use horizon_mods::{ChatMessage, ChatSender, ChatSource};
     let mut mods = load("horizon_mods_test_guest.hmod");

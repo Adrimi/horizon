@@ -16,8 +16,6 @@ again restores vanilla's behaviour completely.
 | Minimap colours, tiles and image | `crates/horizon-client/src/minimap.rs` |
 | Dynamic lights: source levels and packing | `crates/horizon-client/src/dynamic_lights.rs` (unit tested); sources in `game/dynamic_lights.rs`, shaders in `terrain.wgsl` and `entity.wgsl` |
 | Connected textures: rules, the 47-tile table and tile choice | `crates/horizon-client/src/ctm.rs` (unit tested); mesher hook in `mesher.rs` |
-| Falling leaves: block ticks, spawn odds and colours | `crates/horizon-client/src/animate_tick.rs` (unit tested) |
-| Leaf particle: texture, fall, landing and lingering | `crates/horizon-client/src/particles.rs` (unit tested) |
 | Particle rain: the weather of a column, the density and the storm's haze | `crates/horizon-client/src/rain.rs` (unit tested) |
 | Weather particles: textures, fall, splash and ripples | `crates/horizon-client/src/particles.rs` (unit tested) |
 | Reconnect policy and backoff | `crates/horizon-client/src/reconnect.rs` |
@@ -135,27 +133,6 @@ Horizon category in Controls, and adding one would put a non-vanilla mapping int
 - Not implemented: `innerSeams`, `orient`, `ctm.N`, `randomLoops`, `symmetry`
   and the biome/height/size/health conditions; unsupported keys are ignored or
   the file is skipped with a log line, never fatal.
-
-### Falling leaves (`fallingLeaves`, default off; `fallingLeavesAmount` 2, 4, 8 or 16)
-- Leaf blocks with air under them now and then drop a leaf particle, in the
-  same random block ticks vanilla's `animateTick` samples around the player
-  (16 blocks, 32 when the client's particle distance allows): oak, birch,
-  jungle, acacia, dark oak and mangrove, and spruce, azalea and flowering
-  azalea, which vanilla's leaves never drop.
-- The leaf follows vanilla's tinted-leaf motion: it sinks slowly, sways and
-  turns on its way down. Where it lands it lies still for 3 seconds and then
-  vanishes, instead of disappearing on the tick it touches the ground.
-- Colour: the block's foliage colour at its position (the biome tint Oak,
-  Birch etc. use), or the fixed evergreen colour for spruce and the azaleas'
-  own average colours. Cherry and pale oak are left to vanilla's own petals
-  and pale oak leaves, so nothing is drawn twice.
-- `fallingLeavesAmount` multiplies vanilla's chance (1 leaf in 100 block ticks
-  per oak-family leaf; the evergreens get their first leaf from Horizon). The
-  game's Particles setting scales it: **Decreased** a third, **Minimal** none.
-  With the extra off, or on Minimal, no new particle is spawned at all.
-- The leaf uses its own 16x16 texture, generated in code and packed into the HUD
-  atlas (`particles::horizon_leaf_texture`), so it is not a copy of a vanilla
-  particle texture; it is white and the particle's tint gives it the colour.
 
 ### Particle rain (`particleRain`, default off; `particleRainAmount` 1, 2, 4 or 8)
 - The weather becomes particles on top of vanilla's rain columns: drops of

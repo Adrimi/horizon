@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.15;
+package horizon:mods@0.1.16;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -19,6 +19,13 @@ interface log {
 
 /// Capability `game-read`: the local player and the world clock.
 interface game {
+    /// What the player's keys do now (API 0.1.16).
+    record input-state {
+        /// The player is sneaking.
+        sneaking: bool,
+        /// The attack button (the left mouse button) is held.
+        attacking: bool,
+    }
     record player {
         x: f64,
         y: f64,
@@ -39,6 +46,9 @@ interface game {
     }
     /// None on the title screen.
     get-player: func() -> option<player>;
+    /// The player's sneaking and attack button; none outside a world (API
+    /// 0.1.16).
+    get-input-state: func() -> option<input-state>;
     get-clock: func() -> option<clock>;
     /// Hunger as `FoodData` keeps it (API 0.1.2).
     record food-stats {
@@ -171,6 +181,11 @@ interface hud {
     }
     set-panel: func(corner: corner, lines: list<line>);
     clear: func();
+    /// Shows a line over the hotbar, as vanilla's action bar does (API
+    /// 0.1.16); it fades after about three seconds, and a new one replaces
+    /// it. `color` is 0xRRGGBB; the text may have `§` formatting. An empty
+    /// text does nothing.
+    show-action-bar: func(text: string, color: u32);
     /// One icon of a status bar as the game drew it (API 0.1.7).
     record bar-icon {
         /// The top left corner in GUI pixels, after the shaking of the bar.
@@ -342,6 +357,45 @@ interface inventory {
     get-harmful-food: func(id: string) -> bool;
     /// The stack in the off hand; none when it is empty (API 0.1.11).
     get-offhand: func() -> option<stack>;
+    /// An item of the hotbar as a tool (API 0.1.16).
+    record tool {
+        /// `minecraft:iron_pickaxe`, ...
+        id: string,
+        /// Always true: only items with a `minecraft:tool` component are
+        /// listed (`ItemStack.has(DataComponents.TOOL)`).
+        has-tool: bool,
+        /// `Tool.damagePerBlock`: the wear one block it breaks gives it.
+        damage-per-block: u32,
+        /// Its enchantments: id (`minecraft:efficiency`) and level.
+        enchantments: list<tuple<string, u32>>,
+    }
+    /// The tool in each of the hotbar's slots 0 to 8 (the same indices as
+    /// `get-hotbar`); none for an empty slot and for an item without a
+    /// `minecraft:tool` component (a block, food, ...) (API 0.1.16).
+    get-tools: func() -> list<option<tool>>;
+    /// A slot of the player's inventory (API 0.1.16).
+    record slot {
+        /// 0 to 8 the hotbar, 9 to 35 the rest, 36 to 39 the armour (feet,
+        /// legs, chest, head), 40 the off hand.
+        index: u32,
+        /// The item; an empty string for an empty slot.
+        id: string,
+        count: u32,
+        /// The durability used.
+        damage: u32,
+        /// 0 for an item that does not wear out.
+        max-damage: u32,
+    }
+    /// All 41 slots of the player's inventory, in the order of their index;
+    /// empty outside a world (API 0.1.16).
+    get-slots: func() -> list<slot>;
+    /// Capability `inventory-edit` (API 0.1.16): moves the item of slot
+    /// `source-slot` to slot `target-slot` (hotbar, the rest of the inventory, 9 to 35, or
+    /// the off hand, 40): into an empty slot, or swapping with what is
+    /// there. True when the game will do it before its next tick; false
+    /// without the capability, for a slot that is out of range, an armour
+    /// slot, an empty source slot, or in a world another game runs.
+    move-item: func(source-slot: u32, target-slot: u32) -> bool;
 }
 
 /// Capability `hotbar`: changing the selected slot, as the number keys do
