@@ -1,12 +1,7 @@
 //! Shared nearest-sampled sprite array for block and item textures.
 use crate::Result;
 use horizon_assets::animation::{AnimationClip, AnimationMetadata};
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
 
 #[derive(Clone)]
 pub struct SpriteAnimation {
