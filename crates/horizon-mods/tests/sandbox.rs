@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules", "chat-decorate"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules", "chat-decorate", "players"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -1253,6 +1253,52 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
 }
 
 #[test]
+fn chat_decorations_and_the_player_list() {
+    use horizon_mods::{ChatMessage, ChatPlace, ChatSender, ListedPlayer, Snapshot};
+    use std::sync::Arc;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let steve = ChatMessage {
+        id: 9,
+        text: "<Steve> deco".into(),
+        sender: Some(ChatSender {
+            name: "Steve".into(),
+            uuid: "1".repeat(32),
+        }),
+    };
+    let decoration = mods.chat_message(steve).expect("a decoration");
+    assert_eq!(decoration.gap, Some(1));
+    assert!(matches!(decoration.place, ChatPlace::Text(8)));
+    assert_eq!(decoration.picture.regions.len(), 2);
+    assert_eq!(decoration.styles.len(), 1);
+    assert_eq!(decoration.styles[0].color, 0x40_4040);
+    // The player list comes with the snapshot.
+    assert!(mods.command("playersfx"));
+    assert_eq!(mods.drain(), [feedback("")]);
+    mods.set_snapshot(Snapshot {
+        players: Some(Arc::new(vec![
+            ListedPlayer {
+                name: "Steve".into(),
+                display_name: "[Mod] Steve".into(),
+                uuid: "1".repeat(32),
+            },
+            ListedPlayer {
+                name: "Alex".into(),
+                display_name: String::new(),
+                uuid: "2".repeat(32),
+            },
+        ])),
+        ..player()
+    });
+    assert!(mods.command("playersfx"));
+    let line = format!(
+        "Steve/[Mod] Steve/{},Alex//{}",
+        "1".repeat(32),
+        "2".repeat(32)
+    );
+    assert_eq!(mods.drain(), [feedback(&line)]);
+}
+
+#[test]
 fn the_tool_slot_input_and_action_bar_apis() {
     use horizon_mods::{InputState, InventorySlot, InventoryTool, Output, Snapshot, Ui};
     let mut mods = load("horizon_mods_test_guest.hmod");
@@ -1325,8 +1371,10 @@ fn the_chat_api_lists_messages_and_takes_a_picture() {
     };
     // The mod sets a picture in the hook, for the message it is told of.
     let picture = mods.chat_message(from_steve).expect("a picture");
-    assert!(matches!(picture.source, ChatSource::SenderSkin));
-    assert_eq!((picture.width, picture.height), (8, 8));
+    assert!(matches!(picture.picture.source, ChatSource::SenderSkin));
+    assert_eq!((picture.picture.width, picture.picture.height), (8, 8));
+    // `set-picture` leaves a gap of 2 and the start of the line.
+    assert_eq!(picture.gap, None);
     assert!(mods.command("said"));
     assert_eq!(mods.drain(), [feedback("4:<Steve> pic please:Steve")]);
     // A system message gets none, and the list in the hook ends with it.

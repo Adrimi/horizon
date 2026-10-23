@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.17;
+package horizon:mods@0.1.18;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -163,6 +163,63 @@ interface chat-decorate {
     /// of all its lines is indented by `width + 2` pixels. The first mod to
     /// give a picture for a message wins.
     set-picture: func(id: u64, picture: option<picture>);
+    /// Where a picture stands (API 0.1.18).
+    variant place {
+        /// At the start of the first line; the text of every line of the
+        /// message is indented by the picture's width and the gap.
+        line-start,
+        /// Before this character of the message's text (counted from 0 in
+        /// the text `chat.get-messages` gives): the first line is cut
+        /// there, the picture stands between the parts and the rest of the
+        /// line follows it. A number past the first line puts the picture
+        /// at its end.
+        text(u32),
+    }
+    /// How one rectangle of a picture is drawn (API 0.1.18).
+    record style {
+        /// Offset on the screen, in GUI pixels, from the picture's place.
+        offset-x: s32,
+        offset-y: s32,
+        /// Size on the screen, in GUI pixels; 0 is the picture's own size.
+        width: u32,
+        height: u32,
+        /// 0xRRGGBB multiplied with the texture (a shadow is a dark one);
+        /// 0 is the line's colour. The line's fading applies to it.
+        color: u32,
+    }
+    /// A picture with all of how it is drawn (API 0.1.18).
+    record decoration {
+        picture: picture,
+        /// The room left after the picture, in GUI pixels; none is 2, as
+        /// `set-picture` leaves it, and 0 lets the text touch it.
+        gap: option<u32>,
+        place: place,
+        /// How to draw each rectangle of `picture`, by index, in order (a
+        /// shadow is the first rectangle again, offset and dark); missing
+        /// entries draw a rectangle as it is.
+        styles: list<style>,
+    }
+    /// The picture of the message with this id, with all of how it is drawn,
+    /// or none for no picture; `set-picture` is this with a gap of 2, the
+    /// start of the line and no styles. Skin pictures of a player who hangs
+    /// upside down are drawn upside down (API 0.1.18).
+    set-decoration: func(id: u64, decoration: option<decoration>);
+}
+
+/// Capability `players`: the players of the world, from the player list (API
+/// 0.1.18).
+interface players {
+    record player {
+        /// Their profile name.
+        name: string,
+        /// The name the player list shows (a team's prefix, a nickname);
+        /// empty when it is the profile name.
+        display-name: string,
+        /// Their UUID as 32 hexadecimal characters, no hyphens.
+        uuid: string,
+    }
+    /// The players in the player list; empty outside a world.
+    get-players: func() -> list<player>;
 }
 
 /// Capability `hud`: one panel of text lines per mod, drawn by the game
@@ -1510,6 +1567,7 @@ world horizon-mod {
     import debug;
     import lighting;
     import chat-decorate;
+    import players;
     import resources;
     import texture-rules;
     import %world;

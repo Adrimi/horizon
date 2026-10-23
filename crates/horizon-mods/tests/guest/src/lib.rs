@@ -7,7 +7,7 @@
 //! a call.
 use horizon_mod_sdk::{
     Mod, Registration, atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys,
-    lighting, chat_decorate, overlay, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
+    lighting, chat_decorate, overlay, players, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
 };
 
 struct Guest {
@@ -61,6 +61,7 @@ impl Mod for Guest {
             "lightfx",
             "texfx",
             "said",
+            "playersfx",
             "toolfx",
             "resfx",
             "save",
@@ -93,6 +94,37 @@ impl Mod for Guest {
             .map(|m| format!("{}:{}:{}", m.id, m.text, m.sender.as_ref().map_or("-", |s| &s.name)))
             .collect::<Vec<_>>()
             .join("|");
+        if text.contains("deco")
+            && let Some(m) = messages.last()
+        {
+            let region = |x| chat_decorate::Region {
+                x,
+                y: 8,
+                width: 8,
+                height: 8,
+            };
+            chat_decorate::set_decoration(
+                m.id,
+                Some(&chat_decorate::Decoration {
+                    picture: chat_decorate::Picture {
+                        source: chat_decorate::Source::SenderSkin,
+                        regions: vec![region(8), region(40)],
+                        width: 8,
+                        height: 8,
+                    },
+                    gap: Some(1),
+                    place: chat_decorate::Place::Text(8),
+                    styles: vec![chat_decorate::Style {
+                        offset_x: 1,
+                        offset_y: 0,
+                        width: 0,
+                        height: 0,
+                        color: 0x40_4040,
+                    }],
+                }),
+            );
+            return;
+        }
         if text.contains("pic")
             && let Some(m) = messages.last()
             && m.sender.is_some()
@@ -248,6 +280,13 @@ impl Mod for Guest {
                 )))
             }
             "said" => Ok(Some(self.said.clone())),
+            "playersfx" => Ok(Some(
+                players::get_players()
+                    .iter()
+                    .map(|p| format!("{}/{}/{}", p.name, p.display_name, p.uuid))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )),
             "texfx" => {
                 // Stone shows a red and a blue tile by turns along its faces;
                 // `off` removes them.

@@ -130,6 +130,8 @@ pub enum Capability {
     ResourceRead,
     /// A picture before chat messages (API 0.1.15).
     ChatDecorate,
+    /// The player list (API 0.1.18).
+    Players,
     /// Pictures and rules for the faces of blocks (API 0.1.14).
     TextureRules,
     /// Marks the game draws on its slots (API 0.1.10): no interface of its
@@ -143,7 +145,7 @@ pub enum Capability {
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 30] = [
+    pub const ALL: [Capability; 31] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -172,6 +174,7 @@ impl Capability {
         Capability::Lighting,
         Capability::ResourceRead,
         Capability::ChatDecorate,
+        Capability::Players,
         Capability::TextureRules,
         Capability::Registries,
     ];
@@ -206,6 +209,7 @@ impl Capability {
             Capability::Lighting => "lighting",
             Capability::ResourceRead => "resources",
             Capability::ChatDecorate => "chat-decorate",
+            Capability::Players => "players",
             Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
         }
@@ -241,6 +245,7 @@ impl Capability {
             Capability::Lighting => "add light to the world",
             Capability::ResourceRead => "read the files of your resource packs",
             Capability::ChatDecorate => "draw pictures in your chat",
+            Capability::Players => "see who is playing",
             Capability::TextureRules => "change the textures of blocks",
             Capability::Registries => "add blocks and items to your worlds",
         }
@@ -305,6 +310,7 @@ impl fmt::Display for Capability {
             Capability::Lighting => "lighting",
             Capability::ResourceRead => "resource-read",
             Capability::ChatDecorate => "chat-decorate",
+            Capability::Players => "players",
             Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
         };

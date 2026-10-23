@@ -20,7 +20,10 @@ mod bindings {
 pub use bindings::horizon::mods::{
     atmosphere::Haze,
     chat::{Message as ChatMessage, Sender as ChatSender},
-    chat_decorate::{Picture as ChatPicture, Region as ChatRegion, Source as ChatSource},
+    chat_decorate::{
+        Decoration as ChatDecoration, Picture as ChatPicture, Place as ChatPlace,
+        Region as ChatRegion, Source as ChatSource, Style as ChatStyle,
+    },
     entity::{Entity as WorldEntity, EntityKind, Face},
     game::{Clock, FoodStats, Player},
     game::{Health, InputState, Session},
@@ -37,6 +40,7 @@ pub use bindings::horizon::mods::{
         Color as ParticleColor, Fade as ParticleFade, Landing, Options as ParticleOptions,
         SizeCurve as ParticleSizeCurve,
     },
+    players::Player as ListedPlayer,
     recipes::{Kind as RecipeKind, Recipe},
     screen::{
         Area, Element as ScreenElement, Event as ScreenEvent, GameScreen, ImageShape, KeyPress,
@@ -57,8 +61,8 @@ use bindings::{
     exports::horizon::mods::events::Registration,
     horizon::mods::{
         atmosphere, chat, chat_decorate, debug, entity, game, hotbar, hud, inventory, items, keys,
-        lighting, log as mod_log, overlay, particles, recipes, resources, screen, settings, slots,
-        storage, target, texture_rules, tooltip, weather, world,
+        lighting, log as mod_log, overlay, particles, players, recipes, resources, screen,
+        settings, slots, storage, target, texture_rules, tooltip, weather, world,
     },
 };
 
@@ -141,6 +145,8 @@ pub struct Snapshot {
     /// Chat messages received since the last tick (`chat`, API 0.1.15);
     /// filled by `Mods`.
     pub chat: Vec<ChatMessage>,
+    /// The player list (`players`, API 0.1.18).
+    pub players: Option<Arc<Vec<ListedPlayer>>>,
     /// The light each block gives off, by id, for the blocks that give
     /// any (`lighting`, API 0.1.13).
     pub emissions: Option<Arc<HashMap<String, u8>>>,
@@ -564,7 +570,7 @@ struct State {
     watched_ticks: Vec<String>,
     /// The pictures the mod set for chat messages, by message id (API
     /// 0.1.15).
-    chat_pictures: Vec<(u64, ChatPicture)>,
+    chat_pictures: Vec<(u64, ChatDecoration)>,
     /// The resource folder `resources` reads (shared with `Mods`).
     resource_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// The pictures and rules the mod gave for faces (API 0.1.14), and how
@@ -1323,7 +1329,7 @@ impl Mods {
     /// Tells the mods of a chat message before it joins the chat: it is on
     /// `chat.get-messages` (last) for the `chat` hook and the next tick.
     /// Returns the picture a mod gave it (`chat-decorate`, API 0.1.15).
-    pub fn chat_message(&mut self, message: ChatMessage) -> Option<ChatPicture> {
+    pub fn chat_message(&mut self, message: ChatMessage) -> Option<ChatDecoration> {
         let id = message.id;
         let text = message.text.clone();
         self.chat_pending.push(message.clone());
@@ -1949,17 +1955,43 @@ impl texture_rules::Host for State {
 }
 impl chat_decorate::Host for State {
     fn set_picture(&mut self, id: u64, picture: Option<ChatPicture>) {
+        let decoration = picture.map(|picture| ChatDecoration {
+            picture,
+            gap: None,
+            place: ChatPlace::LineStart,
+            styles: Vec::new(),
+        });
+        self.set_decoration(id, decoration);
+    }
+    fn set_decoration(&mut self, id: u64, decoration: Option<ChatDecoration>) {
         self.chat_pictures.retain(|(i, _)| *i != id);
-        let Some(mut picture) = picture else {
+        let Some(mut decoration) = decoration else {
             return;
         };
+        let picture = &mut decoration.picture;
         picture.width = picture.width.clamp(1, 64);
         picture.height = picture.height.clamp(1, 64);
         picture.regions.truncate(8);
+        decoration.gap = decoration.gap.map(|g| g.min(64));
+        decoration.styles.truncate(8);
+        for style in &mut decoration.styles {
+            style.offset_x = style.offset_x.clamp(-64, 64);
+            style.offset_y = style.offset_y.clamp(-64, 64);
+            style.width = style.width.min(64);
+            style.height = style.height.min(64);
+        }
         if self.chat_pictures.len() >= 16 {
             self.chat_pictures.remove(0);
         }
-        self.chat_pictures.push((id, picture));
+        self.chat_pictures.push((id, decoration));
+    }
+}
+impl players::Host for State {
+    fn get_players(&mut self) -> Vec<ListedPlayer> {
+        self.snapshot
+            .players
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.as_ref().clone())
     }
 }
 impl lighting::Host for State {
