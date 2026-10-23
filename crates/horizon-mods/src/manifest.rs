@@ -126,6 +126,10 @@ pub enum Capability {
     Debug,
     /// Light sources the mod gives the world (API 0.1.13).
     Lighting,
+    /// The files of the resource packs (API 0.1.14).
+    ResourceRead,
+    /// Pictures and rules for the faces of blocks (API 0.1.14).
+    TextureRules,
     /// Marks the game draws on its slots (API 0.1.10): no interface of its
     /// own, `slots.set-marks` does nothing without it.
     SlotDecorate,
@@ -137,7 +141,7 @@ pub enum Capability {
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 27] = [
+    pub const ALL: [Capability; 29] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -164,6 +168,8 @@ impl Capability {
         Capability::Tooltip,
         Capability::Debug,
         Capability::Lighting,
+        Capability::ResourceRead,
+        Capability::TextureRules,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -195,6 +201,8 @@ impl Capability {
             Capability::Tooltip => "tooltip",
             Capability::Debug => "debug",
             Capability::Lighting => "lighting",
+            Capability::ResourceRead => "resources",
+            Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
         }
     }
@@ -227,6 +235,8 @@ impl Capability {
             Capability::Tooltip => "add to the tooltips of items",
             Capability::Debug => "add lines to the debug screen",
             Capability::Lighting => "add light to the world",
+            Capability::ResourceRead => "read the files of your resource packs",
+            Capability::TextureRules => "change the textures of blocks",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -288,6 +298,8 @@ impl fmt::Display for Capability {
             Capability::Tooltip => "tooltip",
             Capability::Debug => "debug",
             Capability::Lighting => "lighting",
+            Capability::ResourceRead => "resource-read",
+            Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
         };
         f.write_str(name)

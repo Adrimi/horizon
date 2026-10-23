@@ -7,7 +7,7 @@
 //! a call.
 use horizon_mod_sdk::{
     Mod, Registration, atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys,
-    lighting, overlay, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
+    lighting, overlay, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
 };
 
 struct Guest {
@@ -57,6 +57,8 @@ impl Mod for Guest {
             "foodfx",
             "ticks",
             "lightfx",
+            "texfx",
+            "resfx",
             "save",
             "load",
             "save_key",
@@ -197,6 +199,46 @@ impl Mod for Guest {
                     world::damage_held(n),
                     world::damage_held(n)
                 )))
+            }
+            "resfx" => {
+                let spaces = resources::namespaces();
+                let files = resources::list_files("minecraft", args);
+                let first = files.first().cloned().unwrap_or_default();
+                let size = resources::read_file("minecraft", &first).map(|b| b.len());
+                let escape = resources::read_file("minecraft", "../x").is_some();
+                Ok(Some(format!(
+                    "{} namespaces, {} files, first {first} {size:?}, escape {escape}",
+                    spaces.join(","),
+                    files.len()
+                )))
+            }
+            "texfx" => {
+                // Stone shows a red and a blue tile by turns along its faces;
+                // `off` removes them.
+                if args == "off" {
+                    texture_rules::clear_rules();
+                    return Ok(Some("cleared".into()));
+                }
+                texture_rules::upload_sprite("red", include_bytes!("red.png"))?;
+                texture_rules::upload_sprite("blue", include_bytes!("blue.png"))?;
+                texture_rules::register_rule(&texture_rules::Rule {
+                    blocks: vec![texture_rules::BlockFilter {
+                        id: "minecraft:stone".into(),
+                        properties: Vec::new(),
+                    }],
+                    sprites: Vec::new(),
+                    faces: 63,
+                    connect: texture_rules::Connect::Block,
+                    method: texture_rules::Method::Position,
+                    tiles: vec!["red".into(), "blue".into()],
+                    pattern_tiles: Vec::new(),
+                    quarter_tiles: Vec::new(),
+                    grid_tiles: vec![0, 1],
+                    width: 2,
+                    height: 1,
+                    weights: Vec::new(),
+                })?;
+                Ok(Some("rules set".into()))
             }
             "lightfx" => {
                 let torch = lighting::get_block_emission("minecraft:torch");

@@ -3,8 +3,7 @@ use crate::Result;
 use horizon_assets::animation::{AnimationClip, AnimationMetadata};
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
-    io::BufReader,
+    fs,
     path::Path,
     sync::Arc,
 };
@@ -191,12 +190,29 @@ impl Sprites {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
+        let encoded = fs::read(path)?;
+        self.decode(name, &encoded, metadata)
+    }
+    /// The layer of a PNG a mod gave, kept under `name`; an error when it
+    /// does not decode.
+    pub fn insert_bytes(&mut self, name: &str, encoded: &[u8]) -> Result<u32> {
+        if let Some(layer) = self.layers.get(name) {
+            return Ok(*layer);
+        }
+        self.decode(name, encoded, None)
+    }
+    fn decode(
+        &mut self,
+        name: &str,
+        encoded: &[u8],
+        metadata: Option<BTreeMap<String, Box<serde_json::value::RawValue>>>,
+    ) -> Result<u32> {
         let animation = metadata
             .as_ref()
             .and_then(|v| v.get("animation"))
             .map(|v| AnimationMetadata::from_json(v.get()))
             .transpose()?;
-        let mut decoder = png::Decoder::new(BufReader::new(File::open(path)?));
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(encoded));
         decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
         let mut reader = decoder.read_info()?;
         let mut bytes = vec![
@@ -345,6 +361,7 @@ pub(crate) fn test_clip(size: u32, layer: u32, metadata: &str) -> SpriteAnimatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     #[test]
     fn identical_still_textures_share_a_layer() {
         let root =

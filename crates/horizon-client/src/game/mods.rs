@@ -42,6 +42,9 @@ pub(super) struct ModsState {
     /// Watched blocks that got a random tick (`animate_tick`), for
     /// `world.random-ticked-blocks` (API 0.1.12).
     pub(super) ticked: Vec<[i32; 3]>,
+    /// The mods' texture rules as last handed to the mesher
+    /// (`Mods::texture_version`, API 0.1.14); 0 for none.
+    texture_version: u64,
     /// Every item tag by item, built once from the resources for
     /// `inventory.item-tags`/`get-tags` (API 0.1.3) and shared through the
     /// snapshot. Built on first use: the world resources holding the tags
@@ -243,7 +246,12 @@ impl Game<'_> {
             .collect();
         let enabled = &self.settings.mods.enabled;
         let on = |id: &str| enabled.contains(id) || dev_ids.iter().any(|d| d == id);
-        let mods = Mods::load(&paths, on, vanilla_command);
+        let mods = Mods::load_with(
+            &paths,
+            on,
+            vanilla_command,
+            Some(self.options.resources.clone()),
+        );
         self.mods.mods = mods;
         // The mods' own files, in a folder of their own beside the
         // settings (API 0.1.4).
@@ -633,8 +641,21 @@ impl Game<'_> {
         self.lend_mod_world();
         self.mods.mods.tick(self.ticks);
         self.take_mod_world();
+        self.sync_mod_textures();
         self.show_mod_output();
         self.apply_mod_particles();
+    }
+    /// The mods' pictures and rules for faces (API 0.1.14): when they change,
+    /// the atlas is built again with them and every section is meshed again,
+    /// as for a resource pack reload.
+    fn sync_mod_textures(&mut self) {
+        let version = self.mods.mods.texture_version();
+        if version == self.mods.texture_version {
+            return;
+        }
+        self.mods.texture_version = version;
+        horizon_client::texture_rules::set_definitions(self.mods.mods.textures());
+        self.reload_packs();
     }
     /// Once per frame: the frame hook, and dev mods' rebuilds.
     pub(super) fn mods_frame(&mut self, elapsed: Duration) {

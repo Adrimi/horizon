@@ -47,6 +47,7 @@ pub mod crafting;
 pub mod crash;
 pub mod creative;
 pub mod ctm;
+pub mod texture_rules;
 pub mod data_cmd;
 pub mod datapack;
 pub mod debug_chart;

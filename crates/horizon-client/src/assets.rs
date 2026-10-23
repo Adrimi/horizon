@@ -98,6 +98,8 @@ pub struct RenderAssets {
     pub sprite_mips: Vec<crate::mipmap::Settings>,
     /// Connected-texture rules of the resource packs (`ctm`).
     pub ctm: Arc<crate::ctm::Ctm>,
+    /// The texture rules mods gave (`texture_rules`).
+    pub mod_rules: Arc<crate::texture_rules::ModRules>,
 }
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -231,6 +233,20 @@ impl RenderAssets {
                 })
                 .unwrap_or_default()
         });
+        let mod_rules = crate::texture_rules::ModRules::load(registry, &mut sprites, |state| {
+            models
+                .catalog
+                .collect(state, horizon_core::position::BlockPos::new(0, 0, 0))
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .flat_map(|(_, model)| {
+                            model.faces.iter().map(|f| (f.quad.facing as u8, f.layer))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
         sprites.finish();
         Ok(Self {
             sprite_size: sprites.size,
@@ -246,6 +262,7 @@ impl RenderAssets {
             translucent_layers: sprites.translucent,
             sprite_mips: sprites.mips,
             ctm: Arc::new(ctm),
+            mod_rules: Arc::new(mod_rules),
         })
     }
 }

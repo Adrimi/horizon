@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -1250,6 +1250,48 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
     // The marks stay for the game to draw.
     assert_eq!(mods.slot_marks().len(), 2);
     assert_eq!(mods.slot_marks()[0].slot, 0);
+}
+
+#[test]
+fn the_resource_and_texture_apis_read_packs_and_keep_rules() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let root = mods_dir().join("pack-root");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("assets/minecraft/optifine/ctm")).unwrap();
+    std::fs::create_dir_all(root.join("assets/other")).unwrap();
+    std::fs::write(
+        root.join("assets/minecraft/optifine/ctm/a.properties"),
+        b"x=1",
+    )
+    .unwrap();
+    // Without a folder the packs have nothing.
+    assert!(mods.command("resfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(" namespaces, 0 files, first  None, escape false")]
+    );
+    mods.set_resource_root(Some(root.clone()));
+    assert!(mods.command("resfx optifine/"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "minecraft,other namespaces, 1 files, first optifine/ctm/a.properties Some(3), escape false"
+        )]
+    );
+    // The rules and pictures are kept for the game until cleared.
+    assert_eq!(mods.texture_version(), 0);
+    assert!(mods.command("texfx"));
+    assert_eq!(mods.drain(), [feedback("rules set")]);
+    let set = mods.textures();
+    assert_eq!(set.sprites.len(), 2);
+    assert_eq!(set.rules.len(), 1);
+    assert_eq!(set.rules[0].1.grid_tiles, [0, 1]);
+    assert_ne!(mods.texture_version(), 0);
+    assert!(mods.command("texfx off"));
+    mods.drain();
+    assert!(mods.textures().rules.is_empty());
+    assert_eq!(mods.texture_version(), 0);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

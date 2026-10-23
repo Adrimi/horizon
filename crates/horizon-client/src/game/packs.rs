@@ -174,6 +174,7 @@ impl Game<'_> {
         self.random_tick_sections.clear();
         self.portals.sections.clear();
         self.options.resources = root.to_path_buf();
+        self.mods.mods.set_resource_root(Some(root.to_path_buf()));
         let context = pack.context.clone();
         self.pack = pack;
         self.gui = gui;

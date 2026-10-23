@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.13;
+package horizon:mods@0.1.14;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -1216,6 +1216,99 @@ interface tooltip {
     set-content: func(item: string, content: option<content>);
 }
 
+/// Capability `resource-read`: the files of the enabled resource packs, as
+/// the game merges them (API 0.1.14).
+interface resources {
+    /// The namespaces the packs have files for: `minecraft` and the packs'
+    /// own, sorted.
+    namespaces: func() -> list<string>;
+    /// The files under `assets/<namespace>/<prefix>`, as paths relative to
+    /// `assets/<namespace>/` (`optifine/ctm/glass/0.properties`,
+    /// `textures/block/glass.png`), sorted; an empty prefix lists all. At
+    /// most 20000.
+    list-files: func(namespace: string, prefix: string) -> list<string>;
+    /// A file's bytes (up to 32 MiB); none when there is no such file.
+    read-file: func(namespace: string, path: string) -> option<list<u8>>;
+}
+
+/// Capability `texture-rules`: what the faces of blocks show (API 0.1.14).
+/// The mod gives pictures and rules; the mesher applies them to each face it
+/// draws, so no mod code runs per face.
+interface texture-rules {
+    /// A block state a rule matches.
+    record block-filter {
+        /// `minecraft:glass`, ...
+        id: string,
+        /// Properties the state must have, all of them (`axis`=`y`).
+        properties: list<tuple<string, string>>,
+    }
+    /// When a neighbour counts as connected.
+    enum connect {
+        /// The same block (id), whatever its properties.
+        block,
+        /// The same state (id and every property).
+        state,
+        /// A neighbour that shows the same picture on the same side.
+        tile,
+    }
+    /// How the face's tile is chosen.
+    enum method {
+        /// By the pattern of connected neighbours (`pattern-tiles`).
+        pattern,
+        /// By the face's position, weighted (`tiles` and `weights`).
+        random,
+        /// By the block's place along the face (`grid-tiles`).
+        position,
+        /// Four quarters of the face, each with its own table
+        /// (`quarter-tiles`).
+        quarters,
+    }
+    record rule {
+        /// States the rule matches.
+        blocks: list<block-filter>,
+        /// Pictures the rule matches: `minecraft:block/glass`. A face that
+        /// shows one of them uses the rule too.
+        sprites: list<string>,
+        /// Faces the rule matches, a mask: north 1, east 2, south 4, west 8,
+        /// up 16, down 32.
+        faces: u32,
+        connect: connect,
+        method: method,
+        /// The pictures the rule may draw: names of `upload-sprite` (the
+        /// game adds the mod's id), or a picture of the game's own
+        /// (`minecraft:block/glass`).
+        tiles: list<string>,
+        /// `pattern`: the tile of each of the 256 patterns, an index in
+        /// `tiles`; 4294967295 for none. Bits: 1 the neighbour on the left of
+        /// the face, 2 lower left, 4 below, 8 lower right, 16 right, 32
+        /// upper right, 64 above, 128 upper left. Left and right follow the
+        /// picture's `u`, below follows its `v`.
+        pattern-tiles: list<u32>,
+        /// `quarters`: eight tiles for each quarter (upper left, upper
+        /// right, lower left, lower right), indexed by 1 side neighbour
+        /// connected (the one on the quarter's horizontal side), 2 vertical
+        /// side, 4 diagonal.
+        quarter-tiles: list<u32>,
+        /// `position`: the tile of each cell of a `width` by `height` grid,
+        /// row by row; the cell is `(v mod height) * width + (u mod width)`
+        /// for the block's `u` along the face (to the right) and `v` (down).
+        grid-tiles: list<u32>,
+        width: u32,
+        height: u32,
+        /// `random`: each tile's weight; a missing one weighs 1.
+        weights: list<u32>,
+    }
+    /// Adds a picture (PNG) to the block atlas under `name`; the same name
+    /// replaces the old picture. The game rebuilds the atlas and meshes the
+    /// world again. At most 512 pictures a mod, 1 MiB each.
+    upload-sprite: func(name: string, png: list<u8>) -> result<_, string>;
+    /// Adds a rule; rules are tried in the order they were added (the mods'
+    /// in turn), and the first that gives a tile wins. At most 512 a mod.
+    register-rule: func(rule: rule) -> result<_, string>;
+    /// Removes every rule and picture of this mod.
+    clear-rules: func();
+}
+
 /// Capability `lighting`: light sources the mod gives the world, like a
 /// torch in the player's hand (API 0.1.13). Nothing is relit: the game keeps
 /// the sources nearest the camera and the shaders raise the block light of
@@ -1294,6 +1387,8 @@ world horizon-mod {
     import tooltip;
     import debug;
     import lighting;
+    import resources;
+    import texture-rules;
     import %world;
     export events;
 }

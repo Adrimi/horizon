@@ -40,6 +40,9 @@ pub use bindings::horizon::mods::{
     },
     slots::{Mark, MarkShape},
     target::{Block, Entity},
+    texture_rules::{
+        BlockFilter as RuleBlock, Connect as RuleConnect, Method as RuleMethod, Rule as TextureRule,
+    },
     tooltip::{Content as TooltipContent, Hovered as TooltipHovered},
     weather::State as WeatherState,
     world::{Biome, BlockBroken, BlockPos, ChunkSurface, ContainerStack, RandomTick, WorldBlock},
@@ -49,8 +52,8 @@ use bindings::{
     exports::horizon::mods::events::Registration,
     horizon::mods::{
         atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys, lighting,
-        log as mod_log, overlay, particles, recipes, screen, settings, slots, storage, target,
-        tooltip, weather, world,
+        log as mod_log, overlay, particles, recipes, resources, screen, settings, slots, storage,
+        target, texture_rules, tooltip, weather, world,
     },
 };
 
@@ -538,6 +541,13 @@ struct State {
     haze: Option<Haze>,
     /// The tags `world.watch-random-ticks` listens to.
     watched_ticks: Vec<String>,
+    /// The resource folder `resources` reads (shared with `Mods`).
+    resource_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
+    /// The pictures and rules the mod gave for faces (API 0.1.14), and how
+    /// many times they changed.
+    texture_sprites: Vec<(String, Vec<u8>)>,
+    texture_rules: Vec<TextureRule>,
+    texture_version: u64,
     /// The marks the mod has the game draw on its slots (`slots`).
     slot_marks: Vec<Mark>,
     /// What the mod adds to item tooltips, and its debug lines.
@@ -581,6 +591,17 @@ pub struct Mods {
     screen_size: (f32, f32),
     /// The game's screens, for `current-screen` and the like (API 0.1.5).
     ui: Arc<Ui>,
+    /// The merged resource packs' folder, for `resources` (API 0.1.14).
+    resource_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
+}
+
+/// A mod's pictures and rules for the faces of blocks (API 0.1.14).
+#[derive(Clone, Debug, Default)]
+pub struct TextureSet {
+    /// Each picture: the mod's id, its name and its PNG.
+    pub sprites: Vec<(String, String, Vec<u8>)>,
+    /// Each rule, with the id of the mod that gave it.
+    pub rules: Vec<(String, TextureRule)>,
 }
 
 /// The `.hmod` files and mod folders in `dir`, by name.
@@ -609,7 +630,18 @@ impl Mods {
         enabled: impl Fn(&str) -> bool,
         reserved: impl Fn(&str) -> bool,
     ) -> Mods {
+        Self::load_with(paths, enabled, reserved, None)
+    }
+    /// [`Mods::load`] with the folder of the merged resource packs known to
+    /// the mods already in `init` (`resources`, API 0.1.14).
+    pub fn load_with(
+        paths: &[PathBuf],
+        enabled: impl Fn(&str) -> bool,
+        reserved: impl Fn(&str) -> bool,
+        resource_root: Option<PathBuf>,
+    ) -> Mods {
         let mut mods = Mods::default();
+        mods.set_resource_root(resource_root);
         for path in paths {
             let modified = modified(path);
             let mut entry = Entry {
@@ -695,6 +727,7 @@ impl Mods {
             .collect();
         let snapshot = self.snapshot.clone();
         let ui = self.ui.clone();
+        let resource_root = self.resource_root.clone();
         let (engine, linker) = self.engine()?;
         let component =
             Component::new(engine, wasm).map_err(|e| format!("not a component: {e}"))?;
@@ -749,6 +782,10 @@ impl Mods {
             landings: Vec::new(),
             haze: None,
             watched_ticks: Vec::new(),
+            resource_root,
+            texture_sprites: Vec::new(),
+            texture_rules: Vec::new(),
+            texture_version: 0,
             slot_marks: Vec::new(),
             tooltips: Vec::new(),
             debug_lines: Vec::new(),
@@ -956,6 +993,42 @@ impl Mods {
             .filter_map(|e| Some(e.run.as_ref()?.store.data().slot_marks.iter()))
             .flatten()
             .collect()
+    }
+    /// The folder of the merged resource packs `resources` reads (API
+    /// 0.1.14); none outside a game.
+    pub fn set_resource_root(&mut self, root: Option<PathBuf>) {
+        *self.resource_root.lock().unwrap_or_else(|e| e.into_inner()) = root;
+    }
+    /// A number that changes when the pictures or rules of any running mod
+    /// change, or a mod with some stops; 0 while none has any (API 0.1.14).
+    pub fn texture_version(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut any = false;
+        for run in self.entries.iter().filter_map(|e| e.run.as_ref()) {
+            let data = run.store.data();
+            if !data.texture_rules.is_empty() || !data.texture_sprites.is_empty() {
+                any = true;
+                data.id.hash(&mut hasher);
+                data.texture_version.hash(&mut hasher);
+            }
+        }
+        if any { hasher.finish().max(1) } else { 0 }
+    }
+    /// The pictures and rules of the running mods (API 0.1.14).
+    pub fn textures(&self) -> TextureSet {
+        let mut set = TextureSet::default();
+        for run in self.entries.iter().filter_map(|e| e.run.as_ref()) {
+            let data = run.store.data();
+            for (name, png) in &data.texture_sprites {
+                set.sprites
+                    .push((data.id.clone(), name.clone(), png.clone()));
+            }
+            for rule in &data.texture_rules {
+                set.rules.push((data.id.clone(), rule.clone()));
+            }
+        }
+        set
     }
     /// The tags the running mods watch for random ticks, none when no mod
     /// does (API 0.1.12).
@@ -1575,6 +1648,162 @@ impl tooltip::Host for State {
             .take(TOOLTIP_ELEMENTS)
             .collect();
         self.tooltips.push((item, content));
+    }
+}
+/// Where `path` is under `root/assets/<namespace>/`, or none for a path
+/// that leaves it.
+fn pack_path(root: &Path, namespace: &str, path: &str) -> Option<PathBuf> {
+    let clean = |part: &str| {
+        !part.is_empty()
+            && part
+                .split('/')
+                .all(|s| !s.is_empty() && s != "." && s != ".." && !s.contains(['\\', ':']))
+    };
+    if !clean(namespace) || (!path.is_empty() && !clean(path)) {
+        return None;
+    }
+    Some(root.join("assets").join(namespace).join(path))
+}
+fn walk_files(dir: &Path, base: &Path, prefix: &str, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= 20000 {
+            return;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            walk_files(&path, base, prefix, out);
+        } else if let Ok(rel) = path.strip_prefix(base) {
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            if rel.starts_with(prefix) {
+                out.push(rel);
+            }
+        }
+    }
+}
+impl State {
+    fn pack_root(&self) -> Option<PathBuf> {
+        self.resource_root
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+impl resources::Host for State {
+    fn namespaces(&mut self) -> Vec<String> {
+        let Some(root) = self.pack_root() else {
+            return Vec::new();
+        };
+        let mut found: Vec<String> = std::fs::read_dir(root.join("assets"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+    fn list_files(&mut self, namespace: String, prefix: String) -> Vec<String> {
+        let Some(root) = self.pack_root() else {
+            return Vec::new();
+        };
+        let Some(base) = pack_path(&root, &namespace, "") else {
+            return Vec::new();
+        };
+        if !prefix.is_empty()
+            && pack_path(&root, &namespace, prefix.trim_end_matches('/')).is_none()
+        {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        walk_files(&base, &base, &prefix, &mut found);
+        found.sort();
+        found
+    }
+    fn read_file(&mut self, namespace: String, path: String) -> Option<Vec<u8>> {
+        let root = self.pack_root()?;
+        let file = pack_path(&root, &namespace, &path)?;
+        let meta = std::fs::metadata(&file).ok()?;
+        if !meta.is_file() || meta.len() > 32 << 20 {
+            return None;
+        }
+        std::fs::read(file).ok()
+    }
+}
+impl texture_rules::Host for State {
+    fn upload_sprite(&mut self, name: String, png: Vec<u8>) -> Result<(), String> {
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-./#".contains(c))
+        {
+            return Err("a picture's name is 1 to 128 characters of a-z, 0-9, _ - . / #".into());
+        }
+        if png.len() > 1 << 20 {
+            return Err("a picture is at most 1 MiB".into());
+        }
+        if !png.starts_with(&[0x89, b'P', b'N', b'G']) {
+            return Err("not a PNG".into());
+        }
+        match self.texture_sprites.iter().position(|(n, _)| *n == name) {
+            Some(i) => self.texture_sprites[i].1 = png,
+            None if self.texture_sprites.len() >= 512 => {
+                return Err("a mod has at most 512 pictures".into());
+            }
+            None => self.texture_sprites.push((name, png)),
+        }
+        self.texture_version += 1;
+        Ok(())
+    }
+    fn register_rule(&mut self, rule: TextureRule) -> Result<(), String> {
+        if self.texture_rules.len() >= 512 {
+            return Err("a mod has at most 512 rules".into());
+        }
+        if rule.pattern_tiles.len() > 256
+            || rule.quarter_tiles.len() > 32
+            || rule.grid_tiles.len() > 4096
+            || rule.tiles.len() > 1024
+            || rule.blocks.len() > 4096
+        {
+            return Err("a table of the rule is too long".into());
+        }
+        match rule.method {
+            RuleMethod::Pattern if rule.pattern_tiles.len() != 256 => {
+                return Err("`pattern` needs 256 pattern-tiles".into());
+            }
+            RuleMethod::Quarters if rule.quarter_tiles.len() != 32 => {
+                return Err("`quarters` needs 32 quarter-tiles".into());
+            }
+            RuleMethod::Position
+                if rule.width == 0
+                    || rule.height == 0
+                    || rule.grid_tiles.len() != (rule.width * rule.height) as usize =>
+            {
+                return Err("`position` needs width * height grid-tiles".into());
+            }
+            RuleMethod::Random if rule.tiles.is_empty() => {
+                return Err("`random` needs tiles".into());
+            }
+            _ => {}
+        }
+        self.texture_rules.push(rule);
+        self.texture_version += 1;
+        Ok(())
+    }
+    fn clear_rules(&mut self) {
+        if !self.texture_rules.is_empty() || !self.texture_sprites.is_empty() {
+            self.texture_rules.clear();
+            self.texture_sprites.clear();
+            self.texture_version += 1;
+        }
     }
 }
 impl lighting::Host for State {
