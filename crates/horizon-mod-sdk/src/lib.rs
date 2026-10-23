@@ -36,7 +36,8 @@ wit_bindgen::generate!({
 
 pub use exports::horizon::mods::events::{Guest as __Guest, Registration};
 pub use horizon::mods::{
-    chat, game, hotbar, hud, inventory, items, keys, log, recipes, screen, storage, target, world,
+    atmosphere, chat, game, hotbar, hud, inventory, items, keys, log, particles, recipes, screen,
+    settings, storage, target, weather, world,
 };
 
 /// The game's calls into a mod. Only the hooks [`Registration`] asks for

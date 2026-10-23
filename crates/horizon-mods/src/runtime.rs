@@ -18,11 +18,16 @@ mod bindings {
     });
 }
 pub use bindings::horizon::mods::{
+    atmosphere::Haze,
     game::{Clock, FoodStats, Player},
     hud::{Corner, Line},
     inventory::{Food, Stack},
     items::Item,
     keys::KeyEvent,
+    particles::{
+        Color as ParticleColor, Fade as ParticleFade, Landing, Options as ParticleOptions,
+        SizeCurve as ParticleSizeCurve,
+    },
     recipes::{Kind as RecipeKind, Recipe},
     screen::{
         Area, Element as ScreenElement, Event as ScreenEvent, GameScreen, ImageShape, KeyPress,
@@ -30,14 +35,15 @@ pub use bindings::horizon::mods::{
         Size as ScreenSize, TextShape, TipLine, WheelTurn,
     },
     target::{Block, Entity},
-    world::{BlockBroken, BlockPos, ChunkSurface, WorldBlock},
+    weather::State as WeatherState,
+    world::{Biome, BlockBroken, BlockPos, ChunkSurface, WorldBlock},
 };
 use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
     horizon::mods::{
-        chat, game, hotbar, hud, inventory, items, keys, log as mod_log, recipes, screen, storage,
-        target, world,
+        atmosphere, chat, game, hotbar, hud, inventory, items, keys, log as mod_log, particles,
+        recipes, screen, settings, storage, target, weather, world,
     },
 };
 
@@ -114,7 +120,60 @@ pub struct Snapshot {
     pub items: Option<Arc<Vec<Item>>>,
     /// Every recipe of the game (`recipes-read`, API 0.1.5); built once.
     pub recipes: Option<Arc<Vec<Recipe>>>,
+    /// The weather over the player (`weather-read`, API 0.1.6).
+    pub weather: Option<WeatherState>,
+    /// The Particles setting: 0 all, 1 decreased, 2 minimal (`settings-read`).
+    pub particles_setting: u32,
 }
+
+/// A picture a mod defined for its particles (`particles.define-sprite`).
+#[derive(Clone, Debug)]
+pub struct SpriteDef {
+    /// The number the mod draws it by, the same in every mod's view.
+    pub id: u32,
+    /// `<mod id>/<name>`, unique in the game.
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, `width * height * 4` bytes.
+    pub pixels: Vec<u8>,
+}
+/// How many particle pictures the mods may define in all, how big one is,
+/// and how many particles a mod may spawn in one call.
+pub const PARTICLE_SPRITES: u32 = 16;
+pub const PARTICLE_SPRITE_SIDE: u32 = 64;
+const PARTICLES_PER_CALL: usize = 512;
+const PARTICLE_LIFETIME: u32 = 1200;
+
+/// The particle pictures by mod and name, so a reloaded mod gets its numbers
+/// back instead of using up new ones.
+fn sprite_number(mod_id: &str, name: &str) -> Option<u32> {
+    static REGISTRY: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
+    let key = format!("{mod_id}/{name}");
+    let mut all = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, id)) = all.iter().find(|(k, _)| *k == key) {
+        return Some(*id);
+    }
+    let id = all.len() as u32;
+    (id < PARTICLE_SPRITES).then(|| {
+        all.push((key, id));
+        id
+    })
+}
+/// Whether the number is one the mod `mod_id` defined.
+fn sprite_owner_is(mod_id: &str, id: u32) -> bool {
+    sprite_number_owner(id).is_some_and(|owner| owner.split('/').next() == Some(mod_id))
+}
+fn sprite_number_owner(id: u32) -> Option<String> {
+    // The registry's keys are `<mod id>/<name>`; look the number up there.
+    PARTICLE_OWNERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .cloned()
+}
+static PARTICLE_OWNERS: std::sync::Mutex<std::collections::BTreeMap<u32, String>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// What mods read of the game's screens (API 0.1.5), copied once per frame by
 /// the game: the open screen, where the mouse is, the keys held and the
@@ -203,6 +262,19 @@ pub trait WorldAccess: Send + Sync {
     fn biome_names(&self) -> Vec<String>;
     /// The map's colours by id, as 0xRRGGBB (API 0.1.4).
     fn map_colors(&self) -> Vec<u32>;
+    /// The biome at `pos` (API 0.1.6); none where no chunk is loaded.
+    fn biome(&self, _pos: &BlockPos) -> Option<Biome> {
+        None
+    }
+    /// The y of the first free space above the first motion-blocking block
+    /// going down from `from` in the column of `pos` (API 0.1.6).
+    fn surface(&self, _pos: &BlockPos, _from: i32) -> Option<i32> {
+        None
+    }
+    /// Whether the block at `pos` has a full collision box (API 0.1.6).
+    fn solid(&self, _pos: &BlockPos) -> bool {
+        false
+    }
 }
 
 /// One of a mod's key bindings (`keys`): the action it named, the key it
@@ -377,6 +449,17 @@ struct State {
     ui: Arc<Ui>,
     /// The manifest declares `inventory-edit`.
     can_give: bool,
+    /// Particle pictures defined and particles spawned since the game last
+    /// took them (`particles`, API 0.1.6).
+    new_sprites: Vec<SpriteDef>,
+    new_particles: Vec<ParticleOptions>,
+    spawned: usize,
+    /// The numbers of the pictures this mod defined.
+    owned_sprites: Vec<u32>,
+    /// Where its particles landed since it last asked (`landed`).
+    landings: Vec<Landing>,
+    /// The mod's haze (`atmosphere`).
+    haze: Option<Haze>,
     /// What the mod has asked to give in the current call.
     given: u32,
     /// The next screen id this mod gets.
@@ -566,6 +649,12 @@ impl Mods {
             ui,
             can_give: m.capabilities.contains(&crate::Capability::InventoryEdit),
             given: 0,
+            new_sprites: Vec::new(),
+            new_particles: Vec::new(),
+            spawned: 0,
+            owned_sprites: Vec::new(),
+            landings: Vec::new(),
+            haze: None,
             next_screen: 1,
             binds: Vec::new(),
             key_events: Vec::new(),
@@ -656,6 +745,42 @@ impl Mods {
     /// The screen's size in GUI pixels (`screen`), given by the game.
     pub fn set_screen_size(&mut self, width: f32, height: f32) {
         self.screen_size = (width, height);
+    }
+    /// The particle pictures and particles the mods defined and spawned
+    /// since the last call (API 0.1.6).
+    pub fn take_particles(&mut self) -> (Vec<SpriteDef>, Vec<ParticleOptions>) {
+        let (mut sprites, mut particles) = (Vec::new(), Vec::new());
+        for entry in &mut self.entries {
+            let Some(run) = entry.run.as_mut() else {
+                continue;
+            };
+            let data = run.store.data_mut();
+            sprites.append(&mut data.new_sprites);
+            particles.append(&mut data.new_particles);
+        }
+        (sprites, particles)
+    }
+    /// Where particles landed: each mod is told of the ones with its own
+    /// pictures, until it asks (API 0.1.6).
+    pub fn add_landings(&mut self, landed: &[Landing]) {
+        for entry in &mut self.entries {
+            let Some(run) = entry.run.as_mut() else {
+                continue;
+            };
+            let data = run.store.data_mut();
+            for l in landed {
+                if sprite_owner_is(&data.id, l.sprite) && data.landings.len() < 4096 {
+                    data.landings.push(*l);
+                }
+            }
+        }
+    }
+    /// The haze of the running mods that set one (API 0.1.6).
+    pub fn hazes(&self) -> Vec<Haze> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.run.as_ref()?.store.data().haze)
+            .collect()
     }
     /// What mods read of the game's screens until the next call (API 0.1.5).
     pub fn set_ui(&mut self, ui: Ui) {
@@ -852,6 +977,7 @@ impl Mods {
         data.breaking.clear();
         data.worn = 0;
         data.given = 0;
+        data.spawned = 0;
         // An average over about the last 64 calls.
         entry.cost = (entry.cost * 63 + started.elapsed()) / 64;
         self.out.append(&mut run.store.data_mut().out);
@@ -1114,6 +1240,92 @@ impl State {
             self.out.push(Output::Give { id, count });
         }
         ok
+    }
+}
+impl weather::Host for State {
+    fn get_weather(&mut self) -> Option<WeatherState> {
+        self.snapshot.weather
+    }
+}
+impl settings::Host for State {
+    fn get_particles(&mut self) -> u32 {
+        self.snapshot.particles_setting
+    }
+}
+impl particles::Host for State {
+    fn define_sprite(&mut self, sprite: particles::Sprite) -> Result<u32, String> {
+        let side = PARTICLE_SPRITE_SIDE;
+        if sprite.width == 0 || sprite.height == 0 || sprite.width > side || sprite.height > side {
+            return Err(format!("a picture is 1 to {side} pixels wide and high"));
+        }
+        if sprite.pixels.len() != (sprite.width * sprite.height * 4) as usize {
+            return Err("a picture has width * height * 4 bytes".into());
+        }
+        if sprite.name.is_empty()
+            || sprite.name.len() > 64
+            || !sprite
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
+        {
+            return Err("a picture's name is [a-z0-9_.-]{1,64}".into());
+        }
+        let Some(id) = sprite_number(&self.id, &sprite.name) else {
+            return Err(format!(
+                "the mods may define {PARTICLE_SPRITES} pictures in all"
+            ));
+        };
+        PARTICLE_OWNERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, format!("{}/{}", self.id, sprite.name));
+        if !self.owned_sprites.contains(&id) {
+            self.owned_sprites.push(id);
+        }
+        self.new_sprites.retain(|s| s.id != id);
+        self.new_sprites.push(SpriteDef {
+            id,
+            name: format!("{}/{}", self.id, sprite.name),
+            width: sprite.width,
+            height: sprite.height,
+            pixels: sprite.pixels,
+        });
+        Ok(id)
+    }
+    fn spawn(&mut self, options: ParticleOptions) -> bool {
+        let finite = [
+            options.x, options.y, options.z, options.vx, options.vy, options.vz,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite
+            || !self.owned_sprites.contains(&options.sprite)
+            || self.spawned >= PARTICLES_PER_CALL
+            || self.new_particles.len() >= 4 * PARTICLES_PER_CALL
+        {
+            return false;
+        }
+        self.spawned += 1;
+        let mut options = options;
+        options.lifetime = options.lifetime.clamp(1, PARTICLE_LIFETIME);
+        options.linger = options.linger.min(PARTICLE_LIFETIME);
+        options.size = options.size.clamp(0.0, 8.0);
+        self.new_particles.push(options);
+        true
+    }
+    fn landed(&mut self) -> Vec<Landing> {
+        std::mem::take(&mut self.landings)
+    }
+}
+impl atmosphere::Host for State {
+    fn set_haze(&mut self, haze: Option<Haze>) {
+        self.haze = haze.map(|h| Haze {
+            amount: h.amount.clamp(0.0, 1.0),
+            red: h.red.clamp(0.0, 1.0),
+            green: h.green.clamp(0.0, 1.0),
+            blue: h.blue.clamp(0.0, 1.0),
+            density: h.density.clamp(0.0, 0.9),
+        });
     }
 }
 impl hotbar::Host for State {
@@ -1406,6 +1618,15 @@ impl world::Host for State {
         self.world
             .as_ref()
             .map_or_else(Vec::new, |w| w.map_colors())
+    }
+    fn get_biome(&mut self, pos: BlockPos) -> Option<Biome> {
+        self.world.as_ref()?.biome(&pos)
+    }
+    fn get_surface(&mut self, pos: BlockPos, from: i32) -> Option<i32> {
+        self.world.as_ref()?.surface(&pos, from)
+    }
+    fn is_solid(&mut self, pos: BlockPos) -> bool {
+        self.world.as_ref().is_some_and(|w| w.solid(&pos))
     }
 }
 impl State {

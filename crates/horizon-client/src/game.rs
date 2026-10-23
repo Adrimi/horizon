@@ -4730,6 +4730,7 @@ impl Game<'_> {
             Screen::Playing | Screen::Options => {}
         }
         self.draw_toasts(&mut batch);
+        self.flush_mod_particle_sprites(&mut batch);
         self.remote_hud(&mut batch);
         self.draw_sign_editor(&mut batch);
         self.draw_book(&mut batch);

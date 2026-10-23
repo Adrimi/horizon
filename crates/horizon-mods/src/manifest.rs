@@ -106,12 +106,20 @@ pub enum Capability {
     /// Giving the player items (API 0.1.5): no interface of its own,
     /// `inventory.give` does nothing without it.
     InventoryEdit,
+    /// The weather over the player (API 0.1.6).
+    WeatherRead,
+    /// The client's own settings (API 0.1.6).
+    SettingsRead,
+    /// The mod's own particles (API 0.1.6).
+    Particles,
+    /// The mod's haze in the fog (API 0.1.6).
+    Atmosphere,
     /// New blocks and items from the mod's `data/` (API 0.2): no WIT
     /// interface, the game reads them before the world loads.
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 15] = [
+    pub const ALL: [Capability; 19] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -126,6 +134,10 @@ impl Capability {
         Capability::ItemsRead,
         Capability::RecipesRead,
         Capability::InventoryEdit,
+        Capability::WeatherRead,
+        Capability::SettingsRead,
+        Capability::Particles,
+        Capability::Atmosphere,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -145,6 +157,10 @@ impl Capability {
             Capability::ItemsRead => "items",
             Capability::RecipesRead => "recipes",
             Capability::InventoryEdit => "inventory",
+            Capability::WeatherRead => "weather",
+            Capability::SettingsRead => "settings",
+            Capability::Particles => "particles",
+            Capability::Atmosphere => "atmosphere",
             Capability::Registries => "registries",
         }
     }
@@ -165,6 +181,10 @@ impl Capability {
             Capability::ItemsRead => "see the items of the game",
             Capability::RecipesRead => "see the recipes of the game",
             Capability::InventoryEdit => "give you items",
+            Capability::WeatherRead => "see the weather",
+            Capability::SettingsRead => "read your settings (particles)",
+            Capability::Particles => "add particles of its own",
+            Capability::Atmosphere => "change the haze in the fog",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -210,6 +230,10 @@ impl fmt::Display for Capability {
             Capability::ItemsRead => "items-read",
             Capability::RecipesRead => "recipes-read",
             Capability::InventoryEdit => "inventory-edit",
+            Capability::WeatherRead => "weather-read",
+            Capability::SettingsRead => "settings-read",
+            Capability::Particles => "particles",
+            Capability::Atmosphere => "atmosphere",
             Capability::Registries => "registries",
         };
         f.write_str(name)

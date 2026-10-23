@@ -93,6 +93,11 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `items` (0.1.5) | `items-read` | `list()`: every item (id, name, max stack, tags) in the creative search order; `get(id)` |
 | `recipes` (0.1.5) | `recipes-read` | `list()`: every recipe with fixed slots (crafting, cooking, stonecutting, smithing), inputs as lists of accepted items |
 | `inventory.give` (0.1.5) | `inventory-edit` | `give(id, count)`: as the creative inventory does; false outside creative or another's world |
+| `weather` (0.1.6) | `weather-read` | `get-weather()`: rain and thunder levels over the player |
+| `settings` (0.1.6) | `settings-read` | `get-particles()`: the Particles setting (0 all, 1 decreased, 2 minimal) |
+| `particles` (0.1.6) | `particles` | `define-sprite(sprite)`: the mod's own picture (up to 64x64, 16 in all); `spawn(options)`: a particle with its own motion (gravity, wind, sway, spin, linger, collide, fade, size curve, flat); `landed()`: where its colliding particles landed |
+| `atmosphere` (0.1.6) | `atmosphere` | `set-haze(option<haze>)`: closes the fog in and tints it |
+| `world` (0.1.6) | `world-read` | `get-biome(pos)` (temperature, precipitation, downfall, foliage/grass/water colours), `get-surface(pos, start-y)`, `is-solid(pos)` |
 
 The target and the hotbar are read into the snapshot only while a running
 mod declares `target` or `inventory-read`, so they cost nothing otherwise.

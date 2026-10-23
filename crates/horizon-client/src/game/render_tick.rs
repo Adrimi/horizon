@@ -127,6 +127,9 @@ impl Game<'_> {
                 fog.color = horizon_client::rain::mix_fog(fog.color, haze.color, k * 0.7);
             }
         }
+        if self.mods.mods.is_running() {
+            self.apply_mod_haze(&mut fog);
+        }
         fog
     }
     /// What a shader pack's `Frame` uniform reads of the game this frame.

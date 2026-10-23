@@ -59,6 +59,10 @@ pub(super) struct ModsState {
     text_widths: std::sync::OnceLock<Arc<Vec<f32>>>,
     /// The mod whose panel took a mouse press, so it gets the release too.
     overlay_down: Option<String>,
+    /// Particle pictures waiting to go into the atlas' particle sheet, and
+    /// the names the mods' numbers stand for (API 0.1.6).
+    particle_patches: Vec<Patch>,
+    particle_names: HashMap<u32, String>,
 }
 impl ModsState {
     /// The chat's command tree: vanilla's, plus the running mods' commands.
@@ -93,7 +97,8 @@ impl ModScreen {
             return Some(*slot);
         }
         let slot = self.slots.len();
-        if slot >= MOD_TEXTURE_SLOTS {
+        // The last slot of the atlas' reserved row is the particle sheet.
+        if slot >= MOD_TEXTURE_SLOTS - 1 {
             return None;
         }
         self.slots.insert(id, slot);
@@ -337,6 +342,8 @@ impl Game<'_> {
             exhaustion: p.health.food.exhaustion,
         });
         let mut snapshot = Snapshot {
+            weather: self.mod_weather(),
+            particles_setting: u32::from(self.settings.particles),
             player,
             clock,
             selected: self.selected as u32,
@@ -487,11 +494,23 @@ impl Game<'_> {
         }
         let mut snapshot = self.mod_snapshot();
         snapshot.broken = std::mem::take(&mut self.mods.broken);
+        let landed: Vec<horizon_mods::Landing> = std::mem::take(&mut self.particles.mod_landings)
+            .into_iter()
+            .map(|l| horizon_mods::Landing {
+                sprite: l.sprite,
+                x: l.position[0],
+                y: l.position[1],
+                z: l.position[2],
+                water: l.water,
+            })
+            .collect();
+        self.mods.mods.add_landings(&landed);
         self.mods.mods.set_snapshot(snapshot);
         self.lend_mod_world();
         self.mods.mods.tick(self.ticks);
         self.take_mod_world();
         self.show_mod_output();
+        self.apply_mod_particles();
     }
     /// Once per frame: the frame hook, and dev mods' rebuilds.
     pub(super) fn mods_frame(&mut self, elapsed: Duration) {
@@ -514,6 +533,7 @@ impl Game<'_> {
         self.sync_mod_ui();
         self.mods.mods.frame(elapsed.as_secs_f32());
         self.show_mod_output();
+        self.apply_mod_particles();
         self.sync_mod_screen();
     }
     /// Keeps the game's screen and the mods' in step (API 0.1.4): a mod
@@ -1368,5 +1388,120 @@ impl Game<'_> {
                 text,
             }),
         );
+    }
+}
+
+/// The sheet of the mods' particle pictures: the atlas' last reserved slot,
+/// 256 pixels square, split into 64 pixel cells (API 0.1.6).
+const PARTICLE_CELL: u32 = 64;
+const PARTICLE_CELLS_PER_ROW: u32 = 4;
+
+impl Game<'_> {
+    /// The weather over the player, for `weather` (API 0.1.6).
+    fn mod_weather(&self) -> Option<horizon_mods::WeatherState> {
+        if !self.mods.mods.uses(Capability::WeatherRead) || self.player.is_none() {
+            return None;
+        }
+        let (rain, thunder) = if self.dim == super::Dim::Overworld {
+            self.world.weather.levels(self.clock.fraction() as f32)
+        } else {
+            (0.0, 0.0)
+        };
+        Some(horizon_mods::WeatherState { rain, thunder })
+    }
+    /// What mods defined and spawned for their particles: the pictures go
+    /// into the atlas' particle sheet, the particles into the engine.
+    fn apply_mod_particles(&mut self) {
+        if !self.mods.mods.uses(Capability::Particles) {
+            return;
+        }
+        let (sprites, particles) = self.mods.mods.take_particles();
+        if sprites.is_empty() && particles.is_empty() {
+            return;
+        }
+        let sheet = format!("horizon/mod-texture{}", MOD_TEXTURE_SLOTS - 1);
+        let Some(sheet_rect) = self.gui.atlas.sprites.get(&sheet).copied() else {
+            return;
+        };
+        let atlas_height = self.gui.atlas.height;
+        let slot_x = (MOD_TEXTURE_SLOTS as u32 - 1) * MOD_TEXTURE_SIDE;
+        for def in sprites {
+            let (col, row) = (
+                def.id % PARTICLE_CELLS_PER_ROW,
+                def.id / PARTICLE_CELLS_PER_ROW,
+            );
+            let (cx, cy) = (col * PARTICLE_CELL, row * PARTICLE_CELL);
+            let side = MOD_TEXTURE_SIDE as f32;
+            let (du, dv) = (sheet_rect.u1 - sheet_rect.u0, sheet_rect.v1 - sheet_rect.v0);
+            let rect = horizon_client::hud::Rect {
+                u0: sheet_rect.u0 + du * cx as f32 / side,
+                v0: sheet_rect.v0 + dv * cy as f32 / side,
+                u1: sheet_rect.u0 + du * (cx + def.width) as f32 / side,
+                v1: sheet_rect.v0 + dv * (cy + def.height) as f32 / side,
+                w: def.width,
+                h: def.height,
+            };
+            self.particles.register_sprite(&def.name, rect);
+            self.mods.particle_patches.push(Patch {
+                x: slot_x + cx,
+                y: atlas_height - MOD_TEXTURE_SIDE + cy,
+                width: def.width,
+                height: def.height,
+                rgba: def.pixels,
+            });
+            self.mods.particle_names.insert(def.id, def.name);
+        }
+        for p in particles {
+            let Some(name) = self.mods.particle_names.get(&p.sprite) else {
+                continue;
+            };
+            use horizon_client::particles::{ModFade, ModParticle, ModSize};
+            self.particles.add_mod(&ModParticle {
+                sprite_name: name.clone(),
+                sprite: p.sprite,
+                position: [p.x, p.y, p.z],
+                velocity: [p.vx, p.vy, p.vz],
+                rgba: [p.color.r, p.color.g, p.color.b, p.color.a],
+                size: p.size,
+                lifetime: p.lifetime as i32,
+                gravity: p.gravity,
+                wind: [p.wind_x, p.wind_z],
+                collide: p.collide,
+                size_curve: match p.size_curve {
+                    horizon_mods::ParticleSizeCurve::Constant => ModSize::Constant,
+                    horizon_mods::ParticleSizeCurve::Grow => ModSize::Grow,
+                    horizon_mods::ParticleSizeCurve::Shrink => ModSize::Shrink,
+                },
+                fade: match p.fade {
+                    horizon_mods::ParticleFade::None => ModFade::None,
+                    horizon_mods::ParticleFade::Late => ModFade::Late,
+                    horizon_mods::ParticleFade::Full => ModFade::Full,
+                },
+                flat: p.flat,
+                linger: p.linger,
+                sway: p.sway,
+                sway_period: p.sway_period,
+                spin: p.spin,
+            });
+        }
+    }
+    /// The particle pictures that wait to go into the atlas.
+    pub(super) fn flush_mod_particle_sprites(&mut self, batch: &mut HudBatch) {
+        batch.patches.append(&mut self.mods.particle_patches);
+    }
+    /// The mods' haze in the fog (API 0.1.6): the fog closes in and takes the
+    /// colour of the strongest.
+    pub(super) fn apply_mod_haze(&self, fog: &mut horizon_client::fog::FogData) {
+        let Some(h) = self
+            .mods
+            .mods
+            .hazes()
+            .into_iter()
+            .max_by(|a, b| a.amount.total_cmp(&b.amount))
+        else {
+            return;
+        };
+        fog.environmental_end *= 1.0 - h.density;
+        fog.color = horizon_client::rain::mix_fog(fog.color, [h.red, h.green, h.blue], h.amount);
     }
 }

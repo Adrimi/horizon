@@ -6,8 +6,8 @@
 //! `tick` and `frame` do nothing, to measure the cost of
 //! a call.
 use horizon_mod_sdk::{
-    Mod, Registration, chat, game, hotbar, inventory, items, keys, recipes, screen, storage,
-    target, world,
+    Mod, Registration, atmosphere, chat, game, hotbar, inventory, items, keys, particles, recipes,
+    screen, settings, storage, target, weather, world,
 };
 
 struct Guest {
@@ -46,6 +46,7 @@ impl Mod for Guest {
             "screen",
             "browser",
             "giveitem",
+            "weatherfx",
             "save",
             "load",
             "save_key",
@@ -298,6 +299,92 @@ impl Mod for Guest {
                     "screen {id} sized {} events {}",
                     size.is_some(),
                     kinds.join(",")
+                )))
+            }
+            "weatherfx" => {
+                // Weather, settings, a biome, the ground, a picture, a
+                // particle, what landed, and a haze.
+                let state = weather::get_weather();
+                let pos = world::BlockPos { x: 1, y: 64, z: 1 };
+                let biome = world::get_biome(pos).map(|b| format!("{} {}", b.id, b.foliage));
+                let ground = world::get_surface(pos, 70);
+                let solid = world::is_solid(world::BlockPos { x: 0, y: 64, z: 0 });
+                let sprite = particles::define_sprite(&particles::Sprite {
+                    name: "drop".into(),
+                    width: 2,
+                    height: 2,
+                    pixels: vec![255; 16],
+                })?;
+                let spawned = particles::spawn(particles::Options {
+                    sprite,
+                    x: 0.5,
+                    y: 70.0,
+                    z: 0.5,
+                    vx: 0.0,
+                    vy: -0.4,
+                    vz: 0.0,
+                    color: particles::Color {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    size: 0.1,
+                    lifetime: 40,
+                    gravity: 0.0,
+                    wind_x: 0.0,
+                    wind_z: 0.0,
+                    collide: true,
+                    size_curve: particles::SizeCurve::Constant,
+                    fade: particles::Fade::Late,
+                    flat: false,
+                    linger: 0,
+                    sway: 0.0,
+                    sway_period: 1,
+                    spin: 0.0,
+                    tumble: 0.0,
+                });
+                let nobody = particles::spawn(particles::Options {
+                    sprite: sprite + 1000,
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    vz: 0.0,
+                    color: particles::Color {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    size: 0.1,
+                    lifetime: 40,
+                    gravity: 0.0,
+                    wind_x: 0.0,
+                    wind_z: 0.0,
+                    collide: false,
+                    size_curve: particles::SizeCurve::Constant,
+                    fade: particles::Fade::None,
+                    flat: false,
+                    linger: 0,
+                    sway: 0.0,
+                    sway_period: 1,
+                    spin: 0.0,
+                    tumble: 0.0,
+                });
+                let landed = particles::landed().len();
+                atmosphere::set_haze(Some(atmosphere::Haze {
+                    amount: 2.0,
+                    red: 0.6,
+                    green: 0.7,
+                    blue: 0.8,
+                    density: 0.2,
+                }));
+                Ok(Some(format!(
+                    "weather {:?} setting {} biome {biome:?} ground {ground:?} solid {solid} sprite {sprite} spawned {spawned} unknown {nobody} landed {landed}",
+                    state.map(|w| (w.rain, w.thunder)),
+                    settings::get_particles(),
                 )))
             }
             "giveitem" => {

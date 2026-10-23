@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -620,6 +620,23 @@ impl horizon_mods::WorldAccess for FakeWorld {
             tags,
         })
     }
+    fn biome(&self, pos: &BlockPos) -> Option<horizon_mods::Biome> {
+        (pos.x.abs() < 16).then(|| horizon_mods::Biome {
+            id: "minecraft:plains".into(),
+            temperature: 0.8,
+            precipitation: true,
+            downfall: 0.4,
+            foliage: 0x77AB2F,
+            grass: 0x91BD59,
+            water: 0x3F76E4,
+        })
+    }
+    fn surface(&self, pos: &BlockPos, from: i32) -> Option<i32> {
+        (pos.x.abs() < 16).then_some(from.min(65))
+    }
+    fn solid(&self, pos: &BlockPos) -> bool {
+        self.block(pos).is_some_and(|b| b.id == "minecraft:oak_log")
+    }
     fn breakable(&self, pos: &BlockPos) -> bool {
         self.block(pos)
             .is_some_and(|b| b.id != "minecraft:air" && b.id != "minecraft:bedrock")
@@ -968,4 +985,59 @@ fn the_browser_api_paints_a_panel_and_reads_items_recipes_and_gives() {
     mods.set_ui(Ui::default());
     assert!(mods.command("giveitem minecraft:stick"));
     assert_eq!(mods.drain(), [feedback("give false")]);
+}
+
+#[test]
+fn the_weather_particles_and_haze_apis() {
+    use horizon_mods::{Landing, WeatherState};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    mods.set_snapshot(Snapshot {
+        weather: Some(WeatherState {
+            rain: 0.5,
+            thunder: 0.0,
+        }),
+        particles_setting: 1,
+        ..player()
+    });
+    assert!(mods.command("weatherfx"));
+    let out = mods.drain();
+    assert_eq!(
+        out,
+        [feedback(
+            "weather Some((0.5, 0.0)) setting 1 biome Some(\"minecraft:plains 7842607\") ground Some(65) solid true sprite 0 spawned true unknown false landed 0"
+        )]
+    );
+    // The game takes the picture and the particle, and the haze is clamped.
+    let (sprites, spawned) = mods.take_particles();
+    assert_eq!(sprites.len(), 1);
+    assert_eq!(sprites[0].name, "test_guest/drop");
+    assert_eq!(spawned.len(), 1);
+    assert!(mods.take_particles().1.is_empty());
+    let hazes = mods.hazes();
+    assert_eq!(hazes.len(), 1);
+    assert_eq!(hazes[0].amount, 1.0);
+    // What landed comes back to the mod that owns the picture only.
+    mods.add_landings(&[
+        Landing {
+            sprite: 0,
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+            water: false,
+        },
+        Landing {
+            sprite: 9,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            water: true,
+        },
+    ]);
+    assert!(mods.command("weatherfx"));
+    let out = mods.drain();
+    assert!(
+        matches!(&out[0], Output::Feedback { text, .. } if text.ends_with("landed 1")),
+        "{out:?}"
+    );
 }

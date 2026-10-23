@@ -327,6 +327,8 @@ enum Size {
     /// Grows from a third of its size to its size over its life (Horizon's
     /// rain rings).
     Grow,
+    /// A mod's particle shrinking to nothing (API 0.1.6).
+    Shrink,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Light {
@@ -461,12 +463,74 @@ enum Behaviour {
         start: [f64; 3],
         colors: [u32; 2],
     },
+    /// A mod's own particle (API 0.1.6).
+    Mod(ModMotion),
     /// Horizon's particle rain: a drop, a flake, a grain of sand or a ring.
     Weather {
         kind: WeatherKind,
         /// The wind that carries the flake and the grain (blocks per tick).
         wind: [f64; 2],
     },
+}
+/// How a mod's particle fades.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModFade {
+    None,
+    Late,
+    Full,
+}
+/// How a mod's particle size changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModSize {
+    Constant,
+    Grow,
+    Shrink,
+}
+/// A particle a mod asked for (`particles.spawn`, API 0.1.6).
+#[derive(Clone, Debug)]
+pub struct ModParticle {
+    /// The sprite's name in the atlas.
+    pub sprite_name: String,
+    /// The number the mod knows the sprite by (reported back on landing).
+    pub sprite: u32,
+    pub position: [f64; 3],
+    pub velocity: [f64; 3],
+    pub rgba: [f32; 4],
+    pub size: f32,
+    pub lifetime: i32,
+    pub gravity: f32,
+    pub wind: [f64; 2],
+    pub collide: bool,
+    pub size_curve: ModSize,
+    pub fade: ModFade,
+    pub flat: bool,
+    pub linger: u32,
+    pub sway: f32,
+    pub sway_period: u32,
+    pub spin: f32,
+}
+/// Where a mod's colliding particle landed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModLanding {
+    pub sprite: u32,
+    pub position: [f64; 3],
+    pub water: bool,
+}
+/// The state of a mod's particle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModMotion {
+    sprite: u32,
+    wind: [f64; 2],
+    collide: bool,
+    fade: ModFade,
+    flat: bool,
+    /// Ticks it lies where it landed; counts down once it rests.
+    linger: u32,
+    resting: bool,
+    sway: f32,
+    sway_period: u32,
+    spin: f32,
+    alpha: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum DripStage {
@@ -1036,6 +1100,7 @@ impl Particle {
             }
             Size::Shriek => self.size * (t * 0.75).clamp(0.0, 1.0),
             Size::Grow => self.size * (0.3 + 0.7 * t.clamp(0.0, 1.0)),
+            Size::Shrink => self.size * (1.0 - t.clamp(0.0, 1.0)),
             Size::Flash => {
                 7.1 * trig::sin(f64::from(
                     (self.age as f32 + a - 1.0) * 0.25 * std::f64::consts::PI as f32,
@@ -1176,6 +1241,9 @@ pub struct ParticleEngine {
     /// The item particles' sprites (`BreakingItemParticle`'s slime ball, snowball
     /// and cobweb models, resolved for the ground), one per model layer.
     pub item_sprites: HashMap<ParticleType, Vec<String>>,
+    /// Where the mods' colliding particles landed since the game last took
+    /// them (API 0.1.6).
+    pub mod_landings: Vec<ModLanding>,
 }
 /// `ParticleGroup.MAX_PARTICLES` (per render group; one group here).
 const MAX_PARTICLES: usize = 16384;
@@ -1310,6 +1378,7 @@ impl ParticleEngine {
             camera: [0.0; 3],
             sounds: Vec::new(),
             item_sprites: HashMap::new(),
+            mod_landings: Vec::new(),
         };
         let dir = root.join("assets/minecraft/particles");
         for &ty in ParticleType::ALL {
@@ -1402,6 +1471,41 @@ impl ParticleEngine {
                 q.sprite = Sprite::Named(HORIZON_LEAF_SPRITE.into());
             }
         }
+    }
+    /// Adds a picture of a mod's to the atlas under `name` (API 0.1.6).
+    pub fn register_sprite(&mut self, name: &str, rect: Rect) {
+        self.atlas.insert(name.to_owned(), rect);
+    }
+    /// A particle of a mod's (API 0.1.6).
+    pub fn add_mod(&mut self, m: &ModParticle) {
+        let mut q = Particle::blank(ParticleType::Rain, m.position);
+        q.sprite = Sprite::Named(m.sprite_name.clone());
+        q.velocity = m.velocity;
+        q.size = m.size;
+        q.lifetime = m.lifetime.max(1);
+        q.gravity = m.gravity;
+        q.has_physics = false;
+        q.rgba = m.rgba;
+        q.size_curve = match m.size_curve {
+            ModSize::Constant => Size::Fixed,
+            ModSize::Grow => Size::Grow,
+            ModSize::Shrink => Size::Shrink,
+        };
+        q.set_size(0.05, 0.05);
+        q.behaviour = Behaviour::Mod(ModMotion {
+            sprite: m.sprite,
+            wind: m.wind,
+            collide: m.collide,
+            fade: m.fade,
+            flat: m.flat,
+            linger: m.linger,
+            resting: false,
+            sway: m.sway,
+            sway_period: m.sway_period.max(1),
+            spin: m.spin,
+            alpha: m.rgba[3],
+        });
+        self.pending.push(q);
     }
     /// Horizon's particle rain: a drop of rain, falling at the speed it is
     /// given, drawn with Horizon's own streak.
@@ -3962,6 +4066,73 @@ impl ParticleEngine {
                     }
                 }
             }
+            // A mod's own particle: gravity, wind and sway, a landing the mod
+            // hears of, and a rest where it landed.
+            Behaviour::Mod(mut m) => {
+                p.previous = p.position;
+                if m.resting {
+                    if m.linger == 0 {
+                        p.removed = true;
+                    }
+                    m.linger = m.linger.saturating_sub(1);
+                    p.behaviour = Behaviour::Mod(m);
+                    return;
+                }
+                let age = p.age;
+                p.age += 1;
+                if age >= p.lifetime {
+                    p.removed = true;
+                    return;
+                }
+                p.velocity[1] -= f64::from(p.gravity);
+                if m.wind != [0.0; 2] {
+                    p.velocity[0] += (m.wind[0] - p.velocity[0]) * 0.2;
+                    p.velocity[2] += (m.wind[1] - p.velocity[2]) * 0.2;
+                }
+                let mut step = p.velocity;
+                if m.sway > 0.0 {
+                    let phase = age as f64 * std::f64::consts::TAU / f64::from(m.sway_period);
+                    step[0] += phase.sin() * f64::from(m.sway);
+                    step[2] += phase.cos() * f64::from(m.sway) * 0.6;
+                }
+                p.o_roll = p.roll;
+                p.roll += m.spin;
+                p.move_by(level, step);
+                let t = p.age as f32 / p.lifetime as f32;
+                p.rgba[3] = match m.fade {
+                    ModFade::None => m.alpha,
+                    ModFade::Late => m.alpha * ((1.0 - t) * 4.0).clamp(0.0, 1.0),
+                    ModFade::Full => m.alpha * (1.0 - t).clamp(0.0, 1.0),
+                };
+                if m.collide {
+                    let b = ParticleLevel::block_at(p.position);
+                    let f = level.facts.get(level.world.block(b[0], b[1], b[2]));
+                    if f.full_collision || f.fluid != Fluid::None {
+                        let water = f.fluid != Fluid::None;
+                        let y = if water {
+                            f64::from(b[1]) + level.fluid(b).1
+                        } else {
+                            f64::from(b[1]) + 1.0
+                        };
+                        self.mod_landings.push(ModLanding {
+                            sprite: m.sprite,
+                            position: [p.position[0], y, p.position[2]],
+                            water,
+                        });
+                        if m.linger > 0 {
+                            p.position[1] = y + 0.01;
+                            p.velocity = [0.0; 3];
+                            m.resting = true;
+                        } else {
+                            p.removed = true;
+                        }
+                    }
+                }
+                if p.position[1] < f64::from(crate::chunk::MIN_Y) {
+                    p.removed = true;
+                }
+                p.behaviour = Behaviour::Mod(m);
+            }
             Behaviour::DragonBreath { mut hit_ground } => {
                 p.previous = p.position;
                 let age = p.age;
@@ -4093,6 +4264,13 @@ impl ParticleEngine {
                 Behaviour::Transition { from, to } => {
                     let t = (p.age as f32 + partial) / (p.lifetime as f32 + 1.0);
                     rgb = std::array::from_fn(|i| from[i] + (to[i] - from[i]) * t);
+                }
+                // A mod's particle that lies flat (a ring on the water).
+                Behaviour::Mod(ModMotion { flat: true, .. }) => {
+                    rotations = [
+                        Some(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                        None,
+                    ];
                 }
                 // Horizon's rain rings lie flat on the ground or the water.
                 Behaviour::Weather {

@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.5;
+package horizon:mods@0.1.6;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -585,6 +585,31 @@ interface %world {
     /// The colours of the map (`MapColor`) by id, as 0xRRGGBB; the id is
     /// the one `get-chunk-surface` gives. Empty outside a world.
     get-map-colors: func() -> list<u32>;
+    /// A biome as a mod reads it (API 0.1.6).
+    record biome {
+        /// `minecraft:desert`, ...
+        id: string,
+        /// `Biome.getBaseTemperature`.
+        temperature: f32,
+        /// `Biome.hasPrecipitation`: it gets rain or snow at all.
+        precipitation: bool,
+        /// How much precipitation falls in it (`downfall`).
+        downfall: f32,
+        /// The foliage colour 0xRRGGBB (`FoliageColor`), the grass colour
+        /// (`GrassColor`, before a grass modifier) and the water colour.
+        foliage: u32,
+        grass: u32,
+        water: u32,
+    }
+    /// The biome at `pos`; none where no chunk is loaded (API 0.1.6).
+    get-biome: func(pos: block-pos) -> option<biome>;
+    /// Where the ground is in the column of `pos`: the y of the first free
+    /// space above the first block that stops motion (solid, leaves or a
+    /// fluid) found going down from `start-y` (`Heightmap.MOTION_BLOCKING`'s
+    /// idea); none where no chunk is loaded (API 0.1.6).
+    get-surface: func(pos: block-pos, start-y: s32) -> option<s32>;
+    /// Whether the block at `pos` has a full collision box (API 0.1.6).
+    is-solid: func(pos: block-pos) -> bool;
 }
 
 /// Capability `items-read`: the items of the game, vanilla's and the content
@@ -650,6 +675,147 @@ interface recipes {
     %list: func() -> list<recipe>;
 }
 
+/// Capability `weather-read`: the weather over the player (API 0.1.6).
+interface weather {
+    record state {
+        /// 0 to 1: how hard it rains (`Level.getRainLevel`).
+        rain: f32,
+        /// 0 to 1: how hard the thunderstorm is (`Level.getThunderLevel`).
+        thunder: f32,
+    }
+    /// The weather over the player; none outside a world and in a dimension
+    /// that has none.
+    get-weather: func() -> option<state>;
+}
+
+/// Capability `settings-read`: the client's own settings (API 0.1.6).
+interface settings {
+    /// The Particles setting: 0 all, 1 decreased, 2 minimal.
+    get-particles: func() -> u32;
+}
+
+/// Capability `particles`: the mod's own particles with its own pictures
+/// (API 0.1.6).
+interface particles {
+    /// A picture the mod's particles are drawn with.
+    record sprite {
+        /// The mod's own name for it (`rain_drop`); the same name replaces
+        /// the old picture.
+        name: string,
+        /// 1 to 64 pixels.
+        width: u32,
+        height: u32,
+        /// RGBA, four bytes a pixel, row by row from the top left.
+        pixels: list<u8>,
+    }
+    /// A colour, each part 0 to 1; white leaves the picture's own colours.
+    record color {
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+    }
+    /// How the particle's size changes as it lives.
+    enum size-curve {
+        /// The same size the whole time.
+        constant,
+        /// Grows from a third of its size to its size.
+        grow,
+        /// Shrinks to nothing.
+        shrink,
+    }
+    /// How the particle fades out.
+    enum fade {
+        /// It stays as bright as it is.
+        none,
+        /// It fades at the end of its life, as vanilla's particles do.
+        late,
+        /// It fades over its whole life.
+        full,
+    }
+    /// One particle.
+    record options {
+        /// The picture (the number `define-sprite` gave).
+        sprite: u32,
+        /// Where it starts, in blocks.
+        x: f64,
+        y: f64,
+        z: f64,
+        /// How fast it moves at the start, in blocks per tick.
+        vx: f64,
+        vy: f64,
+        vz: f64,
+        color: color,
+        /// The width of its quad, in blocks.
+        size: f32,
+        /// How long it lives, in ticks (1 to 1200).
+        lifetime: u32,
+        /// The downward speed it gains every tick.
+        gravity: f32,
+        /// The sideways speed (x and z, blocks per tick) it is pulled
+        /// towards: the wind. 0 and 0 leaves its own.
+        wind-x: f64,
+        wind-z: f64,
+        /// Whether it stops at the blocks and fluids it hits (and is then
+        /// reported by `landed`).
+        collide: bool,
+        size-curve: size-curve,
+        fade: fade,
+        /// Whether it lies flat (a ring on the water).
+        flat: bool,
+        /// How many ticks it lies where it landed before it vanishes.
+        linger: u32,
+        /// How far it sways sideways, in blocks per tick at most (0: no
+        /// sway), and how many ticks a sway takes (at least 1).
+        sway: f32,
+        sway-period: u32,
+        /// How fast it turns about its own axis and about a horizontal one,
+        /// in radians per tick.
+        spin: f32,
+        tumble: f32,
+    }
+    /// Where one of the mod's colliding particles landed.
+    record landing {
+        /// The picture of the particle that landed.
+        sprite: u32,
+        x: f64,
+        y: f64,
+        z: f64,
+        /// It hit a fluid (the point is on its surface), not a solid block
+        /// (the point is on the block's top).
+        water: bool,
+    }
+    /// Adds a picture and gives its number; an error when it is refused (too
+    /// big, wrong size of pixels, no room: 16 pictures in all, shared by
+    /// the mods).
+    define-sprite: func(sprite: sprite) -> result<u32, string>;
+    /// Spawns one particle; false when it was refused (an unknown picture,
+    /// or more than 512 particles in this call). At most a few thousand of
+    /// the mods' particles live at once.
+    spawn: func(options: options) -> bool;
+    /// The mod's own particles that landed since the last call, oldest first.
+    landed: func() -> list<landing>;
+}
+
+/// Capability `atmosphere`: the mod's own weather in the fog (API 0.1.6).
+interface atmosphere {
+    record haze {
+        /// 0 to 1: how much of the fog's colour the haze takes.
+        amount: f32,
+        /// The colour it takes, each part 0 to 1.
+        red: f32,
+        green: f32,
+        blue: f32,
+        /// How much closer the fog comes: its end distance times
+        /// `1 - density` (0 to 0.9).
+        density: f32,
+    }
+    /// The haze of the mod; none for none. The game keeps it until the mod
+    /// sets it again and drops it when the mod stops. With several mods the
+    /// strongest haze counts.
+    set-haze: func(haze: option<haze>);
+}
+
 /// What the game calls. Only the hooks `init` asks for are ever called.
 interface events {
     record registration {
@@ -685,6 +851,10 @@ world horizon-mod {
     import screen;
     import items;
     import recipes;
+    import weather;
+    import settings;
+    import particles;
+    import atmosphere;
     import %world;
     export events;
 }

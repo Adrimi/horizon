@@ -80,6 +80,41 @@ impl WorldAccess for ModWorld {
             biome,
         })
     }
+    fn biome(&self, pos: &BlockPos) -> Option<horizon_mods::Biome> {
+        let chunk = self.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
+        let info = self
+            .res
+            .biomes()
+            .get(chunk.biome(pos.x & 15, pos.y, pos.z & 15));
+        Some(horizon_mods::Biome {
+            id: info.name.clone(),
+            temperature: info.temperature,
+            precipitation: info.precipitation,
+            downfall: info.downfall,
+            foliage: info.foliage,
+            grass: info.grass,
+            water: info.water,
+        })
+    }
+    fn surface(&self, pos: &BlockPos, start_y: i32) -> Option<i32> {
+        let chunk = self.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
+        let facts = self.res.facts();
+        let (x, z) = (pos.x & 15, pos.z & 15);
+        let top = start_y.min(horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT - 1);
+        let mut y = top;
+        while y >= horizon_client::chunk::MIN_Y {
+            let f = facts.get(chunk.block(x, y, z));
+            if f.full_collision || f.fluid != horizon_client::blocks::Fluid::None {
+                return Some(y + 1);
+            }
+            y -= 1;
+        }
+        Some(horizon_client::chunk::MIN_Y)
+    }
+    fn solid(&self, pos: &BlockPos) -> bool {
+        self.state(pos)
+            .is_some_and(|s| self.res.facts().get(s).full_collision)
+    }
     fn biome_names(&self) -> Vec<String> {
         self.biomes.as_ref().clone()
     }
