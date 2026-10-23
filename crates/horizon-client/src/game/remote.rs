@@ -1353,6 +1353,7 @@ impl Game<'_> {
         }
         if let Some(t) = mob_type {
             let mut mob = Mob::new(id as u32, t, at, head);
+            super::remote_mob_data::client_defaults(&mut mob);
             (mob.yaw, mob.previous_yaw) = (yaw, yaw);
             (mob.head_pitch, mob.previous_head_pitch) = (pitch, pitch);
             mob.persistent = true;
@@ -1892,6 +1893,19 @@ impl Game<'_> {
                 );
             }
             C::SetPassengers(p) => self.remote_set_passengers(p.vehicle, &p.passengers),
+            // ClientPacketListener.handleEntityLinkPacket: who holds a mob's
+            // lead (this player, another player or a mob), for the rope.
+            C::SetEntityLink(p) => {
+                let me = self.remote.as_ref().map(|r| r.entity_id);
+                if let Some(m) = self.mobs.iter_mut().find(|m| m.id == p.source as u32) {
+                    use horizon_client::mobs::leash::Holder;
+                    m.extra.leash = match p.dest {
+                        0 => None,
+                        d if Some(d) == me => Some(Holder::Player),
+                        d => Some(Holder::Mob(d as u32)),
+                    };
+                }
+            }
             C::MoveVehicle(p) => self.remote_move_vehicle(p.position, p.yaw),
             // ClientPacketListener.handleRotateMob: lerpHeadTo(yHeadRot, 3).
             C::RotateHead(p) => {
@@ -1928,13 +1942,12 @@ impl Game<'_> {
                     && m.species() == horizon_client::mobs::Species::Rabbit
                 {
                     for (index, _, value) in &p.values {
-                        match (index, value) {
-                            (15, Value::Byte(flags)) => m.no_ai = flags & 1 != 0,
-                            (16, Value::Bool(baby)) => m.extra.age = if *baby { -1 } else { 0 },
-                            _ => {}
+                        if let (15, Value::Byte(flags)) = (index, value) {
+                            m.no_ai = flags & 1 != 0;
                         }
                     }
                 }
+                self.remote_mob_data(p.id, &p.values);
                 if let Some(m) = self.mobs.iter_mut().find(|m| m.id == p.id as u32)
                     && m.species() == horizon_client::mobs::Species::Creeper
                 {

@@ -24,6 +24,13 @@ address. The script then checks, from both sides, what a guest's game used to ge
 
 
 - arrows:    the guest and the host shoot each other with a bow; with the pvp game rule off, nothing (#484);
+- looks:     mobs look on both sides as the server has them (their synched data): a calf is a
+             baby, a red sheep is sheared, a size 4 slime, a tamed wolf sits with its blue collar, a
+             cow on fire burns and goes out; then the wither's health drops when it is hurt, the
+             sheep is dyed blue with its wool back and the calf grows up (#1367, #1368, #1370,
+             #1371, #1385, #1390);
+- leads:     the host and the guest each tie a cow to a lead and untie it: the rope shows on both
+             sides, held by the player who tied it, and goes on both (#1360);
 - respawn:   a player killed is drawn dead by the other side, and alive again once it respawns (the
              respawned player is a new entity to the others); the host dies, and on the server thread
              the guest too;
@@ -201,7 +208,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GUEST_NAME = 'Guest'
 # The host plays single player on its server thread (--server-thread).
 SERVER_THREAD = False
-CHECKS = ['tab', 'self', 'armour', 'nametags', 'walls', 'chest', 'crafting', 'sign', 'damage', 'mobs', 'hazards', 'pvp', 'arrows', 'kills', 'hurt', 'respawn', 'containers', 'feedback', 'titles', 'chat', 'commands', 'recipes', 'machines', 'brewing', 'loom', 'stonecutter', 'grindstone', 'anvil', 'smithing', 'enchanting', 'beacon', 'crafter', 'lectern', 'cartography', 'trials', 'clicks', 'sleep', 'predict', 'push', 'eat', 'eating', 'xp', 'objects', 'projectiles', 'worn', 'blast', 'barter', 'deflect', 'fireball', 'light', 'time', 'swings', 'cracks', 'plates', 'effects', 'portals', 'distance', 'growth', 'flight', 'ladder', 'boats', 'minecarts', 'frames', 'lightning', 'riding', 'mounts', 'worldspawn', 'beds', 'shield', 'deathmining', 'contacts', 'absorption', 'breath', 'lava', 'levels', 'drops', 'underwater']
+CHECKS = ['tab', 'self', 'armour', 'nametags', 'walls', 'chest', 'crafting', 'sign', 'damage', 'mobs', 'hazards', 'pvp', 'arrows', 'kills', 'hurt', 'looks', 'leads', 'respawn', 'containers', 'feedback', 'titles', 'chat', 'commands', 'recipes', 'machines', 'brewing', 'loom', 'stonecutter', 'grindstone', 'anvil', 'smithing', 'enchanting', 'beacon', 'crafter', 'lectern', 'cartography', 'trials', 'clicks', 'sleep', 'predict', 'push', 'eat', 'eating', 'xp', 'objects', 'projectiles', 'worn', 'blast', 'barter', 'deflect', 'fireball', 'light', 'time', 'swings', 'cracks', 'plates', 'effects', 'portals', 'distance', 'growth', 'flight', 'ladder', 'boats', 'minecarts', 'frames', 'lightning', 'riding', 'mounts', 'worldspawn', 'beds', 'shield', 'deathmining', 'contacts', 'absorption', 'breath', 'lava', 'levels', 'drops', 'underwater']
 
 
 class Game:
@@ -1145,6 +1152,116 @@ def check_hurt(host, guest, out):
     for name, sides in seen.items():
         assert all(t > 0 for t in sides.values()), f'{name}: the pig\'s hurt flash {seen}'
     return seen
+
+
+def mob_looks(game, centre):
+    """What `check_looks` compares of each mob around `centre`, by kind and column."""
+    found = {}
+    for m in game.raw('mobs', 32).get('near', []):
+        if abs(m['pos'][0] - centre[0]) > 12 or abs(m['pos'][2] - centre[2]) > 14:
+            continue
+        key = f"{m['kind'].removeprefix('minecraft:')}@{round(m['pos'][0] - centre[0])}"
+        found[key] = {'baby': m['baby'], 'color': m['color'], 'sheared': m['sheared'], 'size': m['size'],
+                      'tame': m['tame'], 'sitting': m['sitting'], 'burning': m['burning'],
+                      'health': round(m['health'])}
+    return found
+
+
+def check_looks(host, guest, out):
+    x, y, z = (int(v // 1) for v in pos_of(host))
+    centre = (x + 0.5, y, z + 0.5)
+    # Each mob in a column of its own (the key), standing on the stone floor.
+    looks = {
+        'cow@-5': ('{NoAI:1b,Fire:80s}', {'burning': True}),
+        'cow@-3': ('{NoAI:1b,Age:-24000}', {'baby': True}),
+        'cow@-1': ('{NoAI:1b}', {'baby': False}),
+        'sheep@1': ('{NoAI:1b,Color:14b,Sheared:1b}', {'color': 14, 'sheared': True}),
+        'slime@3': ('{NoAI:1b,Size:3}', {'size': 4}),
+        'wolf@5': ('{NoAI:1b,Owner:[I;1,2,3,4],Sitting:1b,CollarColor:11b}',
+                   {'tame': True, 'sitting': True, 'color': 11}),
+    }
+    sides = {'host': host, 'guest': guest}
+    seen = {}
+    try:
+        for key, (tag, _) in looks.items():
+            kind, dx = key.split('@')
+            host('command', command=f'summon minecraft:{kind} {centre[0] + int(dx)} {y} {z + 4.5} {tag}')
+        host('command', command=f'summon minecraft:wither {centre[0]} {y + 3} {z + 10.5} {{NoAI:1b,Invul:0}}')
+        host.wait(30)
+        seen['spawned'] = {name: mob_looks(g, centre) for name, g in sides.items()}
+        # Changes after the spawn: the wither hurt, the sheep dyed and grown back, the calf grown up.
+        host('command', command='damage @e[type=minecraft:wither,limit=1] 150 minecraft:generic')
+        for kind, dx, tag in (('sheep', 1, '{Color:11b,Sheared:0b}'), ('cow', -3, '{Age:0}')):
+            host('command', command=f'data merge entity @e[type=minecraft:{kind},x={centre[0] + dx},y={y},'
+                                    f'z={z + 4.5},distance=..0.5,limit=1] {tag}')
+        guest.raw('look-at', centre[0], y + 1, z + 4.5)
+        host.raw('look-at', centre[0], y + 1, z + 4.5)
+        # The fire (80 ticks) goes out in the meantime.
+        host.wait(80)
+        for name, g in sides.items():
+            g.shot(out, 'looks')
+        seen['later'] = {name: mob_looks(g, centre) for name, g in sides.items()}
+    finally:
+        # A killed slime splits: shrink it first so no children are left hopping into the next check.
+        host('command', command=f'data merge entity @e[type=minecraft:slime,x={centre[0] + 3},y={y},z={z + 4.5},'
+                                f'distance=..2,limit=1] {{Size:0}}')
+        host('command', command=f'kill @e[type=!minecraft:player,x={x - 12},y={y - 2},z={z - 2},dx=24,dy=12,dz=16]')
+    wrong = []
+    for name in sides:
+        spawned, later = seen['spawned'][name], seen['later'][name]
+        for key, (_, want) in looks.items():
+            got = spawned.get(key)
+            if got is None or any(got[k] != v for k, v in want.items()):
+                wrong.append(f'{name} {key}: {got}, wants {want}')
+        if later.get('cow@-5', {}).get('burning') is not False:
+            wrong.append(f"{name}: the cow's fire never went out: {later.get('cow@-5')}")
+        if [later.get('sheep@1', {}).get(k) for k in ('color', 'sheared')] != [11, False]:
+            wrong.append(f"{name}: the sheep dyed blue with its wool back: {later.get('sheep@1')}")
+        if later.get('cow@-3', {}).get('baby') is not False:
+            wrong.append(f"{name}: the calf grown up: {later.get('cow@-3')}")
+        withers = [v['health'] for k, v in spawned.items() if k.startswith('wither')]
+        hurt = [v['health'] for k, v in later.items() if k.startswith('wither')]
+        if withers != [300] or hurt != [150]:
+            wrong.append(f"{name}: the wither's health {withers} then {hurt}, wants [300] then [150]")
+    assert not wrong, '\n'.join(wrong)
+    return seen['later']['guest']
+
+
+def check_leads(host, guest, out):
+    spots = apart(host, guest)
+    result = {}
+    for label, player, other in (('host', host, guest), ('guest', guest, host)):
+        x, y, z = spots[label]
+        at = (x + 0.5, y, z + 2.5)
+
+        def cow(game):
+            found = [m for m in game.raw('mobs', 32).get('near', []) if m['kind'] == 'minecraft:cow'
+                     and abs(m['pos'][0] - at[0]) < 1 and abs(m['pos'][2] - at[2]) < 1]
+            assert found, f'{game.name} sees no cow at {at}'
+            return found[0]
+        player('command', command='gamemode survival')
+        player('command', command=f'summon minecraft:cow {at[0]} {y} {at[2]} {{NoAI:1b}}')
+        player('command', command='item replace entity @s weapon.mainhand with minecraft:lead')
+        player.wait(30)
+        try:
+            player.raw('look-at', f'{at[0]:.2f}', f'{y + 0.7:.2f}', f'{at[2]:.2f}')
+            player.raw('mouse', 'right', 'click')
+            player.wait(20)
+            tied = {'own': cow(player)['leash'], 'other': cow(other)['leash']}
+            player.shot(out, 'leads-' + label)
+            other.shot(out, f'leads-{label}-seen')
+            # An empty hand unties it (the lead was used up).
+            player.raw('mouse', 'right', 'click')
+            player.wait(20)
+            untied = {'own': cow(player)['leash'], 'other': cow(other)['leash']}
+        finally:
+            player('command', command=f'kill @e[type=!minecraft:player,x={at[0]},y={y},z={at[2]},distance=..6]')
+            player('command', command='clear @s')
+        result[label] = {'tied': tied, 'untied': untied}
+        # The other side draws it held by the player who tied it (another player to it).
+        assert tied['own'] == 'Player' and tied['other'], f"the {label}'s cow on its lead: {tied}"
+        assert untied == {'own': None, 'other': None}, f"the {label}'s cow untied: {untied}"
+    return result
 
 
 def container_items(game):
@@ -3826,7 +3943,9 @@ CHECK_FNS = {'tab': check_tab, 'self': check_self, 'armour': check_armour,
              'worldspawn': check_world_spawn, 'beds': check_beds, 'shield': check_shield, 'deathmining': check_death_mining,
              'contacts': check_contacts, 'absorption': check_absorption, 'breath': check_breath,
              'lava': check_lava, 'levels': check_levels, 'drops': check_drops,
-             'underwater': check_underwater}
+             'underwater': check_underwater,
+             'looks': check_looks,
+             'leads': check_leads}
 
 
 def run(ctl, out, resources, checks):
