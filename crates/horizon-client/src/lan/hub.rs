@@ -1337,8 +1337,8 @@ impl Hub {
         if log.is_empty() {
             return;
         }
-        let mut changes: Vec<((i32, i32), u32)> = log.drain().collect();
-        changes.sort_unstable();
+        let mut changes: Vec<((i32, i32), crate::chunk::SectionMask)> = log.drain().collect();
+        changes.sort_unstable_by_key(|(column, _)| *column);
         for ((x, z), sections) in changes {
             let tracked = |g: &Guest, x: i32, z: i32| g.sent_chunks.contains(&(x, z));
             let viewers: Vec<usize> = (0..self.guests.len())

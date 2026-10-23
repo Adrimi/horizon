@@ -24,21 +24,25 @@ pub use bindings::horizon::mods::{
         Decoration as ChatDecoration, Picture as ChatPicture, Place as ChatPlace,
         Region as ChatRegion, Source as ChatSource, Style as ChatStyle,
     },
-    entity::{Entity as WorldEntity, EntityKind, Face},
+    entity::{Detail as EntityDetail, Entity as WorldEntity, EntityKind, Face},
     game::{Clock, FoodStats, Player},
     game::{Health, InputState, Session},
     hud::{BarIcon, Bars},
     hud::{Corner, Line},
+    input::MouseEvent,
     inventory::{
         Crafting, Food, ItemStack as InventoryStack, PlayerInventory, Slot as InventorySlot, Stack,
         Tool as InventoryTool,
     },
     items::Item,
     keys::KeyEvent,
+    light_events::Flash as LightFlash,
     overlay::{HudState, Layer as OverlayLayer, WorldElement},
+    particles::Particle as ModParticleInfo,
     particles::{
         Color as ParticleColor, Fade as ParticleFade, Landing, Options as ParticleOptions,
-        SizeCurve as ParticleSizeCurve,
+        RenderType as ParticleRenderType, Rotation as ParticleRotation,
+        SizeCurve as ParticleSizeCurve, Style as ParticleStyle,
     },
     players::Player as ListedPlayer,
     recipes::{Kind as RecipeKind, Recipe},
@@ -52,20 +56,26 @@ pub use bindings::horizon::mods::{
     texture_rules::{
         BlockFilter as RuleBlock, Connect as RuleConnect, Method as RuleMethod, Rule as TextureRule,
     },
-    tooltip::{Content as TooltipContent, Hovered as TooltipHovered},
+    tooltip::{
+        ContainerItem as TooltipContainerItem, Content as TooltipContent,
+        Enchantment as TooltipEnchantment, Hovered as TooltipHovered,
+        HoveredStack as TooltipHoveredStack, HoveredTooltip as TooltipHoveredTooltip,
+        Line as TooltipLine,
+    },
     weather::State as WeatherState,
     world::{
-        Biome, BlockBroken, BlockPos, BlockRemoved, ChunkSurface, ContainerStack, RandomTick,
-        WorldBlock,
+        Biome, BlockBroken, BlockPos, BlockRemoved, ChunkDetails, ChunkSurface, ContainerStack,
+        RandomTick, WorldBlock,
     },
 };
 use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
     horizon::mods::{
-        atmosphere, chat, chat_decorate, debug, entity, game, hotbar, hud, inventory, items, keys,
-        lighting, log as mod_log, overlay, particles, players, recipes, resources, screen,
-        settings, slots, storage, target, texture_rules, tooltip, weather, world,
+        atmosphere, audio, chat, chat_decorate, debug, entity, exchange, game, hotbar, hud, input,
+        inventory, items, keys, light_events, lighting, log as mod_log, overlay, particles,
+        players, recipes, resources, screen, settings, slots, storage, target, texture_rules,
+        tooltip, weather, world,
     },
 };
 
@@ -102,7 +112,8 @@ pub const SCREEN_SHAPES: usize = 4096;
 pub const SCREEN_ELEMENTS: usize = 4096;
 const SLOT_MARKS: usize = 256;
 const TOOLTIP_ITEMS: usize = 32;
-const TOOLTIP_ELEMENTS: usize = 64;
+const TOOLTIP_ELEMENTS: usize = 128;
+const TOOLTIP_SIDE: f32 = 256.0;
 /// How many images and world elements a mod's overlay holds.
 pub const OVERLAY_TEXTURES: usize = 7;
 const OVERLAY_WORLD_ELEMENTS: usize = 512;
@@ -113,7 +124,9 @@ const TIP_LINES: usize = 32;
 /// count as 8.
 pub const TEXT_WIDTHS: usize = 512;
 pub const SCREEN_TEXTURES: usize = 8;
-pub const SCREEN_TEXTURE_SIDE: u32 = 256;
+pub const SCREEN_TEXTURE_SIDE: u32 = 512;
+/// The side of an overlay image (API 0.1.7); the screen's grew in 0.1.31.
+pub const OVERLAY_TEXTURE_SIDE: u32 = 256;
 
 /// What mods may read of the game, copied once per tick by the game.
 #[derive(Clone, Debug, Default)]
@@ -164,6 +177,9 @@ pub struct Snapshot {
     /// Every item of the game (`items-read`, API 0.1.5); built once by the
     /// game and shared.
     pub items: Option<Arc<Vec<Item>>>,
+    /// The colour of each item's name, by id (`items.get-name-color`, API
+    /// 0.1.20); built once by the game with `items`.
+    pub item_colors: Option<Arc<std::collections::HashMap<String, u32>>>,
     /// Every recipe of the game (`recipes-read`, API 0.1.5); built once.
     pub recipes: Option<Arc<Vec<Recipe>>>,
     /// The looked-at mob's armour and absorption, the face of the looked-at
@@ -193,6 +209,26 @@ pub struct Snapshot {
     /// The entities around the player as of this tick, nearest first
     /// (`entity-read`, API 0.1.8); none unless a mod uses it.
     pub entities: Option<Arc<Vec<WorldEntity>>>,
+    /// The extra state of the entities that have some, by id
+    /// (`entity.get-detail`, API 0.1.20).
+    pub game_mode: Option<String>,
+    /// The living particles of all the mods (`particles.list`, API 0.1.25);
+    /// each mod gets its own by its pictures.
+    pub mod_particles: Option<Arc<Vec<ModParticleInfo>>>,
+    /// The height of the clouds (`game.get-cloud-height`, API 0.1.25).
+    pub cloud_height: Option<i32>,
+    /// The window and its GUI scale (`game.get-viewport`, API 0.1.32).
+    pub viewport: Option<(f32, f32, f32)>,
+    /// The view distance of the world this game runs (`game.get-server-view-distance`).
+    pub server_view_distance: u32,
+    /// The player's tags (`game.get-player-tags`, API 0.1.24).
+    pub player_tags: Vec<String>,
+    pub entity_details: Option<Arc<std::collections::HashMap<u32, EntityDetail>>>,
+    /// The faces of the players among the entities, by UUID (32 hexadecimal
+    /// characters), for `entity.get-face` (API 0.1.20).
+    pub faces: Option<Arc<std::collections::HashMap<String, Face>>>,
+    /// Beams and sparks that shine (`light-events`, API 0.1.20).
+    pub flashes: Option<Arc<Vec<LightFlash>>>,
     /// The world is this game's own: entity edits are allowed.
     pub entities_editable: bool,
 }
@@ -280,6 +316,12 @@ pub struct Ui {
     /// tooltip was drawn last (`tooltip`).
     pub keys_down: Vec<String>,
     pub tooltip: Option<TooltipHovered>,
+    /// The enchantments of that item, and the workstation screen that is
+    /// open (`tooltip`, `screen`; API 0.1.27).
+    pub enchantments: Vec<TooltipEnchantment>,
+    pub station: Option<String>,
+    /// The stack of that tooltip, with its contents (API 0.1.28).
+    pub stack: Option<TooltipHoveredStack>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -304,6 +346,9 @@ impl Default for Ui {
             hovered_slot: None,
             keys_down: Vec::new(),
             tooltip: None,
+            enchantments: Vec::new(),
+            station: None,
+            stack: None,
         }
     }
 }
@@ -359,6 +404,10 @@ pub trait WorldAccess: Send + Sync {
     fn biome_names(&self) -> Vec<String>;
     /// The map's colours by id, as 0xRRGGBB (API 0.1.4).
     fn map_colors(&self) -> Vec<u32>;
+    /// The top blocks, ambiguity and light of the chunk's columns (API 0.1.32).
+    fn chunk_details(&self, _cx: i32, _cz: i32) -> Option<ChunkDetails> {
+        None
+    }
     /// As `chunk_surface`, scanning down from the height `y` (API 0.1.7).
     fn chunk_columns(&self, _cx: i32, _cz: i32, _y: i32) -> Option<ChunkSurface> {
         None
@@ -375,6 +424,18 @@ pub trait WorldAccess: Send + Sync {
     /// Whether the block at `pos` has a full collision box (API 0.1.6).
     fn solid(&self, _pos: &BlockPos) -> bool {
         false
+    }
+    /// The block light and the sky light at `pos` (API 0.1.20).
+    fn light(&self, _pos: &BlockPos) -> Option<(u8, u8)> {
+        None
+    }
+    /// The world is this game's own (API 0.1.20).
+    fn is_local(&self) -> bool {
+        false
+    }
+    /// The fog colour of the biome at `pos` (API 0.1.22).
+    fn biome_fog(&self, _pos: &BlockPos) -> Option<u32> {
+        None
     }
 }
 
@@ -401,6 +462,8 @@ pub struct Texture {
     pub pixels: Vec<u8>,
     /// Bumped when the image changes, so the game uploads it once.
     pub version: u64,
+    /// Whether it is scaled smoothly (`set-texture-filter`, API 0.1.31).
+    pub smooth: bool,
 }
 
 /// A mod's screen (`screen`): what it draws, the images it uploaded and what
@@ -417,6 +480,8 @@ pub struct Screen {
     pub shapes: Vec<ScreenShape>,
     /// The images the mod uploaded.
     pub textures: Vec<Texture>,
+    /// The ids the mod asked to scale smoothly (`set-texture-filter`).
+    pub smooth: Vec<(u32, bool)>,
     /// What the player did, since the last `get-input`.
     pub input: Vec<ScreenEvent>,
     /// What `paint` gave for the next frame (API 0.1.5).
@@ -487,6 +552,46 @@ pub enum Output {
     MoveItem { from: u32, to: u32 },
     /// `hud.show-action-bar` (API 0.1.16).
     ActionBar { text: String, color: u32 },
+    /// `world.run-command` (API 0.1.20): the command, without its slash.
+    Command { command: String },
+    /// `world.fall-block` (API 0.1.24).
+    FallBlock {
+        pos: [i32; 3],
+        velocity: [f64; 3],
+        drops: bool,
+        place: bool,
+    },
+    /// `world.set-block` (API 0.1.24).
+    SetBlock {
+        pos: [i32; 3],
+        id: String,
+        properties: Vec<(String, String)>,
+    },
+    /// `world.spawn-item` (API 0.1.24).
+    SpawnItem {
+        pos: [i32; 3],
+        id: String,
+        count: u32,
+    },
+    /// `audio.register` (API 0.1.25): the file is in the mod's folder.
+    RegisterSound {
+        mod_id: String,
+        name: String,
+        path: PathBuf,
+    },
+    /// `particles.remove` (API 0.1.26).
+    RemoveParticles { sprite: u32, pos: [f64; 3] },
+    /// `game.add-exhaustion` (API 0.1.23).
+    Exhaust { amount: f32 },
+    /// `world.merge-drops-at` (API 0.1.23).
+    MergeDrops { pos: [i32; 3] },
+    /// `audio.play` (API 0.1.22).
+    PlaySound {
+        sound: String,
+        place: Option<[f64; 3]>,
+        volume: f32,
+        pitch: f32,
+    },
 }
 
 /// A mod's text panel, drawn every frame until it changes.
@@ -539,6 +644,8 @@ struct State {
     panel: Option<Panel>,
     /// Capability `storage`'s folder; made on first `set`.
     data_dir: PathBuf,
+    /// The `.hmod` (or folder) the mod was read from, for `sounds/`.
+    package_path: PathBuf,
     /// Bytes `storage::set` may still write before this hook call ends
     /// (reset per call in [`Mods::call`]): fuel bounds a mod's CPU time but
     /// not disk I/O time, so a loop of small-fuel, large-payload `set`s
@@ -563,7 +670,12 @@ struct State {
     /// Particle pictures defined and particles spawned since the game last
     /// took them (`particles`, API 0.1.6).
     new_sprites: Vec<SpriteDef>,
-    new_particles: Vec<ParticleOptions>,
+    new_particles: Vec<(ParticleOptions, ParticleRotation, ParticleStyle)>,
+    /// The game's own rain and snow columns are off (`weather`, API 0.1.22).
+    default_weather_hidden: bool,
+    default_splash_hidden: bool,
+    weather_passthrough: Vec<String>,
+    registered_sounds: u32,
     spawned: usize,
     /// The numbers of the pictures this mod defined.
     owned_sprites: Vec<u32>,
@@ -592,13 +704,30 @@ struct State {
     texture_version: u64,
     /// The marks the mod has the game draw on its slots (`slots`).
     slot_marks: Vec<Mark>,
+    screen_marks: Vec<Mark>,
+    hud_marks: Vec<Mark>,
     /// What the mod adds to item tooltips, and its debug lines.
     tooltips: Vec<(String, TooltipContent)>,
+    /// The lines the mod adds into the text of the tooltip (API 0.1.27).
+    tooltip_lines: Vec<TooltipLine>,
+    /// The stack the mod last read, as text, and the tooltip it set for
+    /// that stack (API 0.1.28).
+    stack_read: Option<String>,
+    stack_tooltip: Option<(String, TooltipHoveredTooltip)>,
+    /// What mods publish for each other, by mod id then key (`exchange`).
+    exchange: Exchange,
     debug_lines: Vec<String>,
     /// The light sources the mod gave the world (API 0.1.13).
     lights: Vec<lighting::Light>,
     /// The manifest declares `slot-decorate`.
     can_decorate: bool,
+    can_game_edit: bool,
+    input_declared: bool,
+    /// The mouse events not polled yet, whether the wheel is the mod's, and
+    /// its mining-speed modifier (API 0.1.23).
+    mouse_events: Vec<MouseEvent>,
+    wheel_captured: bool,
+    break_speed_modifier: f64,
     /// What the mod painted in the HUD's layers, at points of the world, and
     /// the images it uploaded for it (`overlay`, API 0.1.7).
     overlay_layers: [Vec<ScreenElement>; 2],
@@ -641,7 +770,16 @@ pub struct Mods {
     resource_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// Gives the pixels of a sprite of the game's atlas (API 0.1.19).
     sprite_source: Arc<std::sync::Mutex<Option<SpriteSource>>>,
+    /// The data mods publish for each other (API 0.1.27).
+    exchange: Exchange,
 }
+
+/// Bytes published by mod id, then key.
+type Exchange = Arc<
+    std::sync::Mutex<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<u8>>>,
+    >,
+>;
 
 /// A sprite of the game's atlas by name: its width, height and RGBA pixels.
 pub type SpriteSource = Arc<dyn Fn(&str) -> Option<(u32, u32, Vec<u8>)> + Send + Sync>;
@@ -796,6 +934,7 @@ impl Mods {
         let ui = self.ui.clone();
         let resource_root = self.resource_root.clone();
         let sprite_source = self.sprite_source.clone();
+        let exchange_store = self.exchange.clone();
         let (engine, linker) = self.engine()?;
         let component =
             Component::new(engine, wasm).map_err(|e| format!("not a component: {e}"))?;
@@ -829,6 +968,7 @@ impl Mods {
             out: Vec::new(),
             panel: None,
             data_dir,
+            package_path: path.to_path_buf(),
             storage_budget: write_budget,
             storage_write_budget: write_budget,
             storage_quota: quota,
@@ -846,6 +986,10 @@ impl Mods {
             moved: 0,
             new_sprites: Vec::new(),
             new_particles: Vec::new(),
+            default_weather_hidden: false,
+            default_splash_hidden: false,
+            weather_passthrough: Vec::new(),
+            registered_sounds: 0,
             spawned: 0,
             owned_sprites: Vec::new(),
             landings: Vec::new(),
@@ -861,10 +1005,21 @@ impl Mods {
             texture_rules: Vec::new(),
             texture_version: 0,
             slot_marks: Vec::new(),
+            screen_marks: Vec::new(),
+            hud_marks: Vec::new(),
             tooltips: Vec::new(),
+            tooltip_lines: Vec::new(),
+            stack_read: None,
+            stack_tooltip: None,
+            exchange: exchange_store,
             debug_lines: Vec::new(),
             lights: Vec::new(),
             can_decorate: m.capabilities.contains(&crate::Capability::SlotDecorate),
+            can_game_edit: m.capabilities.contains(&crate::Capability::GameEdit),
+            input_declared: m.capabilities.contains(&crate::Capability::Input),
+            mouse_events: Vec::new(),
+            wheel_captured: false,
+            break_speed_modifier: 0.0,
             overlay_layers: [Vec::new(), Vec::new()],
             overlay_world: Vec::new(),
             overlay_textures: Vec::new(),
@@ -962,7 +1117,13 @@ impl Mods {
     }
     /// The particle pictures and particles the mods defined and spawned
     /// since the last call (API 0.1.6).
-    pub fn take_particles(&mut self) -> (Vec<SpriteDef>, Vec<ParticleOptions>) {
+    #[allow(clippy::type_complexity)]
+    pub fn take_particles(
+        &mut self,
+    ) -> (
+        Vec<SpriteDef>,
+        Vec<(ParticleOptions, ParticleRotation, ParticleStyle)>,
+    ) {
         let (mut sprites, mut particles) = (Vec::new(), Vec::new());
         for entry in &mut self.entries {
             let Some(run) = entry.run.as_mut() else {
@@ -1035,6 +1196,32 @@ impl Mods {
             })
             .collect()
     }
+    /// The tooltip a running mod set for the stack whose description
+    /// (`{:?}` of its `hovered-stack`) is `stack`, with the id of the mod
+    /// (API 0.1.28).
+    pub fn hovered_tooltip(&self, stack: &str) -> Option<(&str, &TooltipHoveredTooltip)> {
+        self.entries.iter().find_map(|e| {
+            let d = e.run.as_ref()?.store.data();
+            let (key, t) = d.stack_tooltip.as_ref()?;
+            (key == stack).then_some((d.id.as_str(), t))
+        })
+    }
+    /// The lines the running mods add into item tooltips, in the order of
+    /// the mods' ids (API 0.1.27).
+    pub fn tooltip_lines(&self) -> Vec<TooltipLine> {
+        let mut mods: Vec<(&str, &Vec<TooltipLine>)> = self
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let d = e.run.as_ref()?.store.data();
+                Some((d.id.as_str(), &d.tooltip_lines))
+            })
+            .collect();
+        mods.sort_by_key(|(id, _)| *id);
+        mods.into_iter()
+            .flat_map(|(_, l)| l.iter().cloned())
+            .collect()
+    }
     /// The light sources of the running mods: x, y, z and level (API
     /// 0.1.13).
     pub fn lights(&self) -> Vec<([f64; 3], u8)> {
@@ -1066,6 +1253,82 @@ impl Mods {
         self.entries
             .iter()
             .filter_map(|e| Some(e.run.as_ref()?.store.data().slot_marks.iter()))
+            .flatten()
+            .collect()
+    }
+    /// A mouse event for the mods that declared `input` (API 0.1.23).
+    pub fn push_mouse_event(&mut self, event: MouseEvent) {
+        for entry in &mut self.entries {
+            let Some(run) = entry.run.as_mut() else {
+                continue;
+            };
+            let data = run.store.data_mut();
+            if data.input_declared {
+                if data.mouse_events.len() >= 64 {
+                    data.mouse_events.remove(0);
+                }
+                data.mouse_events.push(event);
+            }
+        }
+    }
+    /// Whether a running mod keeps the mouse wheel from the hotbar (API 0.1.23).
+    pub fn wheel_captured(&self) -> bool {
+        self.entries.iter().any(|e| {
+            e.run
+                .as_ref()
+                .is_some_and(|r| r.store.data().wheel_captured)
+        })
+    }
+    /// The sum of the mods' mining-speed modifiers (API 0.1.23).
+    pub fn break_speed_modifier(&self) -> f64 {
+        self.entries
+            .iter()
+            .filter_map(|e| e.run.as_ref())
+            .map(|r| r.store.data().break_speed_modifier)
+            .sum()
+    }
+    /// Whether a running mod has turned the game's own rain splashes off
+    /// (`weather.set-default-splashing`, API 0.1.25).
+    pub fn default_splash_hidden(&self) -> bool {
+        self.entries.iter().any(|e| {
+            e.run
+                .as_ref()
+                .is_some_and(|r| r.store.data().default_splash_hidden)
+        })
+    }
+    /// The blocks and tags the mods' particles fly through (API 0.1.25).
+    pub fn weather_passthrough(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.run.as_ref())
+            .flat_map(|r| r.store.data().weather_passthrough.iter().cloned())
+            .collect()
+    }
+    /// Whether a running mod has turned the game's own rain and snow columns
+    /// off (`weather.set-default-weather`, API 0.1.22).
+    pub fn default_weather_hidden(&self) -> bool {
+        self.entries.iter().any(|e| {
+            e.run
+                .as_ref()
+                .is_some_and(|r| r.store.data().default_weather_hidden)
+        })
+    }
+    /// The marks to draw on the hotbar of the HUD (`hud`) or on the slots of
+    /// the open screen, with the id of the mod that set them (API 0.1.20).
+    pub fn slot_marks_for(&self, hud: bool) -> Vec<(&str, &Mark)> {
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let run = e.run.as_ref()?;
+                let d = run.store.data();
+                let extra = if hud { &d.hud_marks } else { &d.screen_marks };
+                Some(
+                    d.slot_marks
+                        .iter()
+                        .chain(extra.iter())
+                        .map(move |m| (d.id.as_str(), m)),
+                )
+            })
             .flatten()
             .collect()
     }
@@ -1523,6 +1786,47 @@ impl Mods {
     }
 }
 
+/// `sounds/<name>.ogg` (or `.wav`) of a mod's `.hmod` or folder.
+fn read_packaged_sound(package: &Path, name: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
+    if !valid {
+        return Err("a sound's name is [a-z0-9_.-]{1,64}".into());
+    }
+    let missing = || format!("the mod has no sounds/{name}.ogg or sounds/{name}.wav");
+    let limit = (2u64 << 20) + 1;
+    let mut out = Vec::new();
+    if package.is_dir() {
+        let file = ["ogg", "wav"]
+            .iter()
+            .find_map(|ext| std::fs::File::open(package.join(format!("sounds/{name}.{ext}"))).ok())
+            .ok_or_else(missing)?;
+        file.take(limit)
+            .read_to_end(&mut out)
+            .map_err(|e| e.to_string())?;
+    } else {
+        let file = std::fs::File::open(package).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut found = None;
+        for ext in ["ogg", "wav"] {
+            if zip.by_name(&format!("sounds/{name}.{ext}")).is_ok() {
+                found = Some(format!("sounds/{name}.{ext}"));
+                break;
+            }
+        }
+        let entry = found.ok_or_else(missing)?;
+        let f = zip.by_name(&entry).map_err(|_| missing())?;
+        f.take(limit)
+            .read_to_end(&mut out)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
 fn modified(path: &Path) -> Option<SystemTime> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.is_dir() {
@@ -1571,6 +1875,39 @@ impl game::Host for State {
     }
     fn get_food_stats(&mut self) -> Option<FoodStats> {
         self.snapshot.food
+    }
+    fn add_exhaustion(&mut self, amount: f32) {
+        if self.can_game_edit && amount.is_finite() && amount > 0.0 {
+            self.out.push(Output::Exhaust {
+                amount: amount.min(40.0),
+            });
+        }
+    }
+    fn set_break_speed_modifier(&mut self, multiplier: f64) {
+        if self.can_game_edit && multiplier.is_finite() {
+            self.break_speed_modifier = multiplier.clamp(-0.99, 100.0);
+        }
+    }
+    fn get_game_mode(&mut self) -> Option<String> {
+        self.snapshot.game_mode.clone()
+    }
+    fn get_cloud_height(&mut self) -> Option<i32> {
+        self.snapshot.cloud_height
+    }
+    fn get_viewport(&mut self) -> Option<game::Viewport> {
+        self.snapshot
+            .viewport
+            .map(|(gui_scale, width, height)| game::Viewport {
+                gui_scale,
+                width,
+                height,
+            })
+    }
+    fn get_server_view_distance(&mut self) -> u32 {
+        self.snapshot.server_view_distance
+    }
+    fn get_player_tags(&mut self) -> Vec<String> {
+        self.snapshot.player_tags.clone()
     }
     fn get_seed(&mut self) -> Option<u64> {
         self.ui.seed
@@ -1765,6 +2102,29 @@ impl entity::Host for State {
             .cloned()
             .collect()
     }
+    fn get_detail(&mut self, id: u32) -> Option<EntityDetail> {
+        if !self
+            .snapshot
+            .entities
+            .as_ref()
+            .is_some_and(|e| e.iter().any(|e| e.id == id))
+        {
+            return None;
+        }
+        let detail = self
+            .snapshot
+            .entity_details
+            .as_ref()
+            .and_then(|d| d.get(&id).cloned());
+        Some(detail.unwrap_or(EntityDetail {
+            swell: 0.0,
+            glowing: false,
+            in_water: false,
+            squish: 0.0,
+            dark_ticks: 0,
+            carried_block: String::new(),
+        }))
+    }
     fn remove(&mut self, id: u32) -> bool {
         let ok = self.can_edit_entities
             && self.snapshot.entities_editable
@@ -1794,26 +2154,136 @@ impl entity::Host for State {
         }
         ok
     }
-    fn get_face(&mut self, _uuid: String) -> Option<Face> {
-        None
+    fn get_face(&mut self, uuid: String) -> Option<Face> {
+        self.snapshot.faces.as_ref()?.get(&uuid).cloned()
     }
+}
+/// The marks a mod set, at most `SLOT_MARKS`, on slots that exist, with
+/// finite sizes and places.
+fn clean_marks(marks: Vec<Mark>) -> Vec<Mark> {
+    marks
+        .into_iter()
+        .filter(|m| m.slot < 1000)
+        .filter(|m| match &m.shape {
+            MarkShape::Picture(p) => [p.width, p.height, p.x, p.y].iter().all(|v| v.is_finite()),
+            MarkShape::Square(q) => [q.size, q.x, q.y].iter().all(|v| v.is_finite()),
+            _ => true,
+        })
+        .take(SLOT_MARKS)
+        .collect()
 }
 impl slots::Host for State {
     fn set_marks(&mut self, marks: Vec<Mark>) {
         if !self.can_decorate {
             return;
         }
-        self.slot_marks = marks
-            .into_iter()
-            .take(SLOT_MARKS)
-            .filter(|m| m.slot < 1000)
-            .collect();
+        self.slot_marks = clean_marks(marks);
+    }
+    fn set_screen_marks(&mut self, marks: Vec<Mark>) {
+        if self.can_decorate {
+            self.screen_marks = clean_marks(marks);
+        }
+    }
+    fn set_hud_marks(&mut self, marks: Vec<Mark>) {
+        if self.can_decorate {
+            self.hud_marks = clean_marks(marks);
+        }
+    }
+    fn upload_texture(
+        &mut self,
+        id: u32,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), String> {
+        if !self.can_decorate {
+            return Err("slot-decorate is not declared".into());
+        }
+        overlay::Host::upload_texture(self, id, width, height, rgba)
     }
     fn get_hovered_slot(&mut self) -> Option<u32> {
         self.ui.hovered_slot
     }
 }
+impl exchange::Host for State {
+    fn publish(&mut self, key: String, data: Vec<u8>) -> Result<(), String> {
+        let valid = !key.is_empty()
+            && key.len() <= 64
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
+        if !valid {
+            return Err("a key is [a-z0-9_.-]{1,64}".into());
+        }
+        if data.len() > 1 << 20 {
+            return Err("a value is at most 1 MiB".into());
+        }
+        let mut all = self.exchange.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = all.entry(self.id.clone()).or_default();
+        if !mine.contains_key(&key) && mine.len() >= 64 {
+            return Err("a mod may publish 64 keys".into());
+        }
+        mine.insert(key, data);
+        Ok(())
+    }
+    fn withdraw(&mut self, key: String) {
+        let mut all = self.exchange.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mine) = all.get_mut(&self.id) {
+            mine.remove(&key);
+        }
+    }
+    fn read(&mut self, mod_id: String, key: String) -> Option<Vec<u8>> {
+        let all = self.exchange.lock().unwrap_or_else(|e| e.into_inner());
+        all.get(&mod_id)?.get(&key).cloned()
+    }
+    fn list_keys(&mut self, mod_id: String) -> Vec<String> {
+        let all = self.exchange.lock().unwrap_or_else(|e| e.into_inner());
+        all.get(&mod_id)
+            .map_or_else(Vec::new, |m| m.keys().cloned().collect())
+    }
+}
 impl tooltip::Host for State {
+    fn get_hovered_stack(&mut self) -> Option<TooltipHoveredStack> {
+        let stack = self.ui.stack.clone();
+        self.stack_read = stack.as_ref().map(|s| format!("{s:?}"));
+        stack
+    }
+    fn set_hovered_tooltip(&mut self, tooltip: Option<TooltipHoveredTooltip>) {
+        let (Some(mut t), Some(key)) = (tooltip, self.stack_read.clone()) else {
+            self.stack_tooltip = None;
+            return;
+        };
+        t.width = t.width.clamp(0.0, TOOLTIP_SIDE);
+        t.height = t.height.clamp(0.0, TOOLTIP_SIDE);
+        t.elements = clean_elements(t.elements)
+            .into_iter()
+            .take(TOOLTIP_ELEMENTS)
+            .collect();
+        t.lines = t.lines.map(|l| {
+            l.into_iter()
+                .take(64)
+                .map(|mut line| {
+                    line.text = line.text.chars().take(256).collect();
+                    line
+                })
+                .collect()
+        });
+        self.stack_tooltip = Some((key, t));
+    }
+    fn get_hovered_enchantments(&mut self) -> Vec<TooltipEnchantment> {
+        self.ui.enchantments.clone()
+    }
+    fn set_lines(&mut self, lines: Vec<TooltipLine>) {
+        self.tooltip_lines = lines
+            .into_iter()
+            .take(64)
+            .map(|mut l| {
+                l.text = l.text.chars().take(256).collect();
+                l.under.truncate(128);
+                l
+            })
+            .collect();
+    }
     fn get_hovered(&mut self) -> Option<TooltipHovered> {
         self.ui.tooltip.clone()
     }
@@ -1825,8 +2295,8 @@ impl tooltip::Host for State {
         if self.tooltips.len() >= TOOLTIP_ITEMS || item.len() > 128 {
             return;
         }
-        content.width = content.width.clamp(0.0, 128.0);
-        content.height = content.height.clamp(0.0, 128.0);
+        content.width = content.width.clamp(0.0, TOOLTIP_SIDE);
+        content.height = content.height.clamp(0.0, TOOLTIP_SIDE);
         content.elements = clean_elements(content.elements)
             .into_iter()
             .take(TOOLTIP_ELEMENTS)
@@ -2065,6 +2535,102 @@ impl chat_decorate::Host for State {
         self.chat_pictures.push((id, decoration));
     }
 }
+impl input::Host for State {
+    fn poll(&mut self) -> Vec<MouseEvent> {
+        std::mem::take(&mut self.mouse_events)
+    }
+    fn set_wheel_captured(&mut self, captured: bool) {
+        self.wheel_captured = captured;
+    }
+}
+impl audio::Host for State {
+    fn register(&mut self, name: String, ogg: Vec<u8>) -> Result<(), String> {
+        let path = self.register_sound_file(&name, &ogg)?;
+        let mod_id = self.id.clone();
+        self.out.push(Output::RegisterSound { mod_id, name, path });
+        Ok(())
+    }
+    fn register_file(&mut self, name: String) -> Result<(), String> {
+        let ogg = read_packaged_sound(&self.package_path, &name)?;
+        self.register(name, ogg)
+    }
+    fn play(
+        &mut self,
+        sound: String,
+        place: Option<audio::SoundPlace>,
+        volume: f32,
+        pitch: f32,
+    ) -> bool {
+        let valid_part = |p: &str| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.' | '/'))
+        };
+        let named = sound
+            .split_once(':')
+            .is_some_and(|(ns, path)| valid_part(ns) && valid_part(path));
+        let place = place.map(|p| [p.x, p.y, p.z]);
+        if !named
+            || sound.len() > 128
+            || !volume.is_finite()
+            || !pitch.is_finite()
+            || place.is_some_and(|p| p.iter().any(|v| !v.is_finite()))
+        {
+            return false;
+        }
+        let queued = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::PlaySound { .. }))
+            .count();
+        if queued >= 16 {
+            return false;
+        }
+        self.out.push(Output::PlaySound {
+            sound,
+            place,
+            volume: volume.clamp(0.0, 4.0),
+            pitch: pitch.clamp(0.5, 2.0),
+        });
+        true
+    }
+}
+impl State {
+    fn register_sound_file(&mut self, name: &str, ogg: &[u8]) -> Result<PathBuf, String> {
+        let valid = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
+        if !valid {
+            return Err("a sound's name is [a-z0-9_.-]{1,64}".into());
+        }
+        if ogg.len() > 2 << 20 {
+            return Err("a sound is at most 2 MiB".into());
+        }
+        let wav = ogg.len() > 12 && ogg.starts_with(b"RIFF") && &ogg[8..12] == b"WAVE";
+        if !ogg.starts_with(b"OggS") && !wav {
+            return Err("the file is not OGG Vorbis or WAV".into());
+        }
+        if self.registered_sounds >= 16 {
+            return Err("a mod may register 16 sounds".into());
+        }
+        let dir = self.data_dir.join("sounds");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{name}.{}", if wav { "wav" } else { "ogg" }));
+        std::fs::write(&path, ogg).map_err(|e| e.to_string())?;
+        self.registered_sounds += 1;
+        Ok(path)
+    }
+}
+impl light_events::Host for State {
+    fn poll(&mut self) -> Vec<LightFlash> {
+        self.snapshot
+            .flashes
+            .as_ref()
+            .map_or_else(Vec::new, |f| f.iter().take(256).cloned().collect())
+    }
+}
 impl players::Host for State {
     fn get_players(&mut self) -> Vec<ListedPlayer> {
         self.snapshot
@@ -2101,6 +2667,12 @@ impl debug::Host for State {
 impl weather::Host for State {
     fn get_weather(&mut self) -> Option<WeatherState> {
         self.snapshot.weather
+    }
+    fn set_default_weather(&mut self, visible: bool) {
+        self.default_weather_hidden = !visible;
+    }
+    fn set_default_splashing(&mut self, visible: bool) {
+        self.default_splash_hidden = !visible;
     }
 }
 impl settings::Host for State {
@@ -2149,6 +2721,33 @@ impl particles::Host for State {
         Ok(id)
     }
     fn spawn(&mut self, options: ParticleOptions) -> bool {
+        self.spawn_rotated(options, ParticleRotation::Camera)
+    }
+    fn spawn_rotated(&mut self, options: ParticleOptions, rotation: ParticleRotation) -> bool {
+        let style = ParticleStyle {
+            bounciness: 0.0,
+            render_type: particles::RenderType::Translucent,
+            distance_scaling: 0.0,
+        };
+        self.spawn_styled(options, rotation, style)
+    }
+    fn spawn_styled(
+        &mut self,
+        options: ParticleOptions,
+        rotation: ParticleRotation,
+        style: ParticleStyle,
+    ) -> bool {
+        let mut style = style;
+        style.bounciness = if style.bounciness.is_finite() {
+            style.bounciness.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        style.distance_scaling = if style.distance_scaling.is_finite() {
+            style.distance_scaling.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let finite = [
             options.x, options.y, options.z, options.vx, options.vy, options.vz,
         ]
@@ -2166,8 +2765,42 @@ impl particles::Host for State {
         options.lifetime = options.lifetime.clamp(1, PARTICLE_LIFETIME);
         options.linger = options.linger.min(PARTICLE_LIFETIME);
         options.size = options.size.clamp(0.0, 8.0);
-        self.new_particles.push(options);
+        self.new_particles.push((options, rotation, style));
         true
+    }
+    fn get_particles(&mut self) -> Vec<particles::Particle> {
+        let owned = &self.owned_sprites;
+        self.snapshot
+            .mod_particles
+            .as_ref()
+            .map_or_else(Vec::new, |all| {
+                all.iter()
+                    .filter(|p| owned.contains(&p.sprite))
+                    .take(4096)
+                    .cloned()
+                    .collect()
+            })
+    }
+    fn remove(&mut self, sprite: u32, x: f64, y: f64, z: f64) -> u32 {
+        if !self.owned_sprites.contains(&sprite) || ![x, y, z].iter().all(|v| v.is_finite()) {
+            return 0;
+        }
+        let near = |p: &particles::Particle| {
+            p.sprite == sprite
+                && (p.x - x).abs() <= 1.0
+                && (p.y - y).abs() <= 1.0
+                && (p.z - z).abs() <= 1.0
+        };
+        let count = self
+            .snapshot
+            .mod_particles
+            .as_ref()
+            .map_or(0, |all| all.iter().filter(|p| near(p)).count() as u32);
+        self.out.push(Output::RemoveParticles {
+            sprite,
+            pos: [x, y, z],
+        });
+        count
     }
     fn landed(&mut self) -> Vec<Landing> {
         std::mem::take(&mut self.landings)
@@ -2181,7 +2814,7 @@ impl particles::Host for State {
         let (width, height, pixels) = source(&name)?;
         // The pixels of a picture that is too big for a particle are cut to
         // its top left corner.
-        let side = PARTICLE_SPRITE_SIDE;
+        let side = PARTICLE_SPRITE_SIDE.max(256);
         if width <= side && height <= side {
             return Some(particles::GameImage {
                 width,
@@ -2354,6 +2987,7 @@ impl screen::Host for State {
             open: true,
             shapes: Vec::new(),
             textures: Vec::new(),
+            smooth: Vec::new(),
             input: Vec::new(),
             elements: Vec::new(),
             overlay: None,
@@ -2418,9 +3052,24 @@ impl screen::Host for State {
                 height,
                 pixels: rgba,
                 version: 1,
+                smooth: screen.smooth.iter().any(|(i, on)| *i == id && *on),
             }),
         }
         Ok(())
+    }
+    fn get_max_texture_side(&mut self) -> u32 {
+        SCREEN_TEXTURE_SIDE
+    }
+    fn set_texture_filter(&mut self, id: u32, filter: screen::TextureFilter) {
+        let Some(screen) = self.screen.as_mut() else {
+            return;
+        };
+        let smooth = matches!(filter, screen::TextureFilter::Linear);
+        if let Some(texture) = screen.textures.iter_mut().find(|t| t.id == id) {
+            texture.smooth = smooth;
+        }
+        screen.smooth.retain(|(i, _)| *i != id);
+        screen.smooth.push((id, smooth));
     }
     fn paint(&mut self, id: u32, elements: Vec<ScreenElement>) {
         let Some(screen) = self.surface(id) else {
@@ -2448,6 +3097,7 @@ impl screen::Host for State {
             open: true,
             shapes: Vec::new(),
             textures: Vec::new(),
+            smooth: Vec::new(),
             input: Vec::new(),
             elements: Vec::new(),
             overlay: Some(Overlay {
@@ -2466,6 +3116,9 @@ impl screen::Host for State {
     }
     fn get_game_screen(&mut self) -> GameScreen {
         self.ui.screen
+    }
+    fn get_station(&mut self) -> Option<String> {
+        self.ui.station.clone()
     }
     fn get_menu_origin(&mut self) -> Option<Point> {
         self.ui.menu_origin
@@ -2498,6 +3151,9 @@ impl items::Host for State {
             .iter()
             .find(|item| item.id == id)
             .cloned()
+    }
+    fn get_name_color(&mut self, id: String) -> Option<u32> {
+        self.snapshot.item_colors.as_ref()?.get(&id).copied()
     }
 }
 impl recipes::Host for State {
@@ -2556,6 +3212,138 @@ impl world::Host for State {
     fn get_chunk_surface(&mut self, cx: i32, cz: i32) -> Option<ChunkSurface> {
         self.world.as_ref()?.chunk_surface(cx, cz)
     }
+    fn get_biome_fog(&mut self, pos: BlockPos) -> Option<u32> {
+        self.world.as_ref()?.biome_fog(&pos)
+    }
+    fn fall_block(
+        &mut self,
+        pos: BlockPos,
+        vx: f64,
+        vy: f64,
+        vz: f64,
+        drops: bool,
+        place: bool,
+    ) -> bool {
+        if !self.can_edit
+            || ![vx, vy, vz].iter().all(|v| v.is_finite())
+            || !self.world.as_ref().is_some_and(|w| w.breakable(&pos))
+        {
+            return false;
+        }
+        let queued = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::FallBlock { .. }))
+            .count();
+        if queued >= 256 {
+            return false;
+        }
+        self.out.push(Output::FallBlock {
+            pos: [pos.x, pos.y, pos.z],
+            velocity: [
+                vx.clamp(-4.0, 4.0),
+                vy.clamp(-4.0, 4.0),
+                vz.clamp(-4.0, 4.0),
+            ],
+            drops,
+            place,
+        });
+        true
+    }
+    fn set_block(&mut self, pos: BlockPos, id: String, properties: Vec<(String, String)>) -> bool {
+        if !self.can_edit
+            || id.len() > 128
+            || properties.len() > 16
+            || !self
+                .world
+                .as_ref()
+                .is_some_and(|w| w.is_local() && w.block(&pos).is_some())
+        {
+            return false;
+        }
+        let queued = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::SetBlock { .. }))
+            .count();
+        if queued >= 64 {
+            return false;
+        }
+        self.out.push(Output::SetBlock {
+            pos: [pos.x, pos.y, pos.z],
+            id,
+            properties,
+        });
+        true
+    }
+    fn set_weather_passthrough(&mut self, blocks: Vec<String>) {
+        self.weather_passthrough = blocks
+            .into_iter()
+            .filter(|b| b.len() <= 128)
+            .take(64)
+            .collect();
+    }
+    fn spawn_item(&mut self, pos: BlockPos, id: String, count: u32) -> bool {
+        if !self.can_edit
+            || count == 0
+            || count > 64
+            || id.len() > 128
+            || !self.world.as_ref().is_some_and(|w| w.is_local())
+        {
+            return false;
+        }
+        let queued = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::SpawnItem { .. }))
+            .count();
+        if queued >= 64 {
+            return false;
+        }
+        self.out.push(Output::SpawnItem {
+            pos: [pos.x, pos.y, pos.z],
+            id,
+            count,
+        });
+        true
+    }
+    fn merge_drops_at(&mut self, pos: BlockPos) -> bool {
+        if !self.can_edit || !self.world.as_ref().is_some_and(|w| w.is_local()) {
+            return false;
+        }
+        self.out.push(Output::MergeDrops {
+            pos: [pos.x, pos.y, pos.z],
+        });
+        true
+    }
+    fn get_light_level(&mut self, pos: BlockPos) -> Option<world::LightLevel> {
+        let (block, sky) = self.world.as_ref()?.light(&pos)?;
+        Some(world::LightLevel {
+            block: u32::from(block),
+            sky: u32::from(sky),
+        })
+    }
+    fn run_command(&mut self, command: String) -> bool {
+        let command = command.trim().trim_start_matches('/').to_owned();
+        if !self.can_edit
+            || command.is_empty()
+            || command.len() > 256
+            || !self.world.as_ref().is_some_and(|w| w.is_local())
+        {
+            return false;
+        }
+        if self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::Command { .. }))
+            .count()
+            >= 8
+        {
+            return false;
+        }
+        self.out.push(Output::Command { command });
+        true
+    }
     fn get_biome_names(&mut self) -> Vec<String> {
         self.world
             .as_ref()
@@ -2569,6 +3357,9 @@ impl world::Host for State {
     fn get_container(&mut self, pos: BlockPos) -> Option<Vec<Option<ContainerStack>>> {
         let (at, stacks) = self.snapshot.container.as_ref()?;
         (*at == [pos.x, pos.y, pos.z]).then(|| stacks.clone())
+    }
+    fn get_chunk_details(&mut self, cx: i32, cz: i32) -> Option<ChunkDetails> {
+        self.world.as_ref()?.chunk_details(cx, cz)
     }
     fn get_chunk_columns(&mut self, cx: i32, cz: i32, y: i32) -> Option<ChunkSurface> {
         self.world.as_ref()?.chunk_columns(cx, cz, y)
@@ -2671,10 +3462,13 @@ impl overlay::Host for State {
         if id as usize >= OVERLAY_TEXTURES {
             return Err(format!("an image's id is 0 to {}", OVERLAY_TEXTURES - 1));
         }
-        if width == 0 || height == 0 || width > SCREEN_TEXTURE_SIDE || height > SCREEN_TEXTURE_SIDE
+        if width == 0
+            || height == 0
+            || width > OVERLAY_TEXTURE_SIDE
+            || height > OVERLAY_TEXTURE_SIDE
         {
             return Err(format!(
-                "an image is 1 to {SCREEN_TEXTURE_SIDE} pixels wide and high"
+                "an image is 1 to {OVERLAY_TEXTURE_SIDE} pixels wide and high"
             ));
         }
         if rgba.len() != (width * height * 4) as usize {
@@ -2693,6 +3487,7 @@ impl overlay::Host for State {
                 height,
                 pixels: rgba,
                 version: 1,
+                smooth: false,
             }),
         }
         Ok(())

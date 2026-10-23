@@ -57,6 +57,23 @@ pub enum PlacementModifier {
     RandomChance(f32),
     Fixed(Vec<[i32; 3]>),
     RandomlySelected(Vec<Self>),
+    /// Lithostitched's `lithostitched:condition` with a `sample_density`
+    /// condition: keeps the position when the density function's value there
+    /// (single precision) is within the bounds.
+    SampleDensity {
+        function: String,
+        min: f32,
+        max: f32,
+    },
+    /// Lithostitched's `lithostitched:noise_slope`: the position repeated
+    /// `ceil(noise * slope) + offset` times.
+    NoiseSlope {
+        noise: String,
+        slope: i32,
+        offset: i32,
+        xz_scale: f64,
+        y_scale: f64,
+    },
 }
 #[derive(Debug)]
 pub enum PlacementError<E> {
@@ -222,6 +239,14 @@ impl PlacementModifier {
                 provider("y", -16, 16)?,
                 provider("z", -16, 16)?,
             ])),
+            "minecraft:random_offset" => {
+                let xz = provider("xz_spread", -16, 16)?;
+                Ok(Self::Offset([
+                    xz.clone(),
+                    provider("y_spread", -16, 16)?,
+                    xz,
+                ]))
+            }
             "minecraft:height_range" => Ok(Self::HeightRange(HeightProvider::from_json(
                 required(&object, "height")?.get(),
             )?)),
@@ -272,6 +297,47 @@ impl PlacementModifier {
                         .map(|v| Self::decode_with_blocks(v.get(), depth + 1, remaining, blocks))
                         .collect::<Result<_, _>>()?,
                 ))
+            }
+            "lithostitched:condition" => {
+                let condition: Object =
+                    serde_json::from_str(required(&object, "condition")?.get())?;
+                let kind = identifier(&serde_json::from_str::<String>(
+                    required(&condition, "type")?.get(),
+                )?)?;
+                if kind != "lithostitched:sample_density" {
+                    return Err(DecodeError::Field("lithostitched placement condition type"));
+                }
+                let function: String =
+                    serde_json::from_str(required(&condition, "density_function")?.get())?;
+                let bound = |name: &'static str| -> Result<f32, DecodeError> {
+                    number_text(required(&condition, name)?)?
+                        .parse()
+                        .map_err(|_| DecodeError::Field(name))
+                };
+                Ok(Self::SampleDensity {
+                    function: identifier(&function)?,
+                    min: bound("min_inclusive")?,
+                    max: bound("max_inclusive")?,
+                })
+            }
+            "lithostitched:noise_slope" => {
+                let noise: String = serde_json::from_str(required(&object, "noise")?.get())?;
+                let number = |name: &'static str| -> Result<f64, DecodeError> {
+                    number_text(required(&object, name)?)?
+                        .parse()
+                        .map_err(|_| DecodeError::Field(name))
+                };
+                let offset = match object.get("offset") {
+                    Some(raw) => integer(raw)?,
+                    None => 0,
+                };
+                Ok(Self::NoiseSlope {
+                    noise: identifier(&noise)?,
+                    slope: integer(required(&object, "slope")?)?,
+                    offset,
+                    xz_scale: number("xz_scale")?,
+                    y_scale: number("y_scale")?,
+                })
             }
             _ => Err(DecodeError::Field("placement modifier type")),
         }
@@ -492,6 +558,36 @@ impl PlacementModifier {
                     }
                 }
             }
+            Self::SampleDensity { function, min, max } => {
+                let value = context.sample_density(function, position)?;
+                if *min <= value && value <= *max {
+                    emit(random, position).map_err(PlacementError::Output)?;
+                }
+            }
+            Self::NoiseSlope {
+                noise,
+                slope,
+                offset,
+                xz_scale,
+                y_scale,
+            } => {
+                let value = context.sample_noise(
+                    noise,
+                    [
+                        f64::from(x) * xz_scale,
+                        f64::from(y) * y_scale,
+                        f64::from(z) * xz_scale,
+                    ],
+                )?;
+                let count =
+                    ((f64::from(value) * f64::from(*slope)).ceil() as i32).wrapping_add(*offset);
+                if count > 4096 {
+                    return Err(PlacementError::WorkLimit);
+                }
+                for _ in 0..count.max(0) {
+                    emit(random, position).map_err(PlacementError::Output)?;
+                }
+            }
             Self::RandomlySelected(placements) => {
                 if placements.len() > 8192 {
                     return Err(PlacementError::WorkLimit);
@@ -501,5 +597,80 @@ impl PlacementModifier {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lithostitched_tests {
+    use super::*;
+    use horizon_core::random::LegacyRandom;
+
+    struct Sampled(WorldGenerationContext);
+    impl PlacementContext for Sampled {
+        fn generation(&self) -> WorldGenerationContext {
+            self.0
+        }
+        fn min_y(&mut self) -> Result<i32, PlacementQueryError> {
+            Ok(self.0.min_y)
+        }
+        fn height(&mut self, _: HeightmapType, _: i32, _: i32) -> Result<i32, PlacementQueryError> {
+            Err(PlacementQueryError::Unavailable)
+        }
+        fn sample_density(
+            &mut self,
+            f: &str,
+            [x, _, _]: [i32; 3],
+        ) -> Result<f32, PlacementQueryError> {
+            assert_eq!(f, "tectonic:underground_river/parameters");
+            Ok(x as f32)
+        }
+        fn sample_noise(
+            &mut self,
+            n: &str,
+            [x, y, z]: [f64; 3],
+        ) -> Result<f32, PlacementQueryError> {
+            assert_eq!(n, "tectonic:river_lanterns");
+            // The scaled point reaches the noise.
+            assert_eq!((x, y, z), (17.0, 0.0, 34.0));
+            Ok(0.4)
+        }
+    }
+    fn emitted(json: &str, position: [i32; 3]) -> usize {
+        let modifier = PlacementModifier::from_json(json).unwrap();
+        let mut count = 0;
+        let mut context = Sampled(WorldGenerationContext::new(-64, 384, 63));
+        modifier
+            .modify_in(&mut context, &mut LegacyRandom::new(1), position, |_, _| {
+                count += 1;
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        count
+    }
+
+    #[test]
+    fn a_density_condition_keeps_positions_within_its_bounds() {
+        let json = r#"{"type":"lithostitched:condition","condition":{"type":"lithostitched:sample_density",
+            "density_function":"tectonic:underground_river/parameters","min_inclusive":1,"max_inclusive":1}}"#;
+        assert_eq!(emitted(json, [1, 0, 0]), 1);
+        assert_eq!(emitted(json, [0, 0, 0]), 0);
+        assert_eq!(emitted(json, [2, 0, 0]), 0);
+    }
+    #[test]
+    fn a_noise_slope_repeats_the_position_by_the_ceiled_slope_plus_offset() {
+        // ceil(0.4 * 3) + -2 = 0, and with offset 0: ceil(1.2) = 2.
+        let json = |offset: i32| {
+            format!(
+                r#"{{"type":"lithostitched:noise_slope","noise":"tectonic:river_lanterns","slope":3,
+                "offset":{offset},"xz_scale":0.5,"y_scale":0}}"#
+            )
+        };
+        assert_eq!(emitted(&json(-2), [34, 70, 68]), 0);
+        assert_eq!(emitted(&json(0), [34, 70, 68]), 2);
+    }
+    #[test]
+    fn other_lithostitched_conditions_are_refused() {
+        let json = r#"{"type":"lithostitched:condition","condition":{"type":"lithostitched:in_biome","biomes":"x"}}"#;
+        assert!(PlacementModifier::from_json(json).is_err());
     }
 }

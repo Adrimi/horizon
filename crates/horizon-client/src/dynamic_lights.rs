@@ -1,88 +1,20 @@
-//! Dynamic lights, a Horizon extra after LambDynamicLights: a held torch,
-//! a burning mob or a dropped lantern lights the blocks and entities around
-//! it while it moves. Nothing is relit: the terrain and entity shaders raise
-//! each vertex's block light to what the nearest sources give it
-//! (`dynamic_block_light` in terrain.wgsl and entity.wgsl), one level less
-//! per block of distance as block light spreads, before the lightmap.
-//! Off (the default) leaves the list empty and the picture vanilla's.
+//! Dynamic lights: the light sources the mods give the world, packed for
+//! the shaders (`Globals::dynamic_lights` in `gfx.rs`). A mod lists its
+//! sources with `lighting.set-lights` (API 0.1.13); the game keeps the
+//! ones nearest the camera and the shaders raise the block light of what
+//! they reach, one level less per block of distance as block light
+//! spreads, before the lightmap. Nothing is relit. With no mod on, the
+//! list is empty and the picture is vanilla's.
 use glam::DVec3;
 
 /// Sources the shaders read (`Globals::dynamic_lights`).
 pub const MAX_LIGHTS: usize = 16;
-/// A burning entity, as fire's own emission.
-pub const BURNING: u8 = 15;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mode {
-    #[default]
-    Off,
-    /// Sources gathered every `FAST_EVERY` frames.
-    Fast,
-    /// Every frame.
-    Fancy,
-}
-/// Frames between two gatherings in `Mode::Fast`.
-pub const FAST_EVERY: u64 = 4;
-impl Mode {
-    pub const ALL: [Mode; 3] = [Mode::Off, Mode::Fast, Mode::Fancy];
-    pub fn name(self) -> &'static str {
-        match self {
-            Mode::Off => "off",
-            Mode::Fast => "fast",
-            Mode::Fancy => "fancy",
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Mode::Off => "Off",
-            Mode::Fast => "Fast",
-            Mode::Fancy => "Fancy",
-        }
-    }
-    pub fn parse(text: &str, default: Mode) -> Mode {
-        Mode::ALL
-            .into_iter()
-            .find(|m| m.name() == text)
-            .unwrap_or(default)
-    }
-    /// Whether the sources are gathered again on frame `frame`.
-    pub fn refresh(self, frame: u64) -> bool {
-        match self {
-            Mode::Off => false,
-            Mode::Fast => frame.is_multiple_of(FAST_EVERY),
-            Mode::Fancy => true,
-        }
-    }
-}
-
-/// A light something gives off this frame, in world space.
+/// A light something gives off, in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Source {
     pub pos: DVec3,
     pub level: u8,
-}
-
-/// The light of an item that places no glowing block (a block item gives
-/// its block's emission instead).
-pub fn item_level(id: &str) -> u8 {
-    match id.strip_prefix("minecraft:").unwrap_or(id) {
-        "lava_bucket" => 15,
-        "glow_berries" => 14,
-        "blaze_rod" | "fire_charge" | "glow_ink_sac" | "nether_star" => 10,
-        "blaze_powder" | "glowstone_dust" | "magma_cream" | "spectral_arrow" => 8,
-        "prismarine_crystals" | "experience_bottle" => 6,
-        _ => 0,
-    }
-}
-
-/// The light a mob gives off by its kind, burning or not.
-pub fn entity_level(id: &str) -> u8 {
-    match id.strip_prefix("minecraft:").unwrap_or(id) {
-        "blaze" => 10,
-        "magma_cube" | "glow_squid" => 8,
-        "allay" | "vex" => 6,
-        _ => 0,
-    }
 }
 
 /// The block light a source of `level` gives `distance` blocks away.
@@ -165,34 +97,5 @@ mod tests {
         assert_eq!(block_light(&packed, [2.0, 0.0, 0.0], 13.0), 13.0);
         assert_eq!(block_light(&packed, [40.0, 0.0, 0.0], 3.0), 3.0);
         assert_eq!(block_light(&[], [0.0, 0.0, 0.0], 5.0), 5.0);
-    }
-
-    #[test]
-    fn items_and_mobs_give_their_light() {
-        assert_eq!(item_level("minecraft:lava_bucket"), 15);
-        assert_eq!(item_level("minecraft:blaze_rod"), 10);
-        assert_eq!(item_level("minecraft:stick"), 0);
-        assert_eq!(entity_level("minecraft:blaze"), 10);
-        assert_eq!(entity_level("minecraft:zombie"), 0);
-    }
-
-    #[test]
-    fn the_extra_is_off_by_default_and_reads_its_mode() {
-        use crate::extras::Extras;
-        assert_eq!(Extras::default().dynamic_lights, Mode::Off);
-        let e = Extras::parse("dynamicLights:fancy\n");
-        assert_eq!(e.dynamic_lights, Mode::Fancy);
-        assert!(e.serialize().contains("dynamicLights:fancy"));
-        let e = Extras::parse("dynamicLights:nonsense\n");
-        assert_eq!(e.dynamic_lights, Mode::Off);
-    }
-
-    #[test]
-    fn modes_parse_and_refresh() {
-        assert_eq!(Mode::parse("fancy", Mode::Off), Mode::Fancy);
-        assert_eq!(Mode::parse("nonsense", Mode::Fast), Mode::Fast);
-        assert!(!Mode::Off.refresh(0));
-        assert!(Mode::Fancy.refresh(7));
-        assert!(Mode::Fast.refresh(8) && !Mode::Fast.refresh(9));
     }
 }

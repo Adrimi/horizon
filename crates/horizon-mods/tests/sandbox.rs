@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules", "chat-decorate", "players"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules", "chat-decorate", "players", "light-events", "audio", "exchange", "input", "game-edit"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -52,7 +52,13 @@ fn mods_dir() -> &'static Path {
         ];
         for (name, manifest) in mods {
             let core = std::fs::read(built.join(format!("{name}.wasm"))).unwrap();
-            let hmod = Package::write(&manifest, &componentize(&core).unwrap()).unwrap();
+            let sounds: &[(&str, &[u8])] = if name == "horizon_mods_test_guest" {
+                &[("sounds/fake.ogg", b"OggS-not-really")]
+            } else {
+                &[]
+            };
+            let hmod = Package::write_files(&manifest, Some(&componentize(&core).unwrap()), sounds)
+                .unwrap();
             std::fs::write(dir.join(format!("{name}.hmod")), hmod).unwrap();
         }
         dir
@@ -660,8 +666,24 @@ impl horizon_mods::WorldAccess for FakeWorld {
             biome: vec![1; 256],
         })
     }
+    fn chunk_details(&self, cx: i32, cz: i32) -> Option<horizon_mods::ChunkDetails> {
+        (cx == 0 && cz == 0).then(|| horizon_mods::ChunkDetails {
+            block: vec!["minecraft:white_carpet".into(); 256],
+            ambiguous: vec![true; 256],
+            light: vec![11; 256],
+        })
+    }
     fn biome_names(&self) -> Vec<String> {
         vec!["minecraft:plains".into(), "minecraft:forest".into()]
+    }
+    fn light(&self, pos: &BlockPos) -> Option<(u8, u8)> {
+        (pos.x.abs() < 16).then_some((3, 15))
+    }
+    fn is_local(&self) -> bool {
+        true
+    }
+    fn biome_fog(&self, pos: &BlockPos) -> Option<u32> {
+        (pos.x.abs() < 16).then_some(0x11_2233)
     }
     fn map_colors(&self) -> Vec<u32> {
         vec![0, 0x8B8B8B]
@@ -889,6 +911,36 @@ fn the_screen_api_draws_and_takes_input() {
     assert!(
         matches!(&out[0], Output::Feedback { text, .. } if text.contains("events closed")),
         "{out:?}"
+    );
+}
+
+#[test]
+fn the_screen_api_takes_big_images_and_a_linear_filter() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    mods.set_screen_size(320.0, 240.0);
+    assert!(mods.command("bigtexture"));
+    assert_eq!(mods.drain(), [feedback("big true refused true max 512")]);
+    let (_, _, screen) = mods.open_screen().expect("the screen is open");
+    let big = screen.textures.iter().find(|t| t.id == 1).expect("image 1");
+    assert_eq!((big.width, big.height), (512, 512));
+    assert!(big.smooth);
+}
+
+#[test]
+fn the_world_map_details_the_columns_and_the_game_gives_the_viewport() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let mut snapshot = player();
+    snapshot.viewport = Some((4.0, 2560.0, 1440.0));
+    snapshot.server_view_distance = 12;
+    mods.set_snapshot(snapshot);
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    assert!(mods.command("mapdetails"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "details minecraft:white_carpet true 11 256 none viewport 4 2560 1440 view 12"
+        )]
     );
 }
 
@@ -1245,6 +1297,10 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
             id: 3,
             elapsed_ms: 1500,
         }),
+        item_colors: Some(std::sync::Arc::new(std::collections::HashMap::from([(
+            "minecraft:stone".to_owned(),
+            0xFF_FFFF,
+        )]))),
         ..player()
     });
     mods.set_ui(Ui {
@@ -1255,12 +1311,19 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
     assert_eq!(
         mods.drain(),
         [feedback(
-            "slots Some((36, 4, false, Some((\"minecraft:stone\", 7)))) crafting Some((4, false)) session Some(3) hovered Some(9)"
+            "uploaded true true color Some(16777215) slots Some((36, 4, false, Some((\"minecraft:stone\", 7)))) crafting Some((4, false)) session Some(3) hovered Some(9)"
         )]
     );
     // The marks stay for the game to draw.
     assert_eq!(mods.slot_marks().len(), 2);
     assert_eq!(mods.slot_marks()[0].slot, 0);
+    // The screen's and the HUD's marks come with those of both.
+    let on_screen = mods.slot_marks_for(false);
+    assert_eq!(on_screen.len(), 3);
+    assert_eq!(on_screen[2].1.slot, 1);
+    let on_hud = mods.slot_marks_for(true);
+    assert_eq!(on_hud.len(), 3);
+    assert_eq!(on_hud[2].1.slot, 2);
 }
 
 #[test]
@@ -1365,6 +1428,391 @@ fn chat_decorations_and_the_player_list() {
         "2".repeat(32)
     );
     assert_eq!(mods.drain(), [feedback(&line)]);
+}
+
+#[test]
+fn the_entity_detail_and_light_event_apis() {
+    use horizon_mods::{EntityDetail, EntityKind, LightFlash, Snapshot, WorldEntity};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let entity = |id: u32, type_id: &str, kind: EntityKind| WorldEntity {
+        id,
+        type_id: type_id.into(),
+        kind,
+        name: type_id.into(),
+        uuid: String::new(),
+        x: 13.5,
+        y: 64.0,
+        z: -3.25,
+        yaw: 0.0,
+        height: 1.0,
+        health: 0.0,
+        max_health: 0.0,
+        xp: 0,
+        on_fire: false,
+        hostile: false,
+        held_item: None,
+        off_hand_item: None,
+    };
+    mods.set_snapshot(Snapshot {
+        entities: Some(Arc::new(vec![
+            entity(1, "minecraft:creeper", EntityKind::Mob),
+            entity(2, "minecraft:fireball", EntityKind::Other),
+        ])),
+        entity_details: Some(Arc::new(HashMap::from([(
+            1,
+            EntityDetail {
+                swell: 0.5,
+                glowing: true,
+                in_water: false,
+                squish: 0.0,
+                dark_ticks: 0,
+                carried_block: String::new(),
+            },
+        )]))),
+        flashes: Some(Arc::new(vec![LightFlash {
+            kind: "minecraft:beacon_beam".into(),
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            end_x: 1.0,
+            end_y: 40.0,
+            end_z: 3.0,
+            ticks: 2,
+        }])),
+        ..player()
+    });
+    assert!(mods.command("detailfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "minecraft:creeper:0.50:true:false:0.0:0:|minecraft:fireball:0.00:false:false:0.0:0:|gone:true|minecraft:beacon_beam@1,2,3->40:2"
+        )]
+    );
+}
+
+#[test]
+fn the_minimap_apis_light_commands_and_world_pictures() {
+    use horizon_mods::{Output, WorldElement};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    // No world lent: no light, no command.
+    assert!(mods.command("minimapfx"));
+    assert_eq!(mods.drain(), [feedback("light None command false")]);
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    assert!(mods.command("minimapfx"));
+    assert_eq!(
+        mods.drain(),
+        [
+            Output::Command {
+                command: "tp 10 64 -20".into()
+            },
+            feedback("light Some((3, 15)) command true")
+        ]
+    );
+    // The picture of the world is kept for the game to draw.
+    let worlds = mods.overlay_world();
+    assert!(matches!(worlds[0].1[0], WorldElement::Picture(_)));
+}
+
+#[test]
+fn the_rain_apis_rotate_particles_hide_the_weather_fog_and_play_sounds() {
+    use horizon_mods::{Output, ParticleRotation};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    assert!(!mods.default_weather_hidden());
+    assert!(mods.command("rainfx"));
+    assert_eq!(
+        mods.drain(),
+        [
+            Output::PlaySound {
+                sound: "minecraft:weather.rain".into(),
+                place: None,
+                volume: 0.2,
+                pitch: 1.0,
+            },
+            feedback("rotated true fog Some(1122867) sound true bad false")
+        ]
+    );
+    assert!(mods.default_weather_hidden());
+    let (_, spawned) = mods.take_particles();
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned[0].1, ParticleRotation::RelativeVelocity);
+}
+
+#[test]
+fn the_vein_apis_mouse_exhaustion_break_speed_drops_and_boxes() {
+    use horizon_mods::{MouseEvent, Output, WorldElement};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    assert!(!mods.wheel_captured());
+    assert_eq!(mods.break_speed_modifier(), 0.0);
+    mods.push_mouse_event(MouseEvent {
+        wheel: 1.0,
+        button: -1,
+        pressed: false,
+        x: 4.0,
+        y: 5.0,
+    });
+    mods.push_mouse_event(MouseEvent {
+        wheel: 0.0,
+        button: 0,
+        pressed: true,
+        x: 4.0,
+        y: 5.0,
+    });
+    assert!(mods.command("veinfx"));
+    assert_eq!(
+        mods.drain(),
+        [
+            Output::Exhaust { amount: 1.5 },
+            Output::MergeDrops { pos: [1, 64, 1] },
+            feedback("events 1/-1/false,0/0/true merged true")
+        ]
+    );
+    assert!(mods.wheel_captured());
+    assert_eq!(mods.break_speed_modifier(), 0.5);
+    let worlds = mods.overlay_world();
+    assert!(matches!(worlds[0].1[0], WorldElement::Box(_)));
+    assert!(matches!(worlds[0].1[1], WorldElement::Box(ref b) if b.through_blocks));
+    // Polled events are gone.
+    assert!(mods.command("veinfx"));
+    assert_eq!(mods.drain().last(), Some(&feedback("events  merged true")));
+}
+
+#[test]
+fn the_timber_apis_game_mode_tags_falling_blocks_set_block_and_items() {
+    use horizon_mods::{Output, Snapshot};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    mods.set_snapshot(Snapshot {
+        game_mode: Some("creative".into()),
+        player_tags: vec!["lumberjack".into()],
+        ..player()
+    });
+    assert!(mods.command("timberfx place"));
+    assert_eq!(
+        mods.drain(),
+        [
+            Output::FallBlock {
+                pos: [0, 64, 0],
+                velocity: [0.1, 0.0, 0.0],
+                drops: true,
+                place: true,
+            },
+            Output::SetBlock {
+                pos: [3, 64, 0],
+                id: "minecraft:oak_log".into(),
+                properties: vec![("axis".into(), "x".into())],
+            },
+            Output::SpawnItem {
+                pos: [0, 64, 0],
+                id: "minecraft:stick".into(),
+                count: 3,
+            },
+            feedback(
+                "mode Some(\"creative\") tags [\"lumberjack\"] fell true put true item true false"
+            )
+        ]
+    );
+    // Air is not breakable: nothing falls.
+    assert!(mods.command("timberfx 5 64 5"));
+    let out = mods.drain();
+    assert!(!out.iter().any(|o| matches!(o, Output::FallBlock { .. })));
+}
+
+#[test]
+fn the_rain_rest_apis_splashing_particle_list_passthrough_clouds_and_sounds() {
+    use horizon_mods::{Output, Snapshot};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(Snapshot {
+        cloud_height: Some(192),
+        ..player()
+    });
+    assert!(!mods.default_splash_hidden());
+    assert!(mods.weather_passthrough().is_empty());
+    assert!(mods.command("restfx"));
+    let out = mods.drain();
+    assert!(matches!(out.last(), Some(Output::Feedback { text, .. })
+        if text == "particles 0 clouds Some(192) true true true true"));
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::RegisterSound { name, .. } if name == "fake"))
+    );
+    assert!(mods.default_splash_hidden());
+    assert_eq!(
+        mods.weather_passthrough(),
+        [
+            "minecraft:oak_fence".to_owned(),
+            "#minecraft:fences".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn a_styled_particle_carries_its_style_with_the_values_kept_in_range() {
+    use horizon_mods::ParticleRenderType;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    assert!(mods.command("stylefx"));
+    mods.drain();
+    let (_, spawned) = mods.take_particles();
+    let (_, _, style) = spawned.first().expect("one particle");
+    assert_eq!(style.bounciness, 1.0);
+    assert_eq!(style.distance_scaling, 0.0);
+    assert!(matches!(style.render_type, ParticleRenderType::Opaque));
+}
+
+#[test]
+fn a_mod_removes_its_particles_and_registers_a_sound_it_carries() {
+    use horizon_mods::{ModParticleInfo, Output, Snapshot};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    assert!(mods.command("rmdef"));
+    let out = mods.drain();
+    let Some(Output::Feedback { text, .. }) = out.last() else {
+        panic!("no feedback");
+    };
+    let id: u32 = text.parse().unwrap();
+    let particle = |x: f64| ModParticleInfo {
+        sprite: id,
+        x,
+        y: 64.0,
+        z: 0.0,
+        vx: 0.0,
+        vy: 0.0,
+        vz: 0.0,
+        remaining: 10,
+    };
+    mods.set_snapshot(Snapshot {
+        mod_particles: Some(std::sync::Arc::new(vec![
+            particle(1.0),
+            particle(1.5),
+            particle(9.0),
+        ])),
+        ..player()
+    });
+    assert!(mods.command(&format!("rmfx {id} 1 64 0")));
+    let out = mods.drain();
+    assert!(
+        matches!(out.iter().find(|o| matches!(o, Output::Feedback { .. })),
+        Some(Output::Feedback { text, .. }) if text == "removed 2 0 true true true")
+    );
+    assert!(out.iter().any(
+        |o| matches!(o, Output::RemoveParticles { sprite, pos } if *sprite == id && pos[0] == 1.0)
+    ));
+    assert!(
+        !out.iter()
+            .any(|o| matches!(o, Output::RemoveParticles { sprite: 999, .. }))
+    );
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Output::RegisterSound { name, .. } if name == "fake"))
+    );
+}
+
+#[test]
+fn a_mod_adds_lines_to_tooltips_reads_the_station_and_shares_data() {
+    use horizon_mods::{Output, TooltipEnchantment, Ui};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    mods.set_ui(Ui {
+        enchantments: vec![TooltipEnchantment {
+            id: "minecraft:sharpness".into(),
+            level: 5,
+            stored: true,
+        }],
+        station: Some("minecraft:enchanting_table".into()),
+        ..Ui::default()
+    });
+    assert!(mods.tooltip_lines().is_empty());
+    assert!(mods.command("tipfx"));
+    let out = mods.drain();
+    assert!(
+        matches!(out.last(), Some(Output::Feedback { text, .. })
+        if text == "1 5 Some(true) Some(\"minecraft:enchanting_table\") true true Some([97, 98, 99]) [\"descriptions\"] true"),
+        "{out:?}"
+    );
+    let lines = mods.tooltip_lines();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].under, "enchantment.minecraft.sharpness");
+    assert_eq!(lines[1].under, "");
+}
+
+#[test]
+fn a_mod_reads_the_stack_under_the_cursor_and_sets_a_tooltip_for_that_stack() {
+    use horizon_mods::{Output, TooltipContainerItem, TooltipHoveredStack, Ui};
+    let stack = |count: u32| {
+        let mut container = vec![None; 27];
+        container[0] = Some(TooltipContainerItem {
+            id: "minecraft:stone".into(),
+            count,
+            damage: 0,
+        });
+        TooltipHoveredStack {
+            item: "minecraft:red_shulker_box".into(),
+            count: 1,
+            damage: 0,
+            container,
+        }
+    };
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    mods.set_ui(Ui {
+        stack: Some(stack(64)),
+        ..Ui::default()
+    });
+    assert!(mods.command("stackfx"));
+    let out = mods.drain();
+    assert!(
+        matches!(out.last(), Some(Output::Feedback { text, .. })
+        if text == "minecraft:red_shulker_box 1 27 Some((\"minecraft:stone\", 64))"),
+        "{out:?}"
+    );
+    let same = format!("{:?}", stack(64));
+    let (id, own) = mods
+        .hovered_tooltip(&same)
+        .expect("the tooltip of that stack");
+    assert_eq!(id, "test_guest");
+    assert_eq!(own.lines.as_ref().map(Vec::len), Some(1));
+    // Limits: 256 pixels, 128 elements.
+    assert_eq!((own.width, own.height), (200.0, 70.0));
+    assert_eq!(own.elements.len(), 100);
+    // Another stack (other contents) gets the game's own tooltip.
+    assert!(mods.hovered_tooltip(&format!("{:?}", stack(1))).is_none());
+}
+
+#[test]
+fn a_code_mod_may_carry_assets_when_it_has_registries() {
+    let dir = mods_dir();
+    let wasm = Package::read(&dir.join("horizon_mods_test_guest.hmod"))
+        .unwrap()
+        .wasm
+        .unwrap();
+    let manifest = GUEST_MANIFEST
+        .replace("api = \"0.1\"", "api = \"0.2\"")
+        .replace("\"audio\"", "\"audio\", \"registries\"")
+        .replace("id = \"test_guest\"", "id = \"ench_guest\"");
+    let lang: &[u8] = br#"{"ench_guest.test": "Hello"}"#;
+    let hmod = Package::write_files(
+        &manifest,
+        Some(&wasm),
+        &[("assets/ench_guest/lang/en_us.json", lang)],
+    )
+    .unwrap();
+    let path = dir.join("ench_guest.hmod");
+    std::fs::write(&path, hmod).unwrap();
+    let package = Package::read(&path).unwrap();
+    let content = horizon_mods::Content::read(&path, &package.manifest).unwrap();
+    assert_eq!(
+        content.file("assets/ench_guest/lang/en_us.json").unwrap(),
+        lang
+    );
+    let mods = Mods::load(&[path], |_| true, |_| false);
+    assert!(
+        mods.entries().iter().all(|e| e.status == Status::Running),
+        "the mod runs"
+    );
 }
 
 #[test]

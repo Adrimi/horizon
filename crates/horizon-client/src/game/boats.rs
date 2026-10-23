@@ -473,9 +473,11 @@ impl Game<'_> {
         b.input = [keys.left, keys.right, keys.forward, keys.backward];
         let b = self.tick_boat(b, true);
         // positionRider: the seat, turned with the boat; clampRotation to 105 degrees.
+        let yaw_before = self.yaw;
         self.yaw += b.delta_rotation;
         let delta = (self.yaw - b.yaw + 180.0).rem_euclid(360.0) - 180.0;
         self.yaw += delta.clamp(-105.0, 105.0) - delta;
+        self.boat_turn = self.yaw - yaw_before;
         if let Some(p) = self.player.as_mut() {
             self.previous_position = p.position;
             p.position = Vec3::new(b.position.x, b.position.y + SEAT, b.position.z);

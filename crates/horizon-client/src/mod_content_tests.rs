@@ -737,16 +737,28 @@ fn a_worldgen_mod_replaces_the_overworld_generator() {
     let biomes: BTreeMap<String, String> =
         serde_json::from_slice(&fs::read(root.join("worldgen/biomes.json")).unwrap()).unwrap();
     assert!(biomes.contains_key("terra:terra_hills"));
-    assert!(biomes["minecraft:plains"].contains("0.9"));
+    // Vanilla's plains stay whole in the root every world reads: the mod's
+    // replacement is its world type's.
+    assert!(!biomes["minecraft:plains"].contains("0.9"));
+    let types: Vec<WorldType> =
+        serde_json::from_slice(&fs::read(root.join("horizon-world-types.json")).unwrap()).unwrap();
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].id, "terra");
+    assert_eq!(types[0].name, "Terra");
+    assert_eq!(types[0].preset, "minecraft:normal");
+    let typed = root.join(&types[0].dir);
+    let biomes_of_type: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(typed.join("worldgen/biomes.json")).unwrap()).unwrap();
+    assert!(biomes_of_type["minecraft:plains"].contains("0.9"));
     // The biome distribution is the mod's list.
     let list: serde_json::Value = serde_json::from_slice(
-        &fs::read(root.join("worldgen/biome_parameters/overworld.json")).unwrap(),
+        &fs::read(typed.join("worldgen/biome_parameters/overworld.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(list["biomes"][0]["biome"], "terra:terra_hills");
     // The world preset's Overworld is the mod's dimension.
     let presets: BTreeMap<String, String> =
-        serde_json::from_slice(&fs::read(root.join("worldgen/world_presets.json")).unwrap())
+        serde_json::from_slice(&fs::read(typed.join("worldgen/world_presets.json")).unwrap())
             .unwrap();
     let normal: serde_json::Value = serde_json::from_str(&presets["minecraft:normal"]).unwrap();
     let source = &normal["dimensions"]["minecraft:overworld"]["generator"]["biome_source"];
@@ -777,7 +789,7 @@ fn a_worldgen_mod_replaces_the_overworld_generator() {
     // And the world generator runs with it.
     let assets = Assets::load(&root).unwrap();
     let terrain = crate::vanillagen::VanillaTerrain::new(
-        &root.join("worldgen"),
+        &typed.join("worldgen"),
         assets.registry,
         &biomes,
         1234,
@@ -977,6 +989,80 @@ fn a_replacing_mod_tag_reaches_the_root() {
     assert!(
         warnings.starts_with("mod towns replaces data/minecraft/tags/worldgen/biome/has_structure/village_plains.json: vanilla's entries and those of adds are left out"),
         "{warnings}"
+    );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// A world type's mod adds features to biomes with Lithostitched's
+/// `add_features` (kept out of vanilla's root), a predicate on its
+/// configuration turns one off, and its `worldgen_config.json` is the type's.
+#[test]
+fn a_world_type_adds_features_to_biomes_and_keeps_its_configuration() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("horizon-mod-add-features-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let plains =
+        fs::read_to_string(base.join("data/minecraft/worldgen/biome/plains.json")).unwrap();
+    let modifier = |kind: &str, feature: &str| {
+        format!(
+            r#"{{"predicate": {{"type": "tectonic:config", "key": "{kind}"}},
+            "type": "lithostitched:add_features", "biomes": "minecraft:plains",
+            "features": "{feature}", "step": "vegetal_decoration"}}"#
+        )
+    };
+    let lanterns = modifier("river_lanterns", "river:lanterns");
+    let ice = modifier("river_ice", "river:ice");
+    let m = folder_mod(
+        &scratch.join("river"),
+        &[
+            (
+                "horizon-mod.toml",
+                "id = \"river\"\nname = \"River\"\nversion = \"1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\nworldgen_overrides = true\n",
+            ),
+            ("data/minecraft/worldgen/biome/plains.json", plains.as_str()),
+            (
+                "data/river/lithostitched/worldgen_modifier/lanterns.json",
+                lanterns.as_str(),
+            ),
+            (
+                "data/river/lithostitched/worldgen_modifier/ice.json",
+                ice.as_str(),
+            ),
+            (
+                "data/minecraft/wolf_variant/pale.json",
+                r#"{"spawn_conditions": []}"#,
+            ),
+            (
+                "data/river/worldgen_config.json",
+                r#"{"constants": {"river_ice": true}}"#,
+            ),
+        ],
+    );
+    let root = scratch.join("root");
+    build(&base, &[m], &root).unwrap();
+    let features_of = |root: &Path| -> Vec<serde_json::Value> {
+        let biomes: BTreeMap<String, String> =
+            serde_json::from_slice(&fs::read(root.join("worldgen/biomes.json")).unwrap()).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&biomes["minecraft:plains"]).unwrap();
+        doc["features"][9].as_array().cloned().unwrap_or_default()
+    };
+    let vanilla = features_of(&root);
+    assert!(!vanilla.contains(&serde_json::json!("river:lanterns")));
+    let typed = features_of(&root.join("horizon-types/river"));
+    assert!(typed.contains(&serde_json::json!("river:lanterns")));
+    // The configuration turns river_ice on; the typed root holds it.
+    assert!(typed.contains(&serde_json::json!("river:ice")));
+    let config = fs::read_to_string(root.join("horizon-types/river/worldgen/config.json")).unwrap();
+    assert!(config.contains("river_ice"));
+    assert!(!root.join("worldgen/config.json").exists());
+    // A wolf variant a mod gives reaches the mobs' table.
+    assert!(
+        fs::read_to_string(root.join("wolf-variants.json"))
+            .unwrap()
+            .contains("minecraft:pale")
     );
     let _ = fs::remove_dir_all(&scratch);
 }

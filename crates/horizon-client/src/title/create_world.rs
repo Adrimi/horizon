@@ -32,6 +32,8 @@ pub struct WorldOptions {
     pub commands: Option<bool>,
     /// The Superflat world preset instead of Default.
     pub flat: bool,
+    /// A mod's world type (`mod_content::world_types`) instead of Default.
+    pub world_type: Option<&'static str>,
     pub structures: bool,
     pub bonus_chest: bool,
 }
@@ -43,6 +45,7 @@ impl Default for WorldOptions {
             difficulty: 2,
             commands: None,
             flat: false,
+            world_type: None,
             structures: true,
             bonus_chest: false,
         }
@@ -64,6 +67,7 @@ impl WorldOptions {
                 .unwrap_or(2),
             commands: Some(commands),
             flat: generation.flat,
+            world_type: generation.world_type,
             structures: generation.structures,
             bonus_chest: generation.bonus_chest,
             ..Self::default()
@@ -84,9 +88,37 @@ impl WorldOptions {
     pub fn world_gen(&self) -> crate::save::WorldGen {
         crate::save::WorldGen {
             flat: self.flat,
+            world_type: self.world_type,
             structures: self.structures,
             bonus_chest: self.bonus_chest(),
         }
+    }
+    /// The World Type button's label: Default, Superflat or a mod's type.
+    pub fn world_type_name(&self) -> String {
+        if let Some(t) = self.world_type.and_then(crate::mod_content::world_type) {
+            const SHOWN: usize = 24;
+            return match t.name.chars().count() > SHOWN {
+                true => format!("{}...", t.name.chars().take(SHOWN - 3).collect::<String>()),
+                false => t.name.clone(),
+            };
+        }
+        tr(if self.flat {
+            "generator.minecraft.flat"
+        } else {
+            "generator.minecraft.normal"
+        })
+    }
+    /// A press on World Type: Default, Superflat, then each mod's type.
+    fn next_world_type(&mut self) {
+        let types = crate::mod_content::world_types();
+        let at = self
+            .world_type
+            .and_then(|id| types.iter().position(|t| t.id == id));
+        (self.flat, self.world_type) = match (self.flat, at) {
+            (false, None) => (true, None),
+            (true, _) => (false, types.first().map(|t| t.id.as_str())),
+            (false, Some(i)) => (false, types.get(i + 1).map(|t| t.id.as_str())),
+        };
     }
     /// A press on one of the open tab's cycle buttons or switches.
     pub(super) fn press(&mut self, id: u8, creative: &mut bool) {
@@ -101,7 +133,7 @@ impl WorldOptions {
             }
             23 => self.difficulty = (self.difficulty + 1) % DIFFICULTIES.len(),
             24 => self.commands = Some(!self.commands(*creative)),
-            25 => self.flat = !self.flat,
+            25 => self.next_world_type(),
             27 => self.structures = !self.structures,
             28 => self.bonus_chest = !self.bonus_chest,
             _ => {}
@@ -232,14 +264,11 @@ pub(super) fn buttons(w: f32, h: f32, creative: bool, o: &WorldOptions) -> Vec<B
                 gx,
                 gy,
                 150.0,
-                labelled(
-                    "selectWorld.mapType",
-                    tr(if o.flat {
-                        "generator.minecraft.flat"
-                    } else {
-                        "generator.minecraft.normal"
-                    }),
-                ),
+                match o.world_type {
+                    // A mod's name is long: it takes the place of the prefix.
+                    Some(_) => o.world_type_name(),
+                    None => labelled("selectWorld.mapType", o.world_type_name()),
+                },
                 true,
                 25,
             ),

@@ -19,7 +19,7 @@ struct Globals {
     crumbling_sprite: vec4<f32>,
     // Selection outline parameters (read by terrain.wgsl).
     outline_params: vec4<f32>,
-    // x: how many dynamic_lights are set (0: the extra is off).
+    // x: how many dynamic_lights are set (0: no mod gives any light).
     dynamic_count: vec4<f32>,
     // Dynamic lights: camera-relative xyz and level (dynamic_lights.rs).
     dynamic_lights: array<vec4<f32>, 16>,

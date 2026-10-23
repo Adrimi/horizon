@@ -583,17 +583,11 @@ impl Game<'_> {
                 &[Text::literal(PLAYER_NAME), Text::literal(message)],
             );
             let focused = self.screen == Screen::Chat;
-            // The integrated server's player, with the skin the player list shows.
+            // The integrated server's player.
             let me = self.level.player_uuid.map(|u| {
                 u.iter()
                     .fold(0u128, |a, &w| (a << 32) | u128::from(w as u32))
             });
-            if let Some(me) = me {
-                self.ui
-                    .chat
-                    .head_skins
-                    .insert(me, "entity/player/wide/steve".into());
-            }
             let picture = self.mods_chat_message(&line.plain(), me);
             self.ui.chat.add_decorated(
                 &self.gui.atlas,

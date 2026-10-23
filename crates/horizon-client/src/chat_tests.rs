@@ -29,9 +29,9 @@ fn add(chat: &mut Chat, font: &Font, content: Text) {
                 added: 0,
                 content,
                 indicator: None,
-                head: None,
                 picture: None,
                 sender: None,
+                split: None,
                 indent: 0,
             },
         );
@@ -290,7 +290,7 @@ fn ask_server_nodes_wait_for_the_servers_completions() {
     assert_eq!(screen.take_request(), None);
 }
 
-/// A message from `sender` as `Chat::add_from` adds it, without an atlas.
+/// A message from `sender` without a picture, as the game adds it.
 fn add_from(chat: &mut Chat, font: &Font, content: Text, sender: Option<u128>) {
     let message = Message {
         added: 0,
@@ -333,6 +333,9 @@ fn a_mods_picture_starts_the_first_line_and_indents_every_line() {
             regions: vec![[8, 8, 8, 8], [40, 8, 8, 8]],
             width: 8,
             height: 8,
+            gap: 2,
+            place: None,
+            styles: Vec::new(),
         })),
     };
     chat.add_lines(&font, &message, false);
@@ -348,7 +351,7 @@ fn a_mods_picture_starts_the_first_line_and_indents_every_line() {
 }
 
 #[test]
-fn without_the_extra_a_players_message_draws_as_vanilla() {
+fn a_players_message_without_a_picture_draws_as_vanilla() {
     let font = font();
     let mut plain = Chat::default();
     let mut from = Chat::default();
@@ -361,63 +364,112 @@ fn without_the_extra_a_players_message_draws_as_vanilla() {
     assert!(heads_and_texts(&from).0.is_empty());
 }
 
-#[test]
-fn chat_heads_draw_the_senders_face_and_hat_before_the_first_line() {
-    let font = font();
-    let mut chat = Chat {
-        heads: true,
-        ..Chat::default()
-    };
+fn with_picture(font: &Font, text: &str, picture: super::Picture) -> Chat {
+    let mut chat = Chat::default();
     chat.head_skins.insert(7, "skins/abc".into());
-    add_from(&mut chat, &font, Text::literal("<Steve> hello"), Some(7));
-    add_from(&mut chat, &font, Text::literal("[Server] hi"), None);
-    // An unknown sender gets the default skin for their UUID.
-    add_from(&mut chat, &font, Text::literal("<Alex> hey"), Some(0));
-    let (heads, texts) = heads_and_texts(&chat);
-    assert_eq!(
-        heads,
-        [
-            "skins/abc",
-            "skins/abc",
-            tab_list_default(0),
-            tab_list_default(0),
-        ]
-    );
+    let message = Message {
+        added: 0,
+        content: Text::literal(text),
+        indicator: None,
+        sender: Some(7),
+        picture: Some(std::sync::Arc::new(picture)),
+    };
+    chat.add_lines(font, &message, false);
+    chat.messages.insert(0, message);
+    chat
+}
+fn face(place: Option<usize>, gap: i32, styles: Vec<super::PictureStyle>) -> super::Picture {
+    super::Picture {
+        source: super::PictureSource::Sender,
+        regions: vec![[8, 8, 8, 8], [40, 8, 8, 8]],
+        width: 8,
+        height: 8,
+        gap,
+        place,
+        styles,
+    }
+}
+fn blits(chat: &Chat) -> Vec<(i32, i32, i32, u32, [f32; 2], [i32; 2])> {
+    chat.layout(361, 0, true)
+        .into_iter()
+        .filter_map(|d| match d {
+            GuiDraw::Blit {
+                x,
+                w,
+                h,
+                color,
+                uv,
+                src,
+                ..
+            } => Some((x, w, h, color, uv, src)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_gap_sets_the_room_after_the_picture() {
+    let font = font();
+    for gap in [0, 1, 5] {
+        let chat = with_picture(&font, "<Steve> hello", face(None, gap, Vec::new()));
+        let (_, texts) = heads_and_texts(&chat);
+        assert_eq!(texts, [(8 + gap, "<Steve> hello".to_owned())]);
+    }
+}
+
+#[test]
+fn styles_move_resize_and_tint_each_rectangle() {
+    use super::PictureStyle;
+    let font = font();
+    let shadow = PictureStyle {
+        dx: 1,
+        dy: 0,
+        width: 0,
+        height: 0,
+        color: 0x40_4040,
+    };
+    let hat = PictureStyle {
+        dx: -1,
+        dy: -1,
+        width: 10,
+        height: 10,
+        color: 0,
+    };
+    let chat = with_picture(&font, "<Steve> hello", face(None, 2, vec![shadow, hat]));
+    let drawn = blits(&chat);
+    assert_eq!(drawn.len(), 2);
+    // The first rectangle: a dark copy a pixel to the right.
+    assert_eq!((drawn[0].0, drawn[0].1), (1, 8));
+    assert_eq!(drawn[0].3 & 0xFF_FFFF, 0x40_4040);
+    // The second: bigger, up and to the left, in the line's colour.
+    assert_eq!((drawn[1].0, drawn[1].1, drawn[1].2), (-1, 10, 10));
+    assert_eq!(drawn[1].3 & 0xFF_FFFF, 0xFF_FFFF);
+}
+
+#[test]
+fn a_picture_in_the_text_splits_the_first_line() {
+    let font = font();
+    // Before the 'h' of "hello" (character 8).
+    let chat = with_picture(&font, "<Steve> hello", face(Some(8), 1, Vec::new()));
+    let (_, texts) = heads_and_texts(&chat);
+    let before = font.width("<Steve> ").ceil() as i32;
     assert_eq!(
         texts,
         [
-            (HEAD_WIDTH, "<Steve> hello".to_owned()),
-            (0, "[Server] hi".to_owned()),
-            (HEAD_WIDTH, "<Alex> hey".to_owned()),
+            (0, "<Steve> ".to_owned()),
+            (before + 8 + 1, "hello".to_owned())
         ]
     );
-}
-
-fn tab_list_default(uuid: u128) -> &'static str {
-    crate::tab_list::default_skin(uuid)
+    assert_eq!(blits(&chat)[0].0, before);
 }
 
 #[test]
-fn a_wrapped_message_with_a_head_indents_every_line_and_heads_only_the_first() {
+fn a_hanging_players_face_is_drawn_upside_down() {
     let font = font();
-    let mut chat = Chat {
-        heads: true,
-        ..Chat::default()
-    };
-    let long = "word ".repeat(80);
-    add_from(&mut chat, &font, Text::literal(long.clone()), Some(1));
-    assert!(chat.lines.len() > 1);
-    assert!(chat.lines.iter().all(|l| l.indent == HEAD_WIDTH));
-    assert_eq!(chat.lines.iter().filter(|l| l.head.is_some()).count(), 1);
-    // The first line (oldest, last in the list) carries the head.
-    assert_eq!(chat.lines.last().unwrap().head, Some(1));
-    // The head's width comes off the wrapping width.
-    let max = chat.max_width() - HEAD_WIDTH;
-    assert!(
-        chat.lines
-            .iter()
-            .all(|l| font.width_text(&l.content) <= max as f32)
-    );
-    // Clicks left of the indent hit nothing.
-    assert_eq!(chat.click_at(&font, 360, 4.0 + 5.0, 315.0), None);
+    let mut chat = with_picture(&font, "<Steve> hello", face(None, 2, Vec::new()));
+    let upright = blits(&chat)[0];
+    assert_eq!((upright.4, upright.5), ([8.0, 8.0], [8, 8]));
+    chat.upside_down.insert(7);
+    let flipped = blits(&chat)[0];
+    assert_eq!((flipped.4, flipped.5), ([8.0, 16.0], [8, -8]));
 }

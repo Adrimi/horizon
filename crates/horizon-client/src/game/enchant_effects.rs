@@ -20,7 +20,9 @@ impl Game<'_> {
                 .enchantments
                 .attribute_add(held, "minecraft:mining_efficiency") as f32;
         }
-        speed * self.potions.effects.mining_speed_factor()
+        let modded = speed * self.potions.effects.mining_speed_factor();
+        // The mods' `ADD_MULTIPLIED_BASE` modifier of the break speed (API 0.1.23).
+        (modded * (1.0 + self.mods.mods.break_speed_modifier() as f32).max(0.0)).max(0.0)
     }
     /// `Attributes.SUBMERGED_MINING_SPEED` (0.2, raised by aqua affinity).
     pub(super) fn submerged_mining_speed(&self) -> f32 {

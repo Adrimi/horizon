@@ -75,6 +75,14 @@ pub(super) struct Decoration {
     /// their own position (mushrooms) or the one above (soul sand, magma).
     postprocess_self: Vec<BlockStateId>,
     postprocess_above: Vec<BlockStateId>,
+    /// The density functions and noises placement modifiers sample
+    /// (`lithostitched:condition`, `lithostitched:noise_slope`).
+    pub(super) sampling: Option<Sampling>,
+}
+/// What the world's noise router gives placement.
+pub(super) struct Sampling {
+    pub(super) densities: HashMap<String, Arc<dyn horizon_core::density::DensitySampler>>,
+    pub(super) noises: std::collections::BTreeMap<String, Arc<dyn horizon_core::noise::Noise>>,
 }
 fn resource(message: impl Into<String>) -> GeneratorError {
     GeneratorError::Resource(message.into())
@@ -229,6 +237,7 @@ impl Decoration {
         Ok(Some(Self {
             postprocess_self,
             postprocess_above,
+            sampling: None,
             plan,
             names,
             features,
@@ -659,6 +668,29 @@ impl SurvivalWorld for World<'_> {
     }
 }
 impl PlacementContext for World<'_> {
+    fn sample_density(
+        &mut self,
+        function: &str,
+        position: [i32; 3],
+    ) -> Result<f32, PlacementQueryError> {
+        let sampler = self
+            .decoration
+            .sampling
+            .as_ref()
+            .and_then(|s| s.densities.get(function))
+            .ok_or_else(|| query(format!("no density function {function} to sample")))?;
+        let mut context = horizon_core::density::SamplerContext::cached();
+        sampler.sample_value(&mut context, position).map_err(query)
+    }
+    fn sample_noise(&mut self, noise: &str, point: [f64; 3]) -> Result<f32, PlacementQueryError> {
+        let noise = self
+            .decoration
+            .sampling
+            .as_ref()
+            .and_then(|s| s.noises.get(noise))
+            .ok_or_else(|| query(format!("no noise {noise}")))?;
+        Ok(noise.get3(point[0], point[1], point[2]))
+    }
     fn state_collision_empty(
         &mut self,
         state: BlockStateId,

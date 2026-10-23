@@ -38,6 +38,13 @@ pub const MOD_TEXTURE_ROWS: u32 = 256;
 pub const MOD_TEXTURE_SIDE: u32 = 256;
 /// How many mod images fit in the reserved rows.
 pub const MOD_TEXTURE_SLOTS: usize = 16;
+/// Atlas rows above the small slots for the screen images of mods that
+/// are larger than 256 pixels (API 0.1.31): 8 slots of 512x512.
+pub const MOD_BIG_ROWS: u32 = 512;
+/// The side of a mod's screen image, in atlas pixels (API 0.1.31).
+pub const MOD_BIG_SIDE: u32 = 512;
+/// How many big images fit in the big rows.
+pub const MOD_BIG_SLOTS: usize = 8;
 /// 128x128 atlas slots for map textures.
 pub const MAP_SLOTS: usize = 16;
 /// The atlas slot the minimap extra draws into.
@@ -263,35 +270,6 @@ impl HudAtlas {
             edition.3 = pixels;
         }
         images.push(("horizon/white".into(), 4, 4, vec![255; 64]));
-        // Horizon's own leaf texture for its falling leaves (`particles`).
-        let (side, pixels) = crate::particles::horizon_leaf_texture();
-        images.push((
-            crate::particles::HORIZON_LEAF_SPRITE.into(),
-            side,
-            side,
-            pixels,
-        ));
-        // Horizon's own textures for its particle rain (`particles`).
-        for (name, (side, pixels)) in [
-            (
-                crate::particles::HORIZON_RAIN_SPRITE,
-                crate::particles::horizon_rain_texture(),
-            ),
-            (
-                crate::particles::HORIZON_SNOW_SPRITE,
-                crate::particles::horizon_snow_texture(),
-            ),
-            (
-                crate::particles::HORIZON_SAND_SPRITE,
-                crate::particles::horizon_sand_texture(),
-            ),
-            (
-                crate::particles::HORIZON_RING_SPRITE,
-                crate::particles::horizon_ring_texture(),
-            ),
-        ] {
-            images.push((name.into(), side, side, pixels));
-        }
         if full {
             Self::slots(&mut images);
         }
@@ -310,7 +288,7 @@ impl HudAtlas {
             row = row.max(*h);
         }
         let glyph_region = y + row + 1;
-        let height = (glyph_region + GLYPH_ROWS).next_power_of_two();
+        let height = (glyph_region + GLYPH_ROWS + MOD_BIG_ROWS).next_power_of_two();
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         let mut sprites = HashMap::new();
         for ((name, w, h, data), (px, py)) in images.iter().zip(placements) {
@@ -378,6 +356,21 @@ impl HudAtlas {
                 },
             );
         }
+        for i in 0..MOD_BIG_SLOTS {
+            let px = (i as u32) * MOD_BIG_SIDE;
+            let py = height - MOD_TEXTURE_ROWS - MOD_BIG_ROWS;
+            sprites.insert(
+                format!("horizon/mod-big{i}"),
+                Rect {
+                    u0: px as f32 / width as f32,
+                    v0: py as f32 / height as f32,
+                    u1: (px + MOD_BIG_SIDE) as f32 / width as f32,
+                    v1: (py + MOD_BIG_SIDE) as f32 / height as f32,
+                    w: MOD_BIG_SIDE,
+                    h: MOD_BIG_SIDE,
+                },
+            );
+        }
         let font = crate::font::Font::load(
             root,
             &sprites,
@@ -387,7 +380,8 @@ impl HudAtlas {
                 glyph_region,
                 height
                     .saturating_sub(glyph_region)
-                    .saturating_sub(MOD_TEXTURE_ROWS),
+                    .saturating_sub(MOD_TEXTURE_ROWS)
+                    .saturating_sub(MOD_BIG_ROWS),
             ),
             white,
         );
@@ -564,6 +558,19 @@ impl HudBatch {
         self.quad(
             [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
             [[r.u0, r.v0], [r.u1, r.v0], [r.u1, r.v1], [r.u0, r.v1]],
+            color,
+        );
+    }
+    /// Like `rect_uv`, scaled with a bilinear filter (the shader's `u >= 4`).
+    pub fn rect_uv_smooth(&mut self, x: f32, y: f32, w: f32, h: f32, r: Rect, color: u32) {
+        self.quad(
+            [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+            [
+                [r.u0 + 4.0, r.v0],
+                [r.u1 + 4.0, r.v0],
+                [r.u1 + 4.0, r.v1],
+                [r.u0 + 4.0, r.v1],
+            ],
             color,
         );
     }

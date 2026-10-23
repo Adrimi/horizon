@@ -188,6 +188,18 @@ impl Game<'_> {
     pub(super) fn cycle_camera(&mut self) {
         self.camera_type = self.camera_type.cycle();
     }
+    /// How far the boat turned the view in the last tick; 0 when the player
+    /// does not ride one.
+    pub(super) fn boat_turn(&self) -> f32 {
+        if self
+            .riding
+            .is_some_and(|id| self.boats.iter().any(|b| b.id == id))
+        {
+            self.boat_turn
+        } else {
+            0.0
+        }
+    }
     /// `Camera.update` (`alignWithEntity` and `getMaxZoom`): the
     /// interpolated eye, or a point up to the camera distance behind (or in
     /// front of) it, pulled in where visual shapes are in the way. Returns the
@@ -235,7 +247,8 @@ impl Game<'_> {
             x_rot: self.pitch,
             y_rot: self.yaw,
             x_rot_o: self.pitch,
-            y_rot_o: self.yaw,
+            // The boat's turn of the last tick is interpolated (`yRotO`).
+            y_rot_o: self.yaw - self.boat_turn(),
             eye_height: p.dimensions.eye_height,
             living: Some(LivingCamera {
                 scale,
@@ -723,5 +736,27 @@ mod preview_tests {
             assert!(quads.iter().any(|q| q.2[0][0] >= 0.5));
             assert!(quads.windows(2).all(|q| q[0].0 <= q[1].0));
         }
+    }
+}
+
+/// The view's yaw `partial` of the way through a tick, when the boat turned
+/// it by `turn` degrees in the last tick (the mouse's turns are not
+/// interpolated).
+pub(super) fn interpolated_view_yaw(yaw: f32, turn: f32, partial: f32) -> f32 {
+    yaw - turn * (1.0 - partial)
+}
+
+#[cfg(test)]
+mod boat_turn_tests {
+    use super::interpolated_view_yaw;
+
+    #[test]
+    fn a_boats_turn_is_spread_over_the_tick() {
+        // The tick turned the view by 4 degrees, to 100.
+        assert_eq!(interpolated_view_yaw(100.0, 4.0, 0.0), 96.0);
+        assert_eq!(interpolated_view_yaw(100.0, 4.0, 0.5), 98.0);
+        assert_eq!(interpolated_view_yaw(100.0, 4.0, 1.0), 100.0);
+        // Not riding: the view is where the player looks.
+        assert_eq!(interpolated_view_yaw(100.0, 0.0, 0.3), 100.0);
     }
 }

@@ -3,13 +3,10 @@
 use super::{Dim, Game};
 use horizon_client::fog::{FogData, FogInputs, FogType, fog_type, update_rain_fog};
 use horizon_client::{
-    animate_tick::{
-        AnimateContext, animate_tick, campfire_particles, falling_leaves_multiplier,
-        marker_particle_target,
-    },
+    animate_tick::{AnimateContext, animate_tick, campfire_particles, marker_particle_target},
     biome::Biomes,
     blocks::{BlockFacts, Fluid},
-    chunk::{HEIGHT, MIN_Y},
+    chunk::{MIN_Y, height},
     particles::{ParticleLevel, ParticleOptions, ParticleType},
     world::World,
 };
@@ -21,7 +18,7 @@ use horizon_core::random::{LegacyRandom, RandomSource};
 
 /// The first motion-blocking block at or below `from` (Heightmap MOTION_BLOCKING), plus one.
 fn motion_blocking(world: &World, facts: &BlockFacts, x: i32, z: i32, from: i32) -> i32 {
-    let mut y = from.min(MIN_Y + HEIGHT - 1);
+    let mut y = from.min(MIN_Y + height() - 1);
     while y > MIN_Y {
         let f = facts.get(world.block(x, y, z));
         if f.full_collision || f.fluid != Fluid::None || f.name.contains("leaves") {
@@ -110,23 +107,6 @@ impl Game<'_> {
                 boss_world_fog: self.dragon_bar_shown(),
             },
         );
-        // Horizon's particle rain: the storm's own haze. The fog closes in a
-        // little and takes the colour of the weather.
-        if self.settings.extras.particle_rain && rain > 0.0 {
-            let spawn = horizon_client::rain::Spawn {
-                world: &self.world,
-                facts: self.res.facts(),
-                biomes: self.res.biomes(),
-                eye: at,
-                rain,
-                thunder,
-            };
-            if let Some(haze) = horizon_client::rain::haze(&spawn) {
-                let k = haze.amount;
-                fog.environmental_end *= 1.0 - 0.4 * k;
-                fog.color = horizon_client::rain::mix_fog(fog.color, haze.color, k * 0.7);
-            }
-        }
         if self.mods.mods.is_running() {
             self.apply_mod_haze(&mut fog);
         }
@@ -309,7 +289,7 @@ impl Game<'_> {
         if let Some(e) = eye {
             self.particles.camera = e;
         }
-        let (rain, thunder) = if self.dim == Dim::Overworld {
+        let (rain, _thunder) = if self.dim == Dim::Overworld {
             self.world.weather.levels(1.0)
         } else {
             (0.0, 0.0)
@@ -353,10 +333,39 @@ impl Game<'_> {
             .filter_map(|tag| self.res.items().block_tags.get(tag))
             .flat_map(|blocks| blocks.iter().map(|b| &**b))
             .collect();
-        let watched = |state| watched_ids.contains(&*facts.get(state).name);
+        let watched_blocks = self.mods.mods.watched_tick_blocks();
+        let registry = self.pack.assets.registry;
+        let watched = |state| {
+            let name = &*facts.get(state).name;
+            watched_ids.contains(name)
+                || (!watched_blocks.is_empty()
+                    && registry.state(state).is_some_and(|s| {
+                        watched_blocks.iter().any(|spec| {
+                            let (id, states) = match spec.split_once('[') {
+                                Some((id, rest)) => (id, rest.trim_end_matches(']')),
+                                None => (spec.as_str(), ""),
+                            };
+                            id == name
+                                && states.split(',').filter(|p| !p.is_empty()).all(|p| {
+                                    p.split_once('=').is_some_and(|(k, v)| {
+                                        s.properties.get(k).map(String::as_str) == Some(v)
+                                    })
+                                })
+                        })
+                    }))
+        };
+        let suppressed = self.mods.mods.suppressed();
+        let suppress = |id: &str| {
+            suppressed
+                .iter()
+                .find(|(i, _)| i == id)
+                .map_or(1.0, |(_, scale)| *scale)
+        };
         let ticked = std::cell::RefCell::new(Vec::new());
         let ctx = AnimateContext {
-            watch: (!watched_ids.is_empty()).then_some((&watched as &dyn Fn(_) -> _, &ticked)),
+            suppress: (!suppressed.is_empty()).then_some(&suppress as &dyn Fn(&str) -> f32),
+            watch: (!watched_ids.is_empty() || !watched_blocks.is_empty())
+                .then_some((&watched as &dyn Fn(_) -> _, &ticked)),
             raw_brightness: &raw_brightness,
             firefly_sounds: &firefly_sounds,
             world,
@@ -365,11 +374,6 @@ impl Game<'_> {
             biomes,
             registry: self.pack.assets.registry,
             raining_at: &raining_at,
-            falling_leaves: falling_leaves_multiplier(
-                self.settings.extras.falling_leaves,
-                self.settings.extras.falling_leaves_amount,
-                self.settings.particles,
-            ),
             marker: marker.map(|name| (name, &marker_options as &dyn Fn(_) -> _)),
         };
         if let Some(e) = eye {
@@ -418,6 +422,9 @@ impl Game<'_> {
                             && self.res.animate().is_lit_campfire(state.0));
                     let ty = if smoke {
                         ParticleType::Smoke
+                    } else if self.mods.mods.default_splash_hidden() {
+                        // A mod draws the splashes (`weather.set-default-splashing`).
+                        continue;
                     } else {
                         ParticleType::Rain
                     };
@@ -429,28 +436,6 @@ impl Game<'_> {
                     self.particles
                         .add(&ParticleOptions::simple(ty), p, [0.0; 3]);
                 }
-            }
-            // Horizon's particle rain: drops of rain, flakes of snow and the
-            // sand of a desert storm.
-            if self.settings.extras.particle_rain && rain > 0.0 {
-                let mut random = LegacyRandom::new(self.world.game_time.wrapping_mul(31_987_231));
-                horizon_client::rain::tick(
-                    &mut self.particles,
-                    &horizon_client::rain::Spawn {
-                        world,
-                        facts,
-                        biomes,
-                        eye: e,
-                        rain,
-                        thunder,
-                    },
-                    horizon_client::rain::Density {
-                        amount: self.settings.extras.particle_rain_amount,
-                        particles: self.settings.particles,
-                    },
-                    self.world.game_time,
-                    &mut random,
-                );
             }
         }
         if let Some(r) = &self.renderer {

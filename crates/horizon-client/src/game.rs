@@ -61,9 +61,7 @@ mod growth;
 mod hand;
 mod initial_spawn;
 mod integrated;
-mod item_browser;
 mod item_draw;
-mod item_highlighter;
 mod item_particles;
 mod jukebox;
 mod lan;
@@ -167,7 +165,7 @@ use horizon_client::{
     audio::Audio,
     biome::Biomes,
     blocks::{BlockFacts, Fluid},
-    chunk::{HEIGHT, MIN_Y},
+    chunk::{MIN_Y, height},
     clock::FixedStep,
     collisions,
     containers::{BlockEntity, Providers},
@@ -238,6 +236,8 @@ struct Options {
     distance: i32,
     distance_override: Option<i32>,
     seed: i64,
+    /// `--world-type ID`: the mod world type of a world made from the command line.
+    world_type: Option<String>,
     creative: bool,
     test_terrain: bool,
     frames: Option<u64>,
@@ -303,6 +303,7 @@ impl Options {
             distance: 12,
             distance_override: None,
             seed: 0,
+            world_type: None,
             creative: false,
             test_terrain: false,
             frames: None,
@@ -376,6 +377,7 @@ impl Options {
                                     .into()
                             })
                         }
+                        "--world-type" => o.world_type = Some(value),
                         "--frames" => o.frames = Some(value.parse()?),
                         "--world-frames" => {
                             o.world_frames = Some(value.parse()?);
@@ -659,7 +661,7 @@ impl LevelAccess for GameLevel<'_> {
         self.world.block(pos.x, pos.y, pos.z)
     }
     fn set_raw(&mut self, pos: BlockPos, state: BlockStateId) -> Option<BlockStateId> {
-        if !self.world.loaded(pos.x, pos.z) || pos.y < MIN_Y || pos.y >= MIN_Y + HEIGHT {
+        if !self.world.loaded(pos.x, pos.z) || pos.y < MIN_Y || pos.y >= MIN_Y + height() {
             return None;
         }
         let previous = self.world.block(pos.x, pos.y, pos.z);
@@ -681,7 +683,7 @@ impl LevelAccess for GameLevel<'_> {
         if self.dimension != LevelDimension::Overworld {
             256
         } else {
-            MIN_Y + HEIGHT
+            MIN_Y + height()
         }
     }
     fn random(&mut self) -> &mut horizon_core::random::LegacyRandom {
@@ -1111,9 +1113,6 @@ struct Game<'a> {
     inv_clicks: horizon_client::container_screen::Clicks,
     /// The Mouse Tweaks extra's drag and wheel (`tweaks`).
     tweaks: tweaks::Tweaks,
-    /// The Item Highlighter extra: the slots that hold a new item.
-    highlighter: horizon_client::item_highlighter::Highlighter,
-    item_browser: item_browser::ItemBrowser,
     /// The last inventory click, for the double click that gathers a stack.
     last_inv_click: Option<(std::time::Instant, usize, bool)>,
     /// `lastQuickMoved`: what the last Shift click moved, which a Shift
@@ -1174,8 +1173,6 @@ struct Game<'a> {
     /// Controllers (Horizon's own).
     pad: pad::Pads,
     frames: u64,
-    /// The Dynamic lights extra's sources at their last gathering (`dynamic_lights`).
-    dynamic_light_sources: Vec<horizon_client::dynamic_lights::Source>,
     /// Frames drawn with the player in the world, for `--world-frames`.
     world_frames: u64,
     fps: f32,
@@ -1353,9 +1350,14 @@ struct Game<'a> {
     /// (least recently shown first).
     skin_downloads: horizon_client::skins::Downloader,
     skin_slots: Vec<(String, usize)>,
+    /// The pixels of the downloaded skins by location, for `entity.get-face`.
+    skin_pixels: HashMap<String, Vec<u8>>,
     cart_models: minecarts::CartModels,
     /// The boat the player rides.
     riding: Option<u32>,
+    /// How far the boat turned the player's view in the last tick, so the
+    /// camera interpolates it as vanilla's `yRotO` does.
+    boat_turn: f32,
     /// The ender inventory (27 slots) and the ender chest showing it.
     ender_items: Vec<Option<ItemStack>>,
     ender_open: Option<(i32, i32, i32)>,
@@ -1532,7 +1534,7 @@ impl Dim {
     /// `DimensionType.logicalHeight`.
     fn logical_height(self) -> i32 {
         match self {
-            Self::Overworld => HEIGHT,
+            Self::Overworld => height(),
             Self::Nether => 128,
             Self::End => 256,
         }
@@ -1540,7 +1542,7 @@ impl Dim {
     /// `Level.getMaxY`: the dimension type's minimum y plus height, less one.
     fn max_y(self) -> i32 {
         match self {
-            Self::Overworld => MIN_Y + HEIGHT - 1,
+            Self::Overworld => MIN_Y + height() - 1,
             Self::Nether | Self::End => 255,
         }
     }
@@ -2771,8 +2773,8 @@ impl Game<'_> {
             // FallingBlockEntity.tick: off the ground, it gives up after 600
             // ticks (100 outside the world) and drops itself as an item.
             let y = next.y.floor() as i32;
-            let outside =
-                y <= horizon_client::chunk::MIN_Y || y >= horizon_client::chunk::MIN_Y + 384;
+            let outside = y <= horizon_client::chunk::MIN_Y
+                || y >= horizon_client::chunk::MIN_Y + horizon_client::chunk::height();
             if !on_ground && (f.age > 100 && outside || f.age > 600) {
                 if f.drop_item && entity_drops {
                     dropped.push((f.state, next));
@@ -3602,7 +3604,7 @@ impl Game<'_> {
             }
             return None;
         }
-        let mut y = MIN_Y + HEIGHT - 1;
+        let mut y = MIN_Y + height() - 1;
         while y > MIN_Y {
             let s = self.world.block(x, y, z);
             if !self.res.facts().is_air(s) {
@@ -4549,8 +4551,6 @@ impl Game<'_> {
             self.draw_level_loading(&mut batch, reason);
             return batch;
         }
-        // The Item Highlighter extra: the slots that hold a new item.
-        self.update_highlighter();
         // Hud.extractRenderState: F1 (keyToggleGui) hides camera overlays, the
         // crosshair, hotbar, effects, bars, sidebar, action bar, titles and chat;
         // the sleep overlay, debug screen and open screens still draw.
@@ -4598,8 +4598,8 @@ impl Game<'_> {
                         }
                     }
                 }
-                // The Item Highlighter extra: the slots with a new item.
-                self.draw_hotbar_marks(&mut batch, wi, hi);
+                // The mods' marks on the hotbar's slots.
+                self.draw_mod_hotbar_marks(&mut batch, wi, hi);
             }
             self.draw_effect_icons(&mut batch);
             // Hud: the action bar and titles draw over the hotbar (nextStratum).
@@ -5074,8 +5074,8 @@ impl Game<'_> {
             self.draw_inventory_player(batch, ox, oy);
         }
         self.draw_inventory_slots(batch, ox, oy);
-        // The Item Highlighter extra: the slots that hold a new item.
-        self.draw_inventory_marks(batch, ox, oy);
+        // The mods' marks on the slots of the screen.
+        self.draw_mod_inventory_marks(batch, ox, oy);
         self.draw_sort_buttons(batch, ox, oy);
         self.draw_recipe_book(batch);
         if let Some(slot) = self.slot_at(batch, self.cursor.0, self.cursor.1) {
@@ -5088,22 +5088,18 @@ impl Game<'_> {
                 16.0,
                 rgba(255, 255, 255, 128),
             );
-            // The player looked at the slot: a new item's mark is gone.
-            self.clear_highlight(slot);
         }
         self.draw_carried(batch);
         self.draw_slot_tooltip(batch);
         if self.container.is_none() && self.craft_size == 2 && !self.mount_active() {
             self.draw_inventory_effects(batch, (ox, oy), 176);
         }
-        self.draw_item_browser(batch);
         self.draw_mod_overlays(batch);
     }
     pub(super) fn close_container(&mut self) {
         self.close_station();
         self.mount_closed();
         self.recipe_ui.reset_screen();
-        self.item_browser_close();
         if self.remote.is_some() {
             return self.remote_close_container();
         }
@@ -5623,9 +5619,6 @@ impl Game<'_> {
     fn inventory_press(&mut self, right: bool) {
         use horizon_client::container_screen::Target;
         use horizon_client::menu::Input;
-        if self.item_browser_press(right) {
-            return;
-        }
         if !right && self.sort_press() {
             return;
         }
@@ -6048,11 +6041,6 @@ impl Game<'_> {
             let mut crafted = 0;
             while let Some((recipe, result)) = self.craft_recipe() {
                 let made = (result.item.clone(), result.count);
-                // The Item Highlighter extra: a crafted item is not new.
-                self.highlighter.note_crafted(
-                    &result.item,
-                    self.started.elapsed().as_millis() as u64,
-                );
                 let cells = self.craft_size * self.craft_size;
                 let remainders = self.res.recipes().remainders(
                     &recipe,
@@ -7098,9 +7086,8 @@ impl Game<'_> {
         self.streaming = streaming;
         self.world = world;
         self.inventory = inventory;
-        // The Item Highlighter extra: the items a world comes with are not new.
-        self.highlighter
-            .reset(self.started.elapsed().as_millis() as u64);
+        // A new world: the mods start a new session.
+        self.new_mod_session();
         self.save = save;
         self.level = level;
         // ServerRecipeBook.loadUntrusted: recipes the manager does not have are dropped.
@@ -8326,7 +8313,10 @@ impl Game<'_> {
             }
         });
         let inverse_heights = self.heights.interpolated(a).map(|h| 1.0 - h);
-        let view = horizon_client::camera::view_matrix(self.yaw, self.pitch);
+        let view = horizon_client::camera::view_matrix(
+            perspective::interpolated_view_yaw(self.yaw, self.boat_turn(), a),
+            self.pitch,
+        );
         // The hand sway: both hands turn by a tenth of the bobs' lag.
         let [sway_x, sway_y] = self.sway.rotation(a, self.pitch, self.yaw);
         let to_world = view.inverse()
@@ -8540,10 +8530,6 @@ impl Game<'_> {
         self.streaming.smooth_lighting = self.settings.smooth_lighting;
         self.streaming.cutout_leaves = self.settings.cutout_leaves;
         self.streaming.cull_leaves = self.settings.horizon.cull_leaves;
-        // The connected-textures extra changes the tiles faces draw.
-        let ctm = self.settings.extras.connected_textures;
-        let remesh = remesh || ctm != horizon_client::ctm::enabled();
-        horizon_client::ctm::ENABLED.store(ctm, std::sync::atomic::Ordering::Relaxed);
         if remesh {
             self.all_sections_changed();
         }
@@ -8557,7 +8543,7 @@ impl Game<'_> {
     /// `LevelExtractor.allChanged`: every loaded section is rebuilt.
     fn all_sections_changed(&mut self) {
         for &(x, z) in self.world.chunks.keys() {
-            for sy in 0..horizon_client::chunk::HEIGHT / 16 {
+            for sy in 0..horizon_client::chunk::height() / 16 {
                 self.world.dirty_sections.insert((x, sy, z));
             }
         }
@@ -8629,6 +8615,9 @@ impl Game<'_> {
     /// WeatherEffectRenderer: rain and snow columns within the weather radius.
     fn weather_geometry(&self, camera: glam::DVec3, alpha: f64, out: &mut Vec<Vertex>) {
         use horizon_client::weather;
+        if self.mods.mods.default_weather_hidden() {
+            return;
+        }
         let (intensity, _) = self.world.weather.levels(alpha as f32);
         if intensity <= 0.0 {
             return;
@@ -8941,8 +8930,8 @@ impl Game<'_> {
                 0.0625,
             );
             self.draw_inventory_slots(batch, ox, oy);
-            // The Item Highlighter extra: the slots that hold a new item.
-            self.draw_inventory_marks(batch, ox, oy);
+            // The mods' marks on the slots of the screen.
+            self.draw_mod_inventory_marks(batch, ox, oy);
             if Self::creative_trash_hovered(batch, self.cursor) {
                 let (x, y) = Creative::TRASH_POSITION;
                 batch.fill(
@@ -8964,8 +8953,6 @@ impl Game<'_> {
                     16.0,
                     rgba(255, 255, 255, 128),
                 );
-                // The player looked at the slot: a new item's mark is gone.
-                self.clear_highlight(slot);
             }
         } else {
             let items = self.creative_screen.items(&self.pack.names);
@@ -9001,8 +8988,8 @@ impl Game<'_> {
                     hovered = Some(stack);
                 }
             }
-            // The Item Highlighter extra: the hotbar's row with a new item.
-            self.draw_creative_hotbar_marks(batch, ox, oy);
+            // The mods' marks on the hotbar's row of the item tab.
+            self.draw_mod_creative_marks(batch, ox, oy);
             let scrollable = self.creative_screen.rows(&self.pack.names) > 5;
             let scroller = if scrollable {
                 "gui/sprites/container/creative_inventory/scroller"
@@ -9341,10 +9328,13 @@ impl Game<'_> {
         // hitboxes (F3+G, F3+B).
         let mut lines = self.fishing_line(alpha, size);
         let mut on_top = Vec::new();
+        let (mod_hidden, mod_over) = self.mod_world_boxes();
+        lines.extend(mod_hidden);
+        on_top.extend(mod_over);
         if self.show_hitboxes || self.show_chunk_borders {
             let g = self.debug_gizmos(alpha as f32);
             lines.extend(g.lines);
-            on_top = g.on_top;
+            on_top.extend(g.on_top);
         }
         let view = horizon_client::camera::view_matrix(view_yaw, view_pitch);
         let at = camera.to_array();
@@ -9516,7 +9506,7 @@ impl Game<'_> {
         let dynamic_lights = if title {
             Vec::new()
         } else {
-            self.dynamic_lights(camera, alpha, f64::from(distance))
+            self.dynamic_lights(camera, f64::from(distance))
         };
         let frame = Frame {
             shader: self.shader_inputs(camera, alpha as f32),
@@ -9750,9 +9740,6 @@ impl Game<'_> {
         if self.sort_key_press(key) {
             return Ok(());
         }
-        if self.item_browser_key(key) {
-            return Ok(());
-        }
         if self.remote.is_some() && self.remote_key(key)? {
             return Ok(());
         }
@@ -9886,6 +9873,16 @@ impl Game<'_> {
     }
     /// A mouse button while playing (window or control socket).
     fn play_mouse(&mut self, button: MouseButton, pressed: bool) -> Result<()> {
+        self.mod_play_mouse(
+            match button {
+                MouseButton::Left => 0,
+                MouseButton::Right => 1,
+                MouseButton::Middle => 2,
+                _ => -1,
+            },
+            pressed,
+            0.0,
+        );
         if self.sleeping.is_some() {
             return Ok(());
         }
@@ -10102,7 +10099,7 @@ impl Game<'_> {
                 }
             }
             for c in unloaded {
-                for sy in 0..(HEIGHT / 16) {
+                for sy in 0..(height() / 16) {
                     renderer.remove((c.x, sy, c.z));
                 }
             }
@@ -10385,11 +10382,11 @@ impl ApplicationHandler for Game<'_> {
                     }) => {}
                 WindowEvent::KeyboardInput { event, .. }
                     if matches!(event.physical_key, PhysicalKey::Code(code)
-                        if self.mod_overlay_key(
-                            code,
-                            event.text.as_deref(),
-                            event.state == ElementState::Pressed,
-                        )) => {}
+                    if self.mod_overlay_key(
+                        code,
+                        event.text.as_deref(),
+                        event.state == ElementState::Pressed,
+                    )) => {}
                 WindowEvent::MouseWheel { delta, .. } if self.screen == Screen::ModOwned => {
                     let steps = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y,
@@ -10424,9 +10421,13 @@ impl ApplicationHandler for Game<'_> {
                         let batch = HudBatch::new([size.width, size.height]);
                         title.scroll_worlds(d, self.cursor, (batch.width, batch.height));
                     }
+                    if self.screen == Screen::Playing {
+                        self.mod_play_mouse(-1, false, d);
+                    }
                     if self.screen == Screen::Playing
                         && self.sleeping.is_none()
                         && self.player.is_some()
+                        && !self.mods.mods.wheel_captured()
                         && !self.extras_scroll(d)
                         && let Some((wheel, (_, vertical_steps))) =
                             self.mouse
@@ -10459,7 +10460,6 @@ impl ApplicationHandler for Game<'_> {
                     }
                     if self.screen == Screen::Inventory
                         && d != 0.0
-                        && !self.item_browser_scroll(d)
                         && !self.tweak_scroll(d, self.inventory_target().0)
                     {
                         self.station_scroll(d);
@@ -10727,13 +10727,6 @@ impl ApplicationHandler for Game<'_> {
                 {
                     // The recipe book's search box takes every key but Escape.
                     self.recipe_key(&event);
-                }
-                WindowEvent::KeyboardInput { event, .. }
-                    if self.item_browser_typing()
-                        && event.state == ElementState::Pressed
-                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
-                {
-                    self.item_browser_type(&event);
                 }
                 WindowEvent::KeyboardInput { event, .. }
                     if self.station_typing()
@@ -11191,8 +11184,6 @@ impl<'a> Game<'a> {
             craft_size: 2,
             inv_drag: None,
             tweaks: Default::default(),
-            highlighter: Default::default(),
-            item_browser: Default::default(),
             inv_clicks: Default::default(),
             last_inv_click: None,
             last_quick_moved: None,
@@ -11237,7 +11228,6 @@ impl<'a> Game<'a> {
             last_input: now,
             pad: Default::default(),
             frames: 0,
-            dynamic_light_sources: Vec::new(),
             world_frames: 0,
             fps: 0.0,
             fps_frames: 0,
@@ -11362,8 +11352,10 @@ impl<'a> Game<'a> {
                     .join("assets/skins"),
             ),
             skin_slots: Vec::new(),
+            skin_pixels: HashMap::new(),
             cart_models: prepared.cart_models,
             riding: None,
+            boat_turn: 0.0,
             ender_items: vec![None; 27],
             ender_open: None,
             pending: Default::default(),

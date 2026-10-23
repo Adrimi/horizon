@@ -1,6 +1,6 @@
 //! Resident client world: streamed chunk columns plus the bookkeeping the game
 //! loop needs to relight and remesh after edits.
-use crate::chunk::{Chunk, MIN_Y, SECTIONS};
+use crate::chunk::{Chunk, MIN_Y, SectionMask, section_count};
 use horizon_core::random::LegacyRandom;
 use horizon_world::registry::BlockStateId;
 use std::{
@@ -13,28 +13,30 @@ use std::{
 /// rather than at every section of it.
 #[derive(Clone, Debug, Default)]
 pub struct DirtySections {
-    columns: crate::fast_hash::FxHashMap<(i32, i32), u32>,
+    columns: crate::fast_hash::FxHashMap<(i32, i32), SectionMask>,
 }
-const _: () = assert!(SECTIONS <= 32);
 impl DirtySections {
     pub fn insert(&mut self, (x, sy, z): (i32, i32, i32)) {
-        debug_assert!((0..SECTIONS as i32).contains(&sy));
-        *self.columns.entry((x, z)).or_default() |= 1 << sy;
+        debug_assert!((0..section_count() as i32).contains(&sy));
+        self.columns.entry((x, z)).or_default().insert(sy as usize);
     }
     pub fn contains(&self, &(x, sy, z): &(i32, i32, i32)) -> bool {
-        (0..SECTIONS as i32).contains(&sy)
-            && self.columns.get(&(x, z)).is_some_and(|m| m & 1 << sy != 0)
+        (0..section_count() as i32).contains(&sy)
+            && self
+                .columns
+                .get(&(x, z))
+                .is_some_and(|m| m.contains(sy as usize))
     }
     /// The dirty section indexes of column (x, z), as bits, removed.
-    pub fn take_column(&mut self, x: i32, z: i32) -> u32 {
-        self.columns.remove(&(x, z)).unwrap_or(0)
+    pub fn take_column(&mut self, x: i32, z: i32) -> SectionMask {
+        self.columns.remove(&(x, z)).unwrap_or_default()
     }
     /// Keep the columns `keep` accepts.
     pub fn retain_columns(&mut self, mut keep: impl FnMut(i32, i32) -> bool) {
         self.columns.retain(|&(x, z), _| keep(x, z));
     }
     /// The columns holding dirty sections, with their section bits.
-    pub fn columns(&self) -> impl Iterator<Item = ((i32, i32), u32)> + '_ {
+    pub fn columns(&self) -> impl Iterator<Item = ((i32, i32), SectionMask)> + '_ {
         self.columns.iter().map(|(&c, &m)| (c, m))
     }
     pub fn clear(&mut self) {
@@ -45,7 +47,7 @@ impl DirtySections {
     }
     /// How many sections are dirty.
     pub fn len(&self) -> usize {
-        self.columns.values().map(|m| m.count_ones() as usize).sum()
+        self.columns.values().map(SectionMask::len).sum()
     }
 }
 pub struct World {
@@ -87,10 +89,13 @@ pub struct World {
     /// Every block position written since the log was last drained, kept
     /// only while the world is open to the network (see `lan`).
     pub block_log: Option<Vec<(i32, i32, i32)>>,
+    /// The blocks that became air, with their state before, while a mod
+    /// watches (`world.removed-blocks`, API 0.1.19); none when none does.
+    pub removed_log: Option<Vec<((i32, i32, i32), u32)>>,
     /// The sections whose light changed since the log was last drained, as
     /// a bit per section of each column, kept while `block_log` is
     /// (`ChunkHolder.sectionLightChanged`).
-    pub light_log: Option<crate::fast_hash::FxHashMap<(i32, i32), u32>>,
+    pub light_log: Option<crate::fast_hash::FxHashMap<(i32, i32), SectionMask>>,
     /// The villager POIs of each section (`PoiManager`'s sections).
     pub pois: crate::poi_sections::PoiSections<crate::mobs::villager_brain::Poi>,
 }
@@ -177,6 +182,7 @@ impl World {
             day_time: 1000,
             weather: Weather::default(),
             block_log: None,
+            removed_log: None,
             light_log: None,
             pois: Default::default(),
         }
@@ -245,7 +251,7 @@ impl World {
         let Some(chunk) = self.chunks.get_mut(&(x >> 4, z >> 4)) else {
             return Err("write outside resident chunks".into());
         };
-        if y < MIN_Y || y >= MIN_Y + (SECTIONS as i32) * 16 {
+        if y < MIN_Y || y >= MIN_Y + (section_count() as i32) * 16 {
             return Err("write outside world height".into());
         }
         let previous = Arc::make_mut(chunk).set(x & 15, y, z & 15, state.0);
@@ -260,6 +266,13 @@ impl World {
             if let Some(log) = &mut self.block_log {
                 log.push((x, y, z));
             }
+            if state == self.air
+                && previous != self.air.0
+                && let Some(log) = &mut self.removed_log
+                && log.len() < 512
+            {
+                log.push(((x, y, z), previous));
+            }
             self.modified.insert((x >> 4, z >> 4));
             let sy = (y - MIN_Y) >> 4;
             for dz in -1..=1 {
@@ -267,7 +280,7 @@ impl World {
                     for dx in -1..=1 {
                         let (bx, by, bz) = (x + dx, y + dy, z + dz);
                         let s = (by - MIN_Y) >> 4;
-                        if !(0..SECTIONS as i32).contains(&s) {
+                        if !(0..section_count() as i32).contains(&s) {
                             continue;
                         }
                         self.dirty_sections.insert((bx >> 4, s, bz >> 4));

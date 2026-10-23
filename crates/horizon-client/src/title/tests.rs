@@ -767,7 +767,8 @@ fn create_world_tabs_follow_vanilla_and_their_choices_reach_the_action() {
         crate::save::WorldGen {
             flat: true,
             structures: true,
-            bonus_chest: true
+            bonus_chest: true,
+            world_type: None,
         }
     );
     // The More tab's screens don't exist yet.
@@ -783,6 +784,7 @@ fn new_world_generation_settings_round_trip() {
         flat: true,
         structures: false,
         bonus_chest: true,
+        world_type: None,
     };
     crate::save::write_world_gen_settings(&dir, 42, options).unwrap();
     assert_eq!(crate::save::WorldGen::read(&dir), Some(options));

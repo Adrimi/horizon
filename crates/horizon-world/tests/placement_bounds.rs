@@ -56,3 +56,30 @@ fn layered_scans_bound_work_when_world_queries_return_extreme_heights() {
     assert!(matches!(result, Err(PlacementError::WorkLimit)));
     assert!(context.reads > 0 && context.reads <= 65536);
 }
+
+#[test]
+fn random_offset_samples_the_spreads_like_vanilla() {
+    let modifier = PlacementModifier::from_json(
+        r#"{"type":"minecraft:random_offset","xz_spread":0,"y_spread":-1}"#,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    modifier
+        .modify(
+            WorldGenerationContext::new(-64, 384, 63),
+            &mut LegacyRandom::new(0),
+            [10, 70, 20],
+            |_, pos| -> Result<(), ()> {
+                out.push(pos);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(out, [[10, 69, 20]]);
+    assert!(
+        PlacementModifier::from_json(
+            r#"{"type":"minecraft:random_offset","xz_spread":{"type":"minecraft:uniform","min_inclusive":-3,"max_inclusive":3},"y_spread":0}"#
+        )
+        .is_ok()
+    );
+}

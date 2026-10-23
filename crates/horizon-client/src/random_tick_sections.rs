@@ -1,7 +1,7 @@
 //! Memoized palette eligibility for the game thread's random-tick snapshot.
 use crate::{
     blocks::BlockFacts,
-    chunk::{Chunk, MIN_Y, SECTIONS},
+    chunk::{Chunk, MIN_Y, SectionMask},
     fast_hash::FxHashMap,
 };
 use horizon_world::registry::BlockStateId;
@@ -9,19 +9,16 @@ use std::sync::{Arc, Weak};
 
 /// A value snapshot, in ascending section order, with no per-chunk allocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Sections(u32);
+pub struct Sections(SectionMask);
 impl Iterator for Sections {
     type Item = i32;
     fn next(&mut self) -> Option<i32> {
-        if self.0 == 0 {
-            return None;
-        }
-        let index = self.0.trailing_zeros();
-        self.0 &= self.0 - 1;
+        let index = self.0.iter().next()?;
+        self.0.remove(index);
         Some(MIN_Y + index as i32 * 16)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.0.count_ones() as usize;
+        let len = self.0.len();
         (len, Some(len))
     }
 }
@@ -55,19 +52,16 @@ impl RandomTickSections {
         chunk: &Arc<Chunk>,
         mut random: impl FnMut(u32) -> bool,
     ) -> Sections {
-        const {
-            assert!(SECTIONS <= u32::BITS as usize);
-        }
         let cached = self.chunks.entry(key).or_insert_with(|| Cached {
             chunk: Weak::new(),
             sections: Sections::default(),
         });
         if cached.chunk.as_ptr() != Arc::as_ptr(chunk) {
-            let mut mask = 0;
+            let mut mask = SectionMask::default();
             for (i, section) in chunk.sections.iter().enumerate() {
                 // Preserve maybe_has, including unused entries and global palettes.
                 if section.blocks.maybe_has(&mut random) {
-                    mask |= 1 << i;
+                    mask.insert(i);
                 }
             }
             cached.sections = Sections(mask);
@@ -81,6 +75,7 @@ impl RandomTickSections {
 mod tests {
     use super::*;
     use crate::chunk::Section;
+    use crate::chunk::section_count;
 
     #[test]
     fn edits_replacements_compaction_and_reload() {
@@ -102,9 +97,12 @@ mod tests {
         assert_eq!(cache.get_with((0, 0), &chunk, |id| id == 1).len(), 1);
         Arc::make_mut(&mut Arc::make_mut(&mut chunk).sections[0]).compact();
         assert_eq!(cache.get_with((0, 0), &chunk, |id| id == 1).len(), 0);
-        Arc::make_mut(&mut chunk).sections[SECTIONS - 1] = Arc::new(Section::default());
+        Arc::make_mut(&mut chunk).sections[section_count() - 1] = Arc::new(Section::default());
         cache.clear(); // resource reload, with changed facts for the same state IDs
-        assert_eq!(cache.get_with((0, 0), &chunk, |id| id == 0).len(), SECTIONS);
+        assert_eq!(
+            cache.get_with((0, 0), &chunk, |id| id == 0).len(),
+            section_count()
+        );
         cache.remove(&(0, 0));
         assert!(cache.chunks.is_empty());
     }
@@ -132,7 +130,7 @@ mod tests {
     #[test]
     fn global_palette_and_ascending_order() {
         let mut chunk = Chunk::empty(0, 0);
-        for i in [0, 9, SECTIONS - 1] {
+        for i in [0, 9, section_count() - 1] {
             Arc::make_mut(&mut chunk.sections[i]).blocks =
                 Section::from_blocks(&std::array::from_fn(|j| (j % 300) as u32));
         }
@@ -143,7 +141,11 @@ mod tests {
             cache
                 .get_with((0, 0), &chunk, |id| id == 40000)
                 .collect::<Vec<_>>(),
-            [MIN_Y, MIN_Y + 9 * 16, MIN_Y + (SECTIONS as i32 - 1) * 16]
+            [
+                MIN_Y,
+                MIN_Y + 9 * 16,
+                MIN_Y + (section_count() as i32 - 1) * 16
+            ]
         );
     }
 }

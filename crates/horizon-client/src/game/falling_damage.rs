@@ -6,6 +6,11 @@ use horizon_world::level::LevelEvent;
 
 impl Game<'_> {
     pub(super) fn finish_falling_block(&mut self, mut block: FallingBlock, pos: [i32; 3]) {
+        // A mod's falling block that is not to stay (`world.fall-block`).
+        let from = [block.start_pos.x, block.start_pos.y, block.start_pos.z];
+        if self.mods.vanish_falls.remove(&from) {
+            return;
+        }
         let anvil = self.res.facts().get(block.state).name.ends_with("anvil");
         if let Some(impact) = block.damage.impact(block.fall_distance) {
             if impact.amount > 0.0 {

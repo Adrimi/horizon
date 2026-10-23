@@ -18,8 +18,6 @@ mod tests;
 
 /// GuiMessageTag.systemSinglePlayer's indicator colour.
 pub const SYSTEM_INDICATOR: u32 = 0xD0D0D0;
-/// The chat heads extra: an 8-pixel head and a 2-pixel gap before the text.
-pub const HEAD_WIDTH: i32 = 10;
 
 /// The chat options (doubles, as vanilla keeps them).
 #[derive(Clone, Copy, Debug)]
@@ -84,13 +82,31 @@ pub struct Picture {
     pub regions: Vec<[i32; 4]>,
     pub width: i32,
     pub height: i32,
+    /// Pixels between the picture and the text that follows it.
+    pub gap: i32,
+    /// The message's character the picture stands before; none: at the
+    /// start of the first line, the text of every line indented.
+    pub place: Option<usize>,
+    /// How to draw each region (by index); a missing entry draws it as is.
+    pub styles: Vec<PictureStyle>,
+}
+/// How one rectangle of a [`Picture`] is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PictureStyle {
+    pub dx: i32,
+    pub dy: i32,
+    /// 0: the picture's own size.
+    pub width: i32,
+    pub height: i32,
+    /// 0xRRGGBB multiplied with the texture; 0: the line's colour.
+    pub color: u32,
 }
 #[derive(Clone, Debug)]
 struct Message {
     added: u64,
     content: Text,
     indicator: Option<u32>,
-    /// The player who sent it (the chat heads extra).
+    /// The player who sent it, for a mod's picture (`chat-decorate`).
     sender: Option<u128>,
     /// A picture a mod set for it.
     picture: Option<std::sync::Arc<Picture>>,
@@ -101,13 +117,14 @@ struct Line {
     added: u64,
     content: Text,
     indicator: Option<u32>,
-    /// The sender whose head starts the line (a message's first line).
-    head: Option<u128>,
     /// A mod's picture, on the first line, and the message's sender for it.
     picture: Option<std::sync::Arc<Picture>>,
     sender: Option<u128>,
-    /// Where the text starts: [`HEAD_WIDTH`] for every line of a message
-    /// with a head, 0 otherwise.
+    /// A line a picture stands in: the text before it, the text after it
+    /// and the picture's x.
+    split: Option<(Text, Text, i32)>,
+    /// Where the text starts: the picture's width plus two pixels for
+    /// every line of a message with a picture, 0 otherwise.
     indent: i32,
 }
 
@@ -136,11 +153,12 @@ pub struct Chat {
     pub log: bool,
     /// Messages added since the start, for the control socket's events.
     pub received: u64,
-    /// The chat heads extra (off: drawn exactly as vanilla).
-    heads: bool,
     /// Skin texture paths by player UUID; unknown players get their
-    /// default skin.
+    /// default skin. A mod's picture (`chat-decorate`) draws the sender's
+    /// face from them.
     pub head_skins: std::collections::HashMap<u128, String>,
+    /// Players who hang upside down (their faces are drawn so).
+    pub upside_down: std::collections::HashSet<u128>,
 }
 impl Chat {
     pub fn lines_per_page(&self, focused: bool) -> usize {
@@ -159,21 +177,10 @@ impl Chat {
         ticks: u64,
         focused: bool,
     ) {
-        self.add_from(atlas, content, indicator, None, ticks, focused);
+        self.add_decorated(atlas, content, indicator, None, None, ticks, focused);
     }
-    /// [`Chat::add`] for a message `sender` (a player's UUID) wrote.
-    pub fn add_from(
-        &mut self,
-        atlas: &HudAtlas,
-        content: Text,
-        indicator: Option<u32>,
-        sender: Option<u128>,
-        ticks: u64,
-        focused: bool,
-    ) {
-        self.add_decorated(atlas, content, indicator, sender, None, ticks, focused);
-    }
-    /// [`Chat::add_from`] with a `picture` a mod gave the message.
+    /// [`Chat::add_decorated`] with the `sender` of the message (a player's
+    /// UUID), for a mod's picture.
     #[allow(clippy::too_many_arguments)]
     pub fn add_decorated(
         &mut self,
@@ -204,28 +211,48 @@ impl Chat {
     }
     fn add_lines(&mut self, font: &crate::font::Font, message: &Message, focused: bool) {
         let picture = message.picture.clone();
-        let head = message.sender.filter(|_| self.heads && picture.is_none());
-        let indent = match (&picture, head) {
-            (Some(p), _) => p.width + 2,
-            (None, Some(_)) => HEAD_WIDTH,
-            (None, None) => 0,
-        };
-        let width = self.max_width() - indent;
-        let wrapped = font.wrap_components(&message.content, width);
+        // A mod's picture takes the room; without one the text starts at
+        // the left, as in vanilla.
+        let inline = picture.as_ref().is_some_and(|p| p.place.is_some());
+        let indent = picture
+            .as_ref()
+            .filter(|_| !inline)
+            .map_or(0, |p| p.width + p.gap);
+        let mut width = self.max_width() - indent;
+        let mut wrapped = font.wrap_components(&message.content, width);
+        // A picture in the text takes room on the first line: wrap again
+        // narrower when the first line no longer fits with it.
+        if let Some(p) = picture.as_ref().filter(|p| p.place.is_some())
+            && let Some(first) = wrapped.first()
+            && font.width_text(first) as i32 + p.width + p.gap > width
+        {
+            width -= p.width + p.gap;
+            wrapped = font.wrap_components(&message.content, width);
+        }
         for (i, line) in wrapped.into_iter().enumerate() {
             if focused && self.scroll > 0 {
                 self.new_since_scroll = true;
                 self.scroll_by(1, focused);
             }
+            let split = picture
+                .as_ref()
+                .filter(|_| i == 0)
+                .and_then(|p| p.place)
+                .map(|at| {
+                    let at = at.min(line.char_count());
+                    let (left, right) = (line.slice(0, at), line.slice(at, usize::MAX));
+                    let x = font.width_text(&left).ceil() as i32;
+                    (left, right, x)
+                });
             self.lines.insert(
                 0,
                 Line {
                     added: message.added,
                     content: line,
                     indicator: message.indicator,
-                    head: head.filter(|_| i == 0),
                     picture: picture.clone().filter(|_| i == 0),
                     sender: message.sender,
+                    split,
                     indent,
                 },
             );
@@ -238,14 +265,15 @@ impl Chat {
         out: &mut Vec<GuiDraw>,
         picture: &Picture,
         sender: Option<u128>,
-        y: i32,
+        at: [i32; 2],
         color: u32,
     ) {
+        let [x, y] = at;
         let skin = match &picture.source {
             PictureSource::Sprite(name) => {
                 out.push(GuiDraw::Sprite {
                     sprite: name.clone().into(),
-                    x: 0,
+                    x,
                     y,
                     w: picture.width,
                     h: picture.height,
@@ -261,22 +289,39 @@ impl Chat {
         let Some(uuid) = skin else {
             return;
         };
-        let skin = self
+        let texture = self
             .head_skins
             .get(&uuid)
             .map_or_else(|| crate::tab_list::default_skin(uuid), String::as_str);
-        for [u, v, w, h] in &picture.regions {
+        // A player who hangs upside down has the face upside down.
+        let flip = self.upside_down.contains(&uuid);
+        for (i, [u, v, w, h]) in picture.regions.iter().enumerate() {
+            let style = picture.styles.get(i).copied().unwrap_or_default();
+            let tint = if style.color == 0 {
+                color
+            } else {
+                (color & 0xFF00_0000) | (style.color & 0xFF_FFFF)
+            };
+            let (uv_v, src_h) = if flip { (v + h, -h) } else { (*v, *h) };
             out.push(GuiDraw::Blit {
-                texture: std::borrow::Cow::Owned(skin.to_owned()),
+                texture: std::borrow::Cow::Owned(texture.to_owned()),
                 blend: Blend::Textured,
-                x: 0,
-                y,
-                w: picture.width,
-                h: picture.height,
-                uv: [*u as f32, *v as f32],
-                src: [*w, *h],
+                x: x + style.dx,
+                y: y + style.dy,
+                w: if style.width > 0 {
+                    style.width
+                } else {
+                    picture.width
+                },
+                h: if style.height > 0 {
+                    style.height
+                } else {
+                    picture.height
+                },
+                uv: [*u as f32, uv_v as f32],
+                src: [*w, src_h],
                 tex: [64, 64],
-                color,
+                color: tint,
             });
         }
     }
@@ -288,13 +333,6 @@ impl Chat {
         let messages: Vec<Message> = self.messages.iter().rev().cloned().collect();
         for m in &messages {
             self.add_lines(&atlas.font, m, false);
-        }
-    }
-    /// Turns the chat heads extra on or off, wrapping the chat again.
-    pub fn set_heads(&mut self, atlas: &HudAtlas, heads: bool) {
-        if self.heads != heads {
-            self.heads = heads;
-            self.rescale(atlas);
         }
     }
     pub fn clear(&mut self) {
@@ -378,38 +416,40 @@ impl Chat {
             let opacity = alpha * text_opacity;
             let color = hud_layout::white(opacity);
             if color >> 24 != 0 {
-                if let Some(uuid) = line.head {
-                    let skin = self
-                        .head_skins
-                        .get(&uuid)
-                        .map_or_else(|| crate::tab_list::default_skin(uuid), String::as_str);
-                    crate::tab_list::face_tinted(
-                        &mut out,
-                        skin,
-                        0,
-                        bottom - bottom_to_text,
-                        8,
-                        true,
-                        false,
-                        color,
-                    );
+                let y = bottom - bottom_to_text;
+                match (&line.picture, &line.split) {
+                    (Some(picture), Some((left, right, at))) => {
+                        // A picture in the text: the text before it, the
+                        // picture, then the rest after a gap.
+                        out.push(GuiDraw::Text {
+                            text: left.clone(),
+                            x: 0,
+                            y,
+                            color,
+                            shadow: true,
+                        });
+                        self.draw_picture(&mut out, picture, line.sender, [*at, y], color);
+                        out.push(GuiDraw::Text {
+                            text: right.clone(),
+                            x: at + picture.width + picture.gap,
+                            y,
+                            color,
+                            shadow: true,
+                        });
+                    }
+                    (picture, _) => {
+                        if let Some(picture) = picture {
+                            self.draw_picture(&mut out, picture, line.sender, [0, y], color);
+                        }
+                        out.push(GuiDraw::Text {
+                            text: line.content.clone(),
+                            x: line.indent,
+                            y,
+                            color,
+                            shadow: true,
+                        });
+                    }
                 }
-                if let Some(picture) = &line.picture {
-                    self.draw_picture(
-                        &mut out,
-                        picture,
-                        line.sender,
-                        bottom - bottom_to_text,
-                        color,
-                    );
-                }
-                out.push(GuiDraw::Text {
-                    text: line.content.clone(),
-                    x: line.indent,
-                    y: bottom - bottom_to_text,
-                    color,
-                    shadow: true,
-                });
             }
             if let Some(indicator) = line.indicator {
                 let color = hud_layout::as8(opacity) << 24 | indicator & 0xFF_FFFF;

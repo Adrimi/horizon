@@ -2,7 +2,7 @@
 //! (sections with their paletted containers, block entities and the sky and
 //! block DataLayers) and the section block-change batches.
 use crate::{
-    chunk::{Chunk, Light, MIN_Y, SECTIONS, Section},
+    chunk::{Chunk, Light, MIN_Y, Section, section_count},
     containers::BlockEntity,
     fast_hash::FxHashMap,
 };
@@ -435,7 +435,7 @@ impl ChunkEncoder {
             tables: None,
             cache: Default::default(),
             heights: Default::default(),
-            sections: 0..SECTIONS,
+            sections: 0..section_count(),
             sky: true,
         }
     }
@@ -522,9 +522,9 @@ impl ChunkEncoder {
     pub fn set_dimension(&mut self, min_y: i32, height: i32, sky: bool) {
         let lo = usize::try_from((min_y - MIN_Y) >> 4)
             .unwrap_or(0)
-            .min(SECTIONS);
-        let n = usize::try_from(height >> 4).unwrap_or(SECTIONS);
-        self.sections = lo..(lo + n).min(SECTIONS);
+            .min(section_count());
+        let n = usize::try_from(height >> 4).unwrap_or(section_count());
+        self.sections = lo..(lo + n).min(section_count());
         self.sky = sky;
         // The heightmaps depend on the level's height.
         self.heights.get_mut().unwrap().clear();
@@ -545,6 +545,11 @@ impl ChunkEncoder {
     /// The chunk column with its light and block entities.
     /// The non-air sections of a column as bits (LevelChunkSection.hasOnlyAir).
     fn occupied(&self, chunk: &Chunk) -> u64 {
+        // More than 64 sections (a tall mod world) do not fit the bits: every
+        // section counts as occupied, so all of the light is sent.
+        if self.sections.len() > 64 {
+            return u64::MAX;
+        }
         let mut bits = 0u64;
         // One lock for the column: body_in asks for nine columns' sections.
         let mut cache = self.cache.lock().unwrap();
@@ -722,14 +727,14 @@ impl ChunkEncoder {
     /// client keeps the same light either way). A section changed as its
     /// last block went (light dimming around a removed block) is sent too:
     /// a client not tracking the block would otherwise keep its old light.
-    pub fn light_update(&self, chunk: &Chunk, changed: u32) -> Vec<u8> {
+    pub fn light_update(&self, chunk: &Chunk, changed: crate::chunk::SectionMask) -> Vec<u8> {
         let first = self.sections.start;
         let lights: Vec<(usize, SectionLight)> = self
             .light_sections(chunk, u64::MAX)
             .into_iter()
             .filter(|&(b, _)| {
                 // Light section b holds the column's section first + b - 1.
-                (1..=self.sections.len()).contains(&b) && changed >> (first + b - 1) & 1 != 0
+                (1..=self.sections.len()).contains(&b) && changed.contains(first + b - 1)
             })
             .collect();
         horizon_protocol::packets::play::Clientbound::LightUpdate(
@@ -991,8 +996,10 @@ fn light_sections(
 ) -> Vec<(usize, SectionLight)> {
     let n = sections.len();
     // Light section b holds chunk section b - 1.
-    let exists =
-        |b: usize| (b.saturating_sub(2)..=b.min(n - 1)).any(|s| s + 2 >= b && around >> s & 1 != 0);
+    let exists = |b: usize| {
+        (b.saturating_sub(2)..=b.min(n - 1))
+            .any(|s| s + 2 >= b && around.checked_shr(s as u32).is_none_or(|v| v & 1 != 0))
+    };
     (0..n + 2)
         .filter(|&b| exists(b))
         .map(|b| {
@@ -1239,7 +1246,7 @@ mod tests {
         assert!(light_data(&chunk.sections, 0).sky.is_empty());
         let data = light_data(&chunk.sections, u64::MAX);
         // Default sections are full sky light and no block light.
-        assert_eq!(data.sky.len(), SECTIONS + 1);
+        assert_eq!(data.sky.len(), section_count() + 1);
         assert_eq!(data.block.len(), 0);
         assert_eq!(data.sky[0][0], 0xFF);
         assert!(horizon_protocol::buf::bit(&data.empty_block_mask, 5));
@@ -1375,7 +1382,7 @@ mod tests {
         let bodies = |encoder: &ChunkEncoder| -> Vec<Vec<u8>> {
             chunks.iter().map(|c| encoder.body_in(c, &world)).collect()
         };
-        assert!(chunks.len() * SECTIONS >= WARM_MIN);
+        assert!(chunks.len() * section_count() >= WARM_MIN);
         warmed.warm(&chunks);
         assert_eq!(bodies(&warmed), expected);
         // Run on this thread alone, the job makes every column's heightmaps
@@ -1383,7 +1390,10 @@ mod tests {
         let mut cold = ChunkEncoder::new(states, &builtin, &[], &[]);
         cold.tables = alone.tables.clone();
         let job = cold.job(&chunks).unwrap();
-        assert_eq!((job.columns.len(), job.sections.len()), (16, 17 * SECTIONS));
+        assert_eq!(
+            (job.columns.len(), job.sections.len()),
+            (16, 17 * section_count())
+        );
         job.run();
         cold.keep(&job);
         assert_eq!(cold.heights.lock().unwrap().len(), 16);
@@ -1407,7 +1417,7 @@ mod tests {
         encoder.set_dimension(0, 256, false);
         let nether = encoder.encode(&chunk, &HashMap::new());
         // An all-air section is the same bytes wherever it is.
-        let per_section = overworld.chunk.buffer.len() / SECTIONS;
+        let per_section = overworld.chunk.buffer.len() / section_count();
         assert_eq!(nether.chunk.buffer.len(), per_section * 16);
         assert!(nether.light.sky.is_empty() && nether.light.sky_mask.is_empty());
         // Block light layers: one below and one above the sixteen sections.

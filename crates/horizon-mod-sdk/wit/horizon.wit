@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.19;
+package horizon:mods@0.1.32;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -61,6 +61,43 @@ interface game {
     }
     /// None on the title screen (API 0.1.2).
     get-food-stats: func() -> option<food-stats>;
+    /// `game-read` (API 0.1.24): the player's game mode: `survival`,
+    /// `creative`, `adventure` or `spectator`; none outside a world.
+    get-game-mode: func() -> option<string>;
+    /// `game-read` (API 0.1.24): the player's tags, the ones `/tag` sets, as
+    /// of the last tick; empty outside a world.
+    get-player-tags: func() -> list<string>;
+    /// `game-read` (API 0.1.25): the height of the clouds in the world the
+    /// player is in, in blocks; none outside a world and in a dimension with
+    /// no clouds.
+    get-cloud-height: func() -> option<s32>;
+    /// The window as the game draws it (API 0.1.32).
+    record viewport {
+        /// Screen pixels in one GUI pixel (4.0 at GUI scale 4).
+        gui-scale: f32,
+        /// The window's width in screen pixels.
+        width: f32,
+        /// The window's height in screen pixels.
+        height: f32,
+    }
+    /// `game-read` (API 0.1.32): the window's size and GUI scale; none when
+    /// the game has not drawn a frame yet.
+    get-viewport: func() -> option<viewport>;
+    /// `game-read` (API 0.1.32): the view distance, in chunks, of the world
+    /// the player is in when this game runs it (its own or a LAN host's:
+    /// the render distance); 0 when it is not known (another's server).
+    get-server-view-distance: func() -> u32;
+    /// `game-edit` (API 0.1.23): adds exhaustion to the player, as
+    /// `Player.causeFoodExhaustion` does (4 makes one hunger point go); 0 or
+    /// less does nothing, at most 40 a call. Made after the hook, in a world
+    /// this game runs.
+    add-exhaustion: func(amount: f32);
+    /// `game-edit` (API 0.1.23): the mod's modifier of the player's mining
+    /// speed, added to the base as `Attributes.BLOCK_BREAK_SPEED`'s
+    /// `ADD_MULTIPLIED_BASE` does: speed times `1 + sum of the mods'
+    /// modifiers`, at least 0. 0 is no change; it replaces the mod's earlier
+    /// one and goes with the mod.
+    set-break-speed-modifier: func(multiplier: f64);
     /// The world's seed; none when the game does not know it, as in
     /// another's world (API 0.1.7).
     get-seed: func() -> option<u64>;
@@ -220,6 +257,85 @@ interface players {
     }
     /// The players in the player list; empty outside a world.
     get-players: func() -> list<player>;
+}
+
+/// Capability `light-events` (API 0.1.20): things that shine in the world
+/// without being an entity, as data the mod lights as it likes.
+interface light-events {
+    record flash {
+        /// What it is: `minecraft:beacon_beam`, `minecraft:guardian_beam`,
+        /// `minecraft:firefly`, `minecraft:sonic_boom`.
+        kind: string,
+        /// Where it is: a beam's start, a particle's position.
+        x: f64,
+        y: f64,
+        z: f64,
+        /// A beam's end (the top of a beacon's beam, a guardian's target);
+        /// equal to the start for a particle.
+        end-x: f64,
+        end-y: f64,
+        end-z: f64,
+        /// How long it shines from now, in ticks (a standing beam: 2, to be
+        /// reported again while it stands).
+        ticks: u32,
+    }
+    /// The flashes since the last tick of the mod: the beams that stand
+    /// within 128 blocks of the player and the particles spawned since.
+    /// Empty when nothing shines. At most 256.
+    poll: func() -> list<flash>;
+}
+
+/// Capability `input` (API 0.1.23): the mouse while the player plays, with no
+/// screen open.
+interface input {
+    record mouse-event {
+        /// The wheel: positive up, negative down; 0 for a button.
+        wheel: f32,
+        /// 0 left, 1 right, 2 middle; -1 for the wheel.
+        button: s32,
+        /// The button went down (false: up). Always false for the wheel.
+        pressed: bool,
+        /// Where the cursor is, in GUI pixels.
+        x: f32,
+        y: f32,
+    }
+    /// The events since the last call, oldest first (at most 64 are kept).
+    poll: func() -> list<mouse-event>;
+    /// Whether the game leaves the wheel to the mod: while true the wheel
+    /// does not change the hotbar slot (the roulette of a mod). Stays until
+    /// the mod changes it, and goes with the mod.
+    set-wheel-captured: func(captured: bool);
+}
+
+/// Capability `audio` (API 0.1.22): sounds of the game the mod plays.
+interface audio {
+    /// Where a sound is heard from, in the world.
+    record sound-place {
+        x: f64,
+        y: f64,
+        z: f64,
+    }
+    /// Plays a sound of the game (`minecraft:weather.rain`,
+    /// `minecraft:item.snowball.throw`) after the hook; at the place when
+    /// there is one, else as if from the player. The volume is 0 to 4, the
+    /// pitch 0.5 to 2. False for a name that is not `namespace:path`, a
+    /// sound the game does not have, or more than 16 sounds in one hook.
+    play: func(sound: string, place: option<sound-place>, volume: f32, pitch: f32) -> bool;
+    /// Adds the mod's own sound, an OGG Vorbis file, to the game (API
+    /// 0.1.25) and names it `<mod id>:<name>` to `play` (a name is
+    /// `[a-z0-9_.-]`, up to 64 characters). The file goes to the mod's own
+    /// folder, so it is there after a restart; at most 16 sounds of 2 MiB
+    /// each. Since API 0.1.29 the bytes may also be a PCM WAV file (16-bit, any
+    /// rate; a mod can write one itself, no encoder needed). An error for a
+    /// file that is neither or does not decode.
+    register: func(name: string, ogg: list<u8>) -> result<_, string>;
+    /// Adds the sound file `sounds/<name>.ogg` (or, since API 0.1.29,
+    /// `sounds/<name>.wav`, PCM) that the mod carries in its
+    /// own `.hmod` (API 0.1.26; `cargo-horizon-mod build` packs the
+    /// `sounds/` folder of the crate) under `<mod id>:<name>`, as
+    /// `register` does. An error for a name the mod has no file for, or a
+    /// file that is not OGG or does not decode.
+    register-file: func(name: string) -> result<_, string>;
 }
 
 /// Capability `hud`: one panel of text lines per mod, drawn by the game
@@ -766,6 +882,13 @@ interface screen {
     set-panel-area: func(id: u32, area: area, keys: list<string>);
     /// Which screen of the game is open (API 0.1.5).
     get-game-screen: func() -> game-screen;
+    /// The workstation screen that is open (API 0.1.27):
+    /// `minecraft:enchanting_table`, `minecraft:anvil`,
+    /// `minecraft:grindstone`, `minecraft:smithing_table`,
+    /// `minecraft:stonecutter`, `minecraft:beacon`,
+    /// `minecraft:cartography_table`, `minecraft:loom`, `minecraft:villager`
+    /// (the trades); none when no workstation screen is open.
+    get-station: func() -> option<string>;
     /// The top left corner of the open screen's menu (the inventory's,
     /// the container's), in GUI pixels; none when there is no menu
     /// (API 0.1.5).
@@ -794,8 +917,19 @@ interface screen {
     /// Uploads an RGBA image (`width * height * 4` bytes) under the id
     /// `id` (0 to 7); the mod draws it with an `image` shape. Uploading
     /// under the same id again replaces the image. At most 8 images of
-    /// 256x256 pixels each.
+    /// 512x512 pixels each (API 0.1.31; 256x256 before).
     upload-texture: func(id: u32, width: u32, height: u32, rgba: list<u8>) -> result<_, string>;
+    /// The largest side of an image `upload-texture` takes (API 0.1.31): 512.
+    get-max-texture-side: func() -> u32;
+    /// How the image `id` is scaled when it is drawn (API 0.1.31):
+    /// `linear` blends the four nearest pixels (smooth maps, like the Java
+    /// mods' textures), `nearest` (the default) keeps hard pixels.
+    set-texture-filter: func(id: u32, filter: texture-filter);
+    /// How an image is scaled (API 0.1.31).
+    enum texture-filter {
+        nearest,
+        linear,
+    }
 }
 
 /// Capability `world-read`: blocks of the loaded world by position, and the
@@ -905,9 +1039,74 @@ interface %world {
     /// The surface of the loaded chunk (cx, cz); none when the chunk is not
     /// loaded. The scan is the game's, as the minimap's is.
     get-chunk-surface: func(cx: s32, cz: s32) -> option<chunk-surface>;
+    /// What a map shows of a chunk's columns beyond `chunk-surface` (API
+    /// 0.1.32); the lists hold 256 values, in the order `z * 16 + x`, over
+    /// the same columns `get-chunk-surface` scans.
+    record chunk-details {
+        /// The id of each column's top coloured block (`minecraft:grass_block`,
+        /// `minecraft:red_stained_glass`, `minecraft:poppy`, ...); empty when
+        /// the column has none.
+        block: list<string>,
+        /// Whether a block that does not hide the top block (leaves, a pane,
+        /// a plant, a carpet, a snow layer) stands right on it, so the
+        /// height is ambiguous as a map shows it.
+        ambiguous: list<bool>,
+        /// The light over each column's top block, 0 to 15: the brighter of
+        /// its block light and sky light, as the world stores them.
+        light: list<u8>,
+    }
+    /// The details of the loaded chunk (cx, cz); none when it is not loaded.
+    get-chunk-details: func(cx: s32, cz: s32) -> option<chunk-details>;
     /// The world's biome names, in the order of their indexes (the ones
     /// `get-chunk-surface` gives); empty outside a world.
     get-biome-names: func() -> list<string>;
+    /// How bright a place is, as the game lights it (API 0.1.20).
+    record light-level {
+        /// The light of blocks, 0 to 15.
+        block: u32,
+        /// The light of the sky, 0 to 15 (before the time of day dims it).
+        sky: u32,
+    }
+    /// `world-read` (API 0.1.20): the light at a block; none where no chunk
+    /// is loaded.
+    get-light-level: func(pos: block-pos) -> option<light-level>;
+    /// `world-read` (API 0.1.22): the colour of the fog of the biome at a
+    /// block, 0xRRGGBB (the biome's `fog_color`, the overworld's when it has
+    /// none); none where no chunk is loaded.
+    get-biome-fog: func(pos: block-pos) -> option<u32>;
+    /// `world-edit` (API 0.1.20): runs a command as the player typed it,
+    /// without the slash, after the hook. False when the command is empty,
+    /// the mod has no `world-edit` or the world is not this game's own.
+    run-command: func(command: string) -> bool;
+    /// `world-edit` (API 0.1.23): after the hook, moves the items and the
+    /// experience that blocks broken lately by `break-block` dropped (the
+    /// last few ticks, within 16 blocks of `pos`) to the middle of the block
+    /// at `pos`. False in a world this game does not run.
+    merge-drops-at: func(pos: block-pos) -> bool;
+    /// `world-edit` (API 0.1.24): takes the block at `pos` out of the world
+    /// and makes it fall as a falling block with that velocity (blocks per
+    /// tick), after the hook. `drops`: the loot the block gives to the held
+    /// item falls out where it stood. `place`: where it lands it stays a
+    /// block, or, when it cannot be placed there (another block is in the
+    /// way), drops as an item like vanilla's falling blocks; false: it
+    /// vanishes there. False when no breakable block is at
+    /// `pos` or the world is not this game's own.
+    fall-block: func(pos: block-pos, vx: f64, vy: f64, vz: f64, drops: bool, place: bool) -> bool;
+    /// `world-edit` (API 0.1.24): puts the block `id` (`minecraft:oak_log`)
+    /// at `pos` with those properties (`axis` = `y`); the ones not given
+    /// are the default state's. The neighbours are updated as for a command's
+    /// `setblock`. False for an unknown block or a bad property, no loaded
+    /// chunk, or a world this game does not run; at most 64 a hook.
+    set-block: func(pos: block-pos, id: string, properties: list<tuple<string, string>>) -> bool;
+    /// `world-edit` (API 0.1.24): lets an item fall out at `pos`, the way
+    /// an item comes out of a broken block, after the hook. False for an
+    /// unknown item or a count of 0 or more than 64; at most 64 a hook.
+    spawn-item: func(pos: block-pos, id: string, count: u32) -> bool;
+    /// `world-read` (API 0.1.25): the blocks the mod's colliding particles
+    /// fly through: ids (`minecraft:oak_fence`) and tags (`#minecraft:fences`).
+    /// Replaces the mod's earlier list; an empty list lets them hit every
+    /// block that stops a particle.
+    set-weather-passthrough: func(blocks: list<string>);
     /// The colours of the map (`MapColor`) by id, as 0xRRGGBB; the id is
     /// the one `get-chunk-surface` gives. Empty outside a world.
     get-map-colors: func() -> list<u32>;
@@ -975,6 +1174,10 @@ interface items {
     %list: func() -> list<item>;
     /// One item by id; none for an unknown id.
     get: func(id: string) -> option<item>;
+    /// The colour the game shows the item's name in (API 0.1.20), 0xRRGGBB:
+    /// by its rarity, white for common, yellow, aqua or light purple above.
+    /// None for an unknown id.
+    get-name-color: func(id: string) -> option<u32>;
 }
 
 /// Capability `recipes-read`: the recipes of the game, vanilla's and the
@@ -1031,6 +1234,16 @@ interface weather {
     /// The weather over the player; none outside a world and in a dimension
     /// that has none.
     get-weather: func() -> option<state>;
+    /// Whether the game draws its own rain and snow columns (API 0.1.22).
+    /// A mod that draws the weather with its own particles turns them off;
+    /// they stay off while any running mod says so, and come back when the
+    /// mod says `true` or stops.
+    set-default-weather: func(visible: bool);
+    /// Whether the game draws its own rain splashes on the ground (API
+    /// 0.1.25). A mod that draws its own splashes turns them off; they stay
+    /// off while any running mod says so. Smoke over lava and campfires
+    /// stays.
+    set-default-splashing: func(visible: bool);
 }
 
 /// Capability `settings-read`: the client's own settings (API 0.1.6).
@@ -1138,6 +1351,71 @@ interface particles {
     /// or more than 512 particles in this call). At most a few thousand of
     /// the mods' particles live at once.
     spawn: func(options: options) -> bool;
+    /// How a particle's picture is turned (API 0.1.22).
+    enum rotation {
+        /// Faces the camera (what `spawn` does).
+        camera,
+        /// Turns about the view axis so that the picture's up points along
+        /// the particle's velocity as the camera sees it: a raindrop's
+        /// streak leans with the wind.
+        relative-velocity,
+        /// Keeps the camera's orientation and ignores `spin` and `tumble`.
+        copy-camera,
+        /// Stands upright in a vertical plane that turns to face the camera
+        /// about the vertical axis only (a sheet of fog).
+        vertical,
+        /// Two upright quads crossing at right angles, the model of a plant
+        /// like `minecraft:dead_bush`: the picture is the plant's texture
+        /// (from `get-game-sprite`), `spin` turns it about the vertical axis
+        /// and `tumble` over about a horizontal one (API 0.1.25).
+        crossed,
+    }
+    /// As `spawn`, with the way the picture is turned (API 0.1.22).
+    spawn-rotated: func(options: options, rotation: rotation) -> bool;
+    /// How a particle is drawn (API 0.1.30).
+    enum render-type {
+        /// Drawn solid: its colour's alpha and fade are ignored.
+        opaque,
+        /// Drawn with its alpha (the default of `spawn`).
+        translucent,
+        /// Drawn with its alpha, as a glow; the game has no additive pass
+        /// yet, so it looks like `translucent`.
+        blended,
+    }
+    /// What `spawn-styled` adds to `options` and `rotation` (API 0.1.30).
+    record style {
+        /// A colliding particle that lands fast enough bounces back up with
+        /// this share of its speed (0 = it lands, as before).
+        bounciness: f32,
+        render-type: render-type,
+        /// 0: the size of a particle follows the perspective; 1: it keeps the
+        /// size it has 8 blocks away, whatever its distance (a constant size
+        /// on the screen); between, a mix.
+        distance-scaling: f32,
+    }
+    /// As `spawn-rotated`, with a style.
+    spawn-styled: func(options: options, rotation: rotation, style: style) -> bool;
+    /// One of the mod's own living particles (API 0.1.25).
+    record particle {
+        /// The picture's number, as `spawn` took it.
+        sprite: u32,
+        x: f64,
+        y: f64,
+        z: f64,
+        vx: f64,
+        vy: f64,
+        vz: f64,
+        /// How many ticks it still lives.
+        remaining: u32,
+    }
+    /// The mod's own particles that live now, as of the last tick (at most
+    /// 4096); empty when the mod has none.
+    get-particles: func() -> list<particle>;
+    /// Removes the mod's own particles with the picture number `sprite`
+    /// that are within a block of (`x`, `y`, `z`) (API 0.1.26). They are
+    /// gone after the hook. How many of the particles `get-particles`
+    /// listed match.
+    remove: func(sprite: u32, x: f64, y: f64, z: f64) -> u32;
     /// The mod's own particles that landed since the last call, oldest first.
     landed: func() -> list<landing>;
     /// A picture of the game's block, item or GUI atlas (API 0.1.19).
@@ -1207,6 +1485,43 @@ interface overlay {
         label(world-label),
         sprite(world-sprite),
         fill(world-fill),
+        /// A part of an image from `upload-texture` (API 0.1.20).
+        picture(world-picture),
+        /// The edges of a block-sized box in the world (API 0.1.23).
+        box(world-box),
+    }
+    /// The twelve edges of a box 1 by 1 by 1 around a point, as the game
+    /// draws a block outline.
+    record world-box {
+        /// The middle of the box.
+        x: f64,
+        y: f64,
+        z: f64,
+        /// 0xAARRGGBB.
+        color: u32,
+        /// The line's width in pixels.
+        width: f32,
+        /// Drawn over the blocks, not hidden by them.
+        through-blocks: bool,
+    }
+    /// A part of an image of `upload-texture` drawn at a point of the
+    /// world, its middle at the point.
+    record world-picture {
+        x: f64,
+        y: f64,
+        z: f64,
+        width: f32,
+        height: f32,
+        /// The image's id.
+        texture: u32,
+        /// The part of the image, in the image's pixels.
+        u: f32,
+        v: f32,
+        u-width: f32,
+        v-height: f32,
+        /// 0xAARRGGBB multiplying the image's colours.
+        tint: u32,
+        offset-y: f32,
     }
     /// A line of text drawn at a point of the world, always facing the
     /// camera, at a size that does not change with the distance. Its
@@ -1354,6 +1669,29 @@ interface %entity {
     /// the skin); none when the game has no skin of theirs. None for now
     /// for every UUID: the skins are not given to mods yet.
     get-face: func(uuid: string) -> option<face>;
+
+    /// The extra state of one entity (API 0.1.20), as of the last tick.
+    record detail {
+        /// A creeper's fuse: 0 when it is not about to explode, up to 1
+        /// when it is (`Creeper.getSwelling`); primed TNT's fuse the same
+        /// way (1 at the start, 0 at the blast).
+        swell: f32,
+        /// It has the Glowing effect.
+        glowing: bool,
+        /// Its eyes are in water (`Entity.wasEyeInWater`).
+        in-water: bool,
+        /// How much a cube mob (a slime, a magma cube) is squished, 0 or
+        /// more; 0 for the others.
+        squish: f32,
+        /// How many ticks a glow squid has left to glow; 0 when it glows
+        /// fully. The game does not track it, so always 0 for now.
+        dark-ticks: u32,
+        /// The block an enderman carries, empty when it carries none.
+        carried-block: string,
+    }
+    /// The state of the entity with that id (API 0.1.20; `entity-read`);
+    /// none for an id `nearby` did not list.
+    get-detail: func(id: u32) -> option<detail>;
 }
 
 /// Capabilities `slots-read` and `slot-decorate`: the game's own slots, the
@@ -1368,6 +1706,34 @@ interface slots {
         dot(dot-mark),
         /// The whole slot filled (a highlight).
         fill(fill-mark),
+        /// The mod's own picture on the slot (API 0.1.20).
+        picture(picture-mark),
+        /// A square wherever in the slot (API 0.1.20).
+        square(square-mark),
+    }
+    /// A picture of the mod on a slot, drawn over the item. The images are
+    /// those of `upload-texture` (the same as `overlay.upload-texture`'s).
+    record picture-mark {
+        /// The image's id, 0 to 6.
+        texture: u32,
+        /// The size it is drawn at, in GUI pixels.
+        width: f32,
+        height: f32,
+        /// Where its top left corner goes in the slot, in GUI pixels (0, 0
+        /// is the slot's top left corner; the slot is 16 by 16).
+        x: f32,
+        y: f32,
+        /// 0xAARRGGBB multiplying the image's colours; white as it is.
+        color: u32,
+    }
+    /// A square in a chosen place of the slot.
+    record square-mark {
+        /// 0xAARRGGBB.
+        color: u32,
+        /// The side in GUI pixels.
+        size: f32,
+        x: f32,
+        y: f32,
     }
     record frame-mark {
         /// 0xAARRGGBB.
@@ -1399,6 +1765,16 @@ interface slots {
     /// again (an empty list clears them), and go when the mod stops. At most
     /// 256 marks.
     set-marks: func(marks: list<mark>);
+    /// `slot-decorate` (API 0.1.20): marks drawn only on the slots of the
+    /// open screen, in addition to those of `set-marks`.
+    set-screen-marks: func(marks: list<mark>);
+    /// `slot-decorate` (API 0.1.20): marks drawn only on the hotbar of the
+    /// HUD, in addition to those of `set-marks`.
+    set-hud-marks: func(marks: list<mark>);
+    /// `slot-decorate` (API 0.1.20): an image for `picture` marks; the
+    /// store is the one of `overlay.upload-texture` (the same ids, at most
+    /// 7 images of 256 by 256 pixels).
+    upload-texture: func(id: u32, width: u32, height: u32, rgba: list<u8>) -> result<_, string>;
     /// `slots-read`: the slot under the cursor in the open screen with slots
     /// (the inventory, a container); none otherwise.
     get-hovered-slot: func() -> option<u32>;
@@ -1407,9 +1783,9 @@ interface slots {
 /// Capability `tooltip`: what the mod adds to the tooltip the game draws for
 /// an item (API 0.1.11).
 interface tooltip {
-    use screen.{element};
+    use screen.{element, tip-line};
     /// The item whose tooltip the game drew in the last frame (inventory,
-    /// containers, the creative inventory), with the tooltip's frame.
+    /// containers, the creative inventory, the workstation screens), with the tooltip's frame.
     record hovered {
         /// `minecraft:cooked_beef`, ...
         item: string,
@@ -1433,8 +1809,81 @@ interface tooltip {
     get-hovered: func() -> option<hovered>;
     /// What to add to the tooltip of the item (all stacks of that item id);
     /// none removes it. It stays until the mod changes it, and goes with
-    /// the mod. Up to 32 items, 64 elements each, and 128 by 128 pixels.
+    /// the mod. Up to 32 items, 128 elements each, and 256 by 256 pixels.
     set-content: func(item: string, content: option<content>);
+
+    /// An enchantment of the item the tooltip is for (API 0.1.27).
+    record enchantment {
+        /// `minecraft:sharpness`, ...
+        id: string,
+        /// Its level.
+        level: u32,
+        /// Stored in the item (an enchanted book) rather than on it.
+        stored: bool,
+    }
+    /// A line a mod adds into the text of an item's tooltip (API 0.1.27).
+    record line {
+        /// The translation key of the game's line the new one goes right
+        /// under: `enchantment.minecraft.sharpness` for the line of that
+        /// enchantment. Empty: under the last line. A line whose key is not
+        /// in the tooltip is not drawn.
+        under: string,
+        /// What the line says.
+        text: string,
+        /// 0xAARRGGBB.
+        color: u32,
+    }
+    /// The enchantments of the item the game drew a tooltip for in the last
+    /// frame, in the order of the tooltip (the stored ones first); empty
+    /// when the cursor was over no item (API 0.1.27).
+    get-hovered-enchantments: func() -> list<enchantment>;
+    /// The lines this mod adds to the tooltip of the item under the cursor
+    /// (API 0.1.27); they stay until the mod changes them and go with the
+    /// mod. Up to 64 lines of 256 characters. Lines of several mods are
+    /// drawn in the order of the mods' ids.
+    set-lines: func(lines: list<line>);
+
+    /// One item of a container (API 0.1.28).
+    record container-item {
+        /// `minecraft:stone`, ...
+        id: string,
+        count: u32,
+        /// The durability used; 0 for an item that does not wear out.
+        damage: u32,
+    }
+    /// A stack with what is in it (API 0.1.28).
+    record hovered-stack {
+        /// `minecraft:red_shulker_box`, ...
+        item: string,
+        count: u32,
+        damage: u32,
+        /// The items of the stack's `minecraft:container` component by slot
+        /// (27 slots or more); an empty slot is none. Empty for a stack
+        /// without the component.
+        container: list<option<container-item>>,
+    }
+    /// The stack the game drew a tooltip for in the last frame, with what is
+    /// in it; none when the cursor was over none (API 0.1.28).
+    get-hovered-stack: func() -> option<hovered-stack>;
+    /// A tooltip of the mod's own for one stack (API 0.1.28).
+    record hovered-tooltip {
+        /// The lines of the tooltip in place of the game's own (the first
+        /// is the name); none keeps the game's lines (and the mod's
+        /// `set-lines`).
+        lines: option<list<tip-line>>,
+        /// The room under the lines and what is drawn in it, from the top
+        /// left of that room.
+        width: f32,
+        height: f32,
+        elements: list<element>,
+    }
+    /// The mod's own tooltip for the stack it last read with
+    /// `get-hovered-stack`; none gives the game's tooltip back. The game
+    /// shows it only while it draws a tooltip for that same stack (the
+    /// same item, count, damage and contents), so a mod sets it in
+    /// `frame` right after reading the stack; for another stack the game's
+    /// own tooltip is drawn. It goes with the mod.
+    set-hovered-tooltip: func(tooltip: option<hovered-tooltip>);
 }
 
 /// Capability `resource-read`: the files of the enabled resource packs, as
@@ -1589,6 +2038,22 @@ interface events {
     chat: func(text: string);
 }
 
+/// Capability `exchange` (API 0.1.27): data one mod publishes and others
+/// read, so mods can work together (an enchantment mod gives its
+/// descriptions to a recipe browser). The data lives while the game runs.
+interface exchange {
+    /// Publishes bytes under a key of this mod (`[a-z0-9_.-]`, up to 64
+    /// characters), replacing the earlier ones. Up to 64 keys of 1 MiB.
+    publish: func(key: string, data: list<u8>) -> result<_, string>;
+    /// Removes a key of this mod.
+    withdraw: func(key: string);
+    /// The bytes another mod (or this one) published under the key since the
+    /// game started; none when there are none.
+    read: func(mod-id: string, key: string) -> option<list<u8>>;
+    /// The keys a mod published, sorted.
+    list-keys: func(mod-id: string) -> list<string>;
+}
+
 world horizon-mod {
     import log;
     import game;
@@ -1614,6 +2079,10 @@ world horizon-mod {
     import lighting;
     import chat-decorate;
     import players;
+    import light-events;
+    import audio;
+    import input;
+    import exchange;
     import resources;
     import texture-rules;
     import %world;

@@ -76,6 +76,7 @@ pub mod warden;
 pub mod warden_brain;
 pub mod witch;
 pub mod wither;
+pub mod wolf_variants;
 mod world;
 pub use world::visual_clip;
 pub mod zombie_villager;

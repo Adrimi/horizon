@@ -9,7 +9,7 @@ use horizon_client::{
     assets::Assets,
     biome::Biomes,
     blocks::BlockFacts,
-    chunk::{Chunk, MIN_Y, SECTIONS},
+    chunk::{Chunk, MIN_Y, section_count},
     light::{LightTables, apply_lighting, light_chunk},
     save::{self, SaveTables},
 };
@@ -210,8 +210,8 @@ fn main() -> horizon_client::Result<()> {
                 continue;
             }
             let (la, lb) = (light(a, key), light(b, key));
-            let top = i64::from((MIN_Y >> 4) + SECTIONS as i32);
-            for si in 0..SECTIONS {
+            let top = i64::from((MIN_Y >> 4) + section_count() as i32);
+            for si in 0..section_count() {
                 let sy = i64::from((MIN_Y >> 4) + si as i32);
                 let empty = chunk.sections[si].is_uniform(tables_air(&assets));
                 for i in 0..4096 {

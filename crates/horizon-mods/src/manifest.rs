@@ -132,6 +132,16 @@ pub enum Capability {
     ChatDecorate,
     /// The player list (API 0.1.18).
     Players,
+    /// Beams and particles that shine (API 0.1.20).
+    LightEvents,
+    /// Sounds of the game (API 0.1.22).
+    Audio,
+    /// Data shared between mods (API 0.1.27).
+    Exchange,
+    /// The mouse while playing (API 0.1.23).
+    Input,
+    /// Exhaustion and mining speed of the player (API 0.1.23).
+    GameEdit,
     /// Pictures and rules for the faces of blocks (API 0.1.14).
     TextureRules,
     /// Marks the game draws on its slots (API 0.1.10): no interface of its
@@ -145,7 +155,7 @@ pub enum Capability {
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 31] = [
+    pub const ALL: [Capability; 36] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -175,6 +185,11 @@ impl Capability {
         Capability::ResourceRead,
         Capability::ChatDecorate,
         Capability::Players,
+        Capability::LightEvents,
+        Capability::Audio,
+        Capability::Exchange,
+        Capability::Input,
+        Capability::GameEdit,
         Capability::TextureRules,
         Capability::Registries,
     ];
@@ -210,6 +225,11 @@ impl Capability {
             Capability::ResourceRead => "resources",
             Capability::ChatDecorate => "chat-decorate",
             Capability::Players => "players",
+            Capability::LightEvents => "light-events",
+            Capability::Audio => "audio",
+            Capability::Exchange => "exchange",
+            Capability::Input => "input",
+            Capability::GameEdit => "game",
             Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
         }
@@ -246,6 +266,11 @@ impl Capability {
             Capability::ResourceRead => "read the files of your resource packs",
             Capability::ChatDecorate => "draw pictures in your chat",
             Capability::Players => "see who is playing",
+            Capability::LightEvents => "see the beams and sparks that shine in the world",
+            Capability::Audio => "play sounds",
+            Capability::Exchange => "share data with your other mods",
+            Capability::Input => "see the mouse wheel and buttons while you play",
+            Capability::GameEdit => "change your hunger and your mining speed",
             Capability::TextureRules => "change the textures of blocks",
             Capability::Registries => "add blocks and items to your worlds",
         }
@@ -311,6 +336,11 @@ impl fmt::Display for Capability {
             Capability::ResourceRead => "resource-read",
             Capability::ChatDecorate => "chat-decorate",
             Capability::Players => "players",
+            Capability::LightEvents => "light-events",
+            Capability::Audio => "audio",
+            Capability::Exchange => "exchange",
+            Capability::Input => "input",
+            Capability::GameEdit => "game-edit",
             Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
         };
@@ -481,7 +511,16 @@ impl Package {
             put(WASM, wasm)?;
         }
         for (name, bytes) in files {
-            crate::content::check_path(name)?;
+            let sound = name.strip_prefix("sounds/").is_some_and(|f| {
+                (f.ends_with(".ogg") || f.ends_with(".wav"))
+                    && f.len() > 4
+                    && f.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b)
+                    })
+            });
+            if !sound {
+                crate::content::check_path(name)?;
+            }
             put(name, bytes)?;
         }
         Ok(zip.finish().map_err(err)?.into_inner())

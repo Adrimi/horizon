@@ -63,6 +63,8 @@ pub struct Heard {
 pub struct MixerBackend {
     mixer: Arc<Mutex<Mixer>>,
     root: PathBuf,
+    /// The mods' own sound files by `namespace:sounds/<name>.ogg` (API 0.1.25).
+    mod_files: std::collections::HashMap<String, PathBuf>,
     cache: Arc<Mutex<SoundCache>>,
     /// The decoder thread for static sounds, started with the first one.
     decoder: Option<std::sync::mpsc::Sender<Decode>>,
@@ -157,6 +159,8 @@ pub struct Audio {
     /// Positional sounds played since the last drain, kept while the world
     /// is open to the network so guests hear them too.
     pub capture: Option<Vec<(String, [f64; 3], f32, f32)>>,
+    /// The mods' registered sounds: mod id, name, file (API 0.1.25).
+    mod_sounds: Vec<(String, String, PathBuf)>,
 }
 fn decode(path: &Path) -> Option<(Vec<f32>, u32)> {
     use symphonia::core::{
@@ -165,8 +169,8 @@ fn decode(path: &Path) -> Option<(Vec<f32>, u32)> {
     };
     let file = fs::File::open(path).ok()?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension("ogg");
+    // Ogg Vorbis (the game's own) or WAV (a mod's): found by the file's start.
+    let hint = Hint::new();
     let probed = symphonia::default::get_probe()
         .format(
             &hint,
@@ -261,7 +265,11 @@ impl Backend for MixerBackend {
             return;
         }
         let (namespace, path) = sound.path();
-        let file = self.root.join("assets").join(namespace).join(&path);
+        let file = self
+            .mod_files
+            .get(&format!("{namespace}:{path}"))
+            .cloned()
+            .unwrap_or_else(|| self.root.join("assets").join(namespace).join(&path));
         if sound.stream {
             // A streamed sound loops by restarting its stream.
             let mixer = self.mixer.clone();
@@ -524,6 +532,7 @@ impl Audio {
             backend: MixerBackend {
                 mixer,
                 root: root.to_owned(),
+                mod_files: Default::default(),
                 cache: Arc::default(),
                 decoder: None,
                 next: 0,
@@ -536,6 +545,7 @@ impl Audio {
             random: LegacyRandom::new(crate::sound_engine::unique_seed()),
             source_override: None,
             capture: None,
+            mod_sounds: Vec::new(),
         }
     }
     #[cfg(not(feature = "audio"))]
@@ -630,15 +640,47 @@ impl Audio {
     pub fn stop_all(&mut self) {
         self.engine.stop_all(&mut self.backend);
     }
+    /// A sound of a mod (`audio.register`, API 0.1.25): the event
+    /// `<mod id>:<name>` plays the file; false for a file that does not decode.
+    pub fn add_mod_sound(&mut self, mod_id: &str, name: &str, file: PathBuf) -> bool {
+        if decode(&file).is_none() {
+            return false;
+        }
+        self.mod_sounds
+            .retain(|(m, n, _)| (m.as_str(), n.as_str()) != (mod_id, name));
+        self.mod_sounds
+            .push((mod_id.to_owned(), name.to_owned(), file));
+        self.install_mod_sounds();
+        true
+    }
+    /// Puts the mods' sounds in the registry and the backend.
+    fn install_mod_sounds(&mut self) {
+        for (mod_id, name, file) in self.mod_sounds.clone() {
+            let json = format!(r#"{{"{name}": {{"sounds": ["{mod_id}:{name}"]}}}}"#);
+            self.engine
+                .registry
+                .add_file(&mod_id, json.as_bytes(), &|_, _| true);
+            self.backend
+                .mod_files
+                .insert(format!("{mod_id}:sounds/{name}.ogg"), file);
+        }
+        if let Ok(mut cache) = self.backend.cache.lock() {
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+    }
     /// `SoundManager.reload` (resource packs changed): stop every sound, then
     /// read sound events and sound files from the new resource root.
     pub fn reload(&mut self, root: &Path) {
         self.stop_all();
         self.engine.registry = SoundRegistry::load(root);
         self.backend.root = root.to_owned();
-        let mut cache = self.backend.cache.lock().unwrap();
-        cache.entries.clear();
-        cache.bytes = 0;
+        {
+            let mut cache = self.backend.cache.lock().unwrap();
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+        self.install_mod_sounds();
     }
     /// Play a sound event at a world position, as `ClientLevel.playLocalSound`
     /// (a `SimpleSoundInstance` seeded from the level random), or relative to
@@ -842,6 +884,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_mods_wav_file_decodes_like_the_games_ogg() {
+        // 16-bit mono PCM, 8000 Hz, 80 samples of a ramp.
+        let samples: Vec<i16> = (0..80).map(|i| (i * 400) as i16).collect();
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((36 + data.len() as u32).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend([1, 0, 1, 0]);
+        wav.extend(8000u32.to_le_bytes());
+        wav.extend(16000u32.to_le_bytes());
+        wav.extend([2, 0, 16, 0]);
+        wav.extend(b"data");
+        wav.extend((data.len() as u32).to_le_bytes());
+        wav.extend(&data);
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wav-test");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.wav");
+        fs::write(&path, &wav).unwrap();
+        let (pcm, rate) = decode(&path).expect("the WAV decodes");
+        assert_eq!(rate, 8000);
+        assert_eq!(pcm.len(), 80);
+        assert!(pcm[79] > pcm[1]);
+        fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn decoded_sounds_stay_within_the_budget_least_recently_used_out() {
         let mut cache = SoundCache::default();

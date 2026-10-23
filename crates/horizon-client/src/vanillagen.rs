@@ -2,7 +2,7 @@
 //! aquifers, surface rules, carvers and placed features) to chunk streaming.
 use crate::{
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, HEIGHT, MIN_Y, SECTIONS, Section},
+    chunk::{BIOME_STRATEGY, Chunk, MIN_Y, Section, height, section_count},
     save::SavedProto,
     streaming::{ChunkGenerator, LodSampler, Proto},
 };
@@ -88,14 +88,34 @@ impl VanillaTerrain {
         dimension: &str,
         structures: bool,
     ) -> crate::Result<Self> {
+        Self::for_preset(
+            dir,
+            registry,
+            biomes,
+            seed,
+            dimension,
+            structures,
+            "minecraft:normal",
+        )
+    }
+    /// [`Self::for_world`] reading the dimensions of the world preset `preset`
+    /// (a world type's: `dir` is then its root's `worldgen`).
+    pub fn for_preset(
+        dir: &Path,
+        registry: &'static BlockRegistry,
+        biomes: &Biomes,
+        seed: i64,
+        dimension: &str,
+        structures: bool,
+        preset: &str,
+    ) -> crate::Result<Self> {
         let data: Arc<GeneratorData> = shared_data(dir, registry)?;
         let biome_map = data
             .biome_names()
             .iter()
             .map(|name| biomes.id(name))
             .collect();
-        let generator =
-            OverworldGenerator::for_world(data, seed, "minecraft:normal", dimension, structures)?;
+        let generator = OverworldGenerator::for_world(data, seed, preset, dimension, structures)?;
         let unsupported = generator.unsupported_features();
         if !unsupported.is_empty() {
             log::warn!(
@@ -141,6 +161,15 @@ impl VanillaTerrain {
             dimension: dimension.to_owned(),
         })
     }
+    /// The height of the dimension type the generator builds in, when it
+    /// starts at `MIN_Y` (the client's chunks all do): taller than 384 when a
+    /// mod's dimension type says so.
+    pub fn level_height(&self) -> Option<i32> {
+        self.generator
+            .level_range()
+            .filter(|&(min_y, _)| min_y == MIN_Y)
+            .map(|(_, height)| height)
+    }
     /// A proto chunk's blocks, biomes, scheduled ticks and post-processing
     /// marks as a column.
     fn column(&self, chunk: &ProtoChunk) -> Chunk {
@@ -150,10 +179,10 @@ impl VanillaTerrain {
         // Only the generated range (the Nether is 0..256) is copied.
         let (lo, hi) = (
             chunk.terrain.min_y().max(MIN_Y),
-            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + HEIGHT),
+            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + height()),
         );
         let mut values = Box::new([0u32; 4096]);
-        for si in 0..SECTIONS as i32 {
+        for si in 0..section_count() as i32 {
             let base = MIN_Y + si * 16;
             if base + 16 <= lo || base >= hi {
                 continue;
@@ -210,7 +239,7 @@ impl VanillaTerrain {
                 }
             }
         }
-        for si in 0..SECTIONS as i32 {
+        for si in 0..section_count() as i32 {
             let mut cells = [0u32; 64];
             for (j, cell) in cells.iter_mut().enumerate() {
                 let (qx, qz, qy) = (j as i32 & 3, (j as i32 >> 2) & 3, si * 4 + (j as i32 >> 4));
@@ -403,7 +432,7 @@ impl ChunkGenerator for VanillaTerrain {
         let (bx, bz) = (column.x * 16, column.z * 16);
         let (lo, hi) = (
             chunk.terrain.min_y().max(MIN_Y),
-            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + HEIGHT),
+            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + height()),
         );
         for y in lo..hi {
             for z in 0..16 {

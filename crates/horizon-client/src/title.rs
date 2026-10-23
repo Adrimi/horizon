@@ -898,7 +898,10 @@ impl Title {
                     }
                     batch.text(atlas, &world.name, x + 35.0, y + 1.0, u32::MAX, true);
                     let date: chrono::DateTime<chrono::Local> = world.modified.into();
-                    let line = format!("{} ({})", world.folder, date.format("%d/%m/%Y, %H:%M"));
+                    let mut line = format!("{} ({})", world.folder, date.format("%d/%m/%Y, %H:%M"));
+                    if let Some(size) = crate::world_size::label(&self.saves.join(&world.folder)) {
+                        line = format!("{line} - {size}");
+                    }
                     batch.text(
                         atlas,
                         &line,

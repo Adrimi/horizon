@@ -148,7 +148,9 @@ impl Title {
             let w = (ui.w - x - 48.0).min(760.0);
             match &self.mode {
                 Mode::Main => self.home(ui, x, w),
-                Mode::Select { worlds, selected } => worlds_page(ui, x, w, worlds, *selected),
+                Mode::Select { worlds, selected } => {
+                    worlds_page(ui, x, w, worlds, *selected, &self.saves)
+                }
                 Mode::Create {
                     name,
                     seed,
@@ -617,6 +619,7 @@ fn worlds_page(
     w: f32,
     worlds: &[crate::title::WorldEntry],
     selected: Option<usize>,
+    saves: &std::path::Path,
 ) {
     let count = match worlds.len() {
         0 => "No worlds yet. They live in the saves folder.".to_owned(),
@@ -646,7 +649,10 @@ fn worlds_page(
             .modified
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let meta = format!("{}  ·  {}", crate::title::date_label(secs), world.folder);
+        let mut meta = format!("{}  ·  {}", crate::title::date_label(secs), world.folder);
+        if let Some(size) = crate::world_size::label(&saves.join(&world.folder)) {
+            meta = format!("{meta}  ·  {size}");
+        }
         let mode = if world.creative {
             "Creative"
         } else {

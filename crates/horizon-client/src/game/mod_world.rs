@@ -82,6 +82,43 @@ impl WorldAccess for ModWorld {
             biome,
         })
     }
+    fn chunk_details(&self, cx: i32, cz: i32) -> Option<horizon_mods::ChunkDetails> {
+        let chunk = self.chunks.get(&(cx, cz))?;
+        let columns = mod_scan::scan_chunk(chunk, &self.palette, self.air);
+        let facts = self.res.facts();
+        let (mut block, mut ambiguous, mut light) = (
+            Vec::with_capacity(256),
+            Vec::with_capacity(256),
+            Vec::with_capacity(256),
+        );
+        for z in 0..16 {
+            for x in 0..16 {
+                let i = (z * 16 + x) as usize;
+                let y = i32::from(columns.height[i]);
+                if columns.color[i] == 0 {
+                    block.push(String::new());
+                    ambiguous.push(false);
+                    light.push(0);
+                    continue;
+                }
+                block.push(facts.get(chunk.block(x, y, z)).name.to_string());
+                // A block over the top one that does not hide it.
+                let above = facts.get(chunk.block(x, y + 1, z));
+                ambiguous.push(
+                    !facts.is_air(chunk.block(x, y + 1, z))
+                        && above.fluid == horizon_client::blocks::Fluid::None
+                        && (!above.full_collision || above.name.ends_with("_leaves")),
+                );
+                let packed = chunk.light(x, y + 1, z);
+                light.push((packed & 0x0f).max(packed >> 4));
+            }
+        }
+        Some(horizon_mods::ChunkDetails {
+            block,
+            ambiguous,
+            light,
+        })
+    }
     fn chunk_columns(&self, cx: i32, cz: i32, y: i32) -> Option<ChunkSurface> {
         let chunk = self.chunks.get(&(cx, cz))?;
         let columns = mod_scan::scan_chunk_from(chunk, &self.palette, self.air, y);
@@ -119,7 +156,7 @@ impl WorldAccess for ModWorld {
         let chunk = self.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
         let facts = self.res.facts();
         let (x, z) = (pos.x & 15, pos.z & 15);
-        let top = start_y.min(horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT - 1);
+        let top = start_y.min(horizon_client::chunk::MIN_Y + horizon_client::chunk::height() - 1);
         let mut y = top;
         while y >= horizon_client::chunk::MIN_Y {
             let f = facts.get(chunk.block(x, y, z));
@@ -136,6 +173,22 @@ impl WorldAccess for ModWorld {
     }
     fn biome_names(&self) -> Vec<String> {
         self.biomes.as_ref().clone()
+    }
+    fn light(&self, pos: &BlockPos) -> Option<(u8, u8)> {
+        let chunk = self.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
+        let packed = chunk.light(pos.x & 15, pos.y, pos.z & 15);
+        Some((packed & 0x0f, packed >> 4))
+    }
+    fn is_local(&self) -> bool {
+        self.local
+    }
+    fn biome_fog(&self, pos: &BlockPos) -> Option<u32> {
+        let chunk = self.chunks.get(&(pos.x >> 4, pos.z >> 4))?;
+        let info = self
+            .res
+            .biomes()
+            .get(chunk.biome(pos.x & 15, pos.y, pos.z & 15));
+        Some(info.fog.unwrap_or(0xC0_D8FF))
     }
     fn map_colors(&self) -> Vec<u32> {
         horizon_client::blocks::MAP_COLORS.to_vec()
@@ -287,12 +340,36 @@ impl Game<'_> {
                 .player
                 .as_ref()
                 .is_some_and(|p| p.pose == horizon_client::pose::Pose::Crouching);
+        self.mods.recently_broken.push((pos, 3));
         self.mods.broken.push(BlockBroken {
             pos: at,
             block,
             by_player,
             tool,
             sneaking,
+        });
+    }
+    /// Notes a block that went (`state` as it was) for the next tick's
+    /// `world.removed-blocks`: broken by the player or a mod lately, or the
+    /// world's own (API 0.1.19).
+    pub(super) fn mod_block_removed(&mut self, pos: [i32; 3], state: BlockStateId) {
+        if !self.mods.mods.uses(Capability::WorldRead) || self.mods.removed.len() >= 256 {
+            return;
+        }
+        let [x, y, z] = pos;
+        let at = BlockPos { x, y, z };
+        let by_world = !self.mods.recently_broken.iter().any(|(p, _)| *p == pos);
+        let block = world_block(
+            &self.res,
+            self.pack.assets.registry,
+            at,
+            state,
+            &mut HashMap::new(),
+        );
+        self.mods.removed.push(horizon_mods::BlockRemoved {
+            pos: at,
+            block,
+            by_world,
         });
     }
     /// `world.break-block` (`with_held` false) and `break-block-with-held`:

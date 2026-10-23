@@ -74,7 +74,9 @@ pub(crate) mod upload;
 mod world_post;
 
 /// A column whose every section has its mesh (`Renderer::lod_detail_columns`).
-const COMPLETE_COLUMN: u32 = (1 << (crate::chunk::HEIGHT / 16)) - 1;
+fn complete_column(mask: &crate::chunk::SectionMask) -> bool {
+    *mask == crate::chunk::SectionMask::first(crate::chunk::section_count())
+}
 /// A section's instance: its camera-relative origin and, in `w`, the step of
 /// its fixed-point UVs (`terrain.wgsl`'s `terrain_uv`).
 fn section_instance(origin: [f32; 3]) -> [f32; 4] {
@@ -112,7 +114,7 @@ struct Globals {
     crumbling_sprite: [f32; 4],
     /// Framebuffer size, selection stroke width, perspective layering scale.
     outline_params: [f32; 4],
-    /// x: how many of `dynamic_lights` are set (0 with the extra off).
+    /// x: how many of `dynamic_lights` are set (0 when no mod gives any light).
     dynamic_count: [f32; 4],
     /// Camera-relative position and level of each dynamic light (`crate::dynamic_lights`).
     dynamic_lights: [[f32; 4]; crate::dynamic_lights::MAX_LIGHTS],
@@ -218,7 +220,7 @@ pub struct Frame<'a> {
     pub end_portal_sprites: [[f32; 4]; 2],
     /// Current destroy-stage sprite: projected UVs repeat inside this atlas rect.
     pub crumbling_sprite: [f32; 4],
-    /// Dynamic lights (`crate::dynamic_lights::pack`), empty with the extra off.
+    /// Dynamic lights (`crate::dynamic_lights::pack`), empty when no mod gives any.
     pub dynamic_lights: &'a [[f32; 4]],
     pub ticks: u64,
     /// The darkness effect on the lightmap: the brightness it takes off the
@@ -396,7 +398,7 @@ pub struct Renderer {
     lod_retiring: crate::fast_hash::FxHashSet<SectionKey>,
     /// Finished tile meshes `upload_lods` has yet to upload.
     lod_pending: Option<lod::Pending>,
-    detail_columns: HashMap<(i32, i32), u32>,
+    detail_columns: HashMap<(i32, i32), crate::chunk::SectionMask>,
     /// Bumped whenever a column becomes or stops being complete.
     detail_revision: u64,
     arena: arena::Arena,
@@ -428,6 +430,8 @@ pub struct Renderer {
     block_entity_revision: u64,
     /// VisGraph face connectivity per meshed section (cave culling).
     occlusion: occlusion::Occlusion,
+    /// The section count `occlusion` was made for.
+    occlusion_sections: i32,
     /// Resolution scale and FXAA (Horizon settings).
     world_post: world_post::Post,
     /// The selected shader pack's stages (Horizon setting; none by default).
@@ -2138,7 +2142,8 @@ impl Renderer {
             phase2_pages: Vec::new(),
             block_entities: HashMap::new(),
             block_entity_revision: next_block_entity_revision(),
-            occlusion: occlusion::Occlusion::new(crate::chunk::HEIGHT / 16),
+            occlusion: occlusion::Occlusion::new(crate::chunk::height() / 16),
+            occlusion_sections: crate::chunk::height() / 16,
             world_post,
             pack: None,
             hud,
@@ -2507,12 +2512,19 @@ impl Renderer {
         }
         self.sorted_indices.clear();
         self.translucency_cursor = 0;
-        self.occlusion.clear();
+        // The world may have another height than the last one (a mod's dimension type).
+        let sections = crate::chunk::height() / 16;
+        if self.occlusion_sections == sections {
+            self.occlusion.clear();
+        } else {
+            self.occlusion = occlusion::Occlusion::new(sections);
+            self.occlusion_sections = sections;
+        }
     }
     pub fn lod_detail_columns(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
         self.detail_columns
             .iter()
-            .filter_map(move |(&column, &mask)| (mask == COMPLETE_COLUMN).then_some(column))
+            .filter_map(move |(&column, mask)| complete_column(mask).then_some(column))
     }
     /// Changes whenever `lod_detail_columns` does.
     pub fn lod_detail_revision(&self) -> u64 {
@@ -2521,16 +2533,21 @@ impl Renderer {
     /// Whether the section at `key` has its mesh, for `lod_detail_columns`.
     fn set_detail(&mut self, key: SectionKey, meshed: bool) {
         let column = (key.0, key.2);
-        let mask = self.detail_columns.get(&column).copied().unwrap_or(0);
-        let next = if meshed {
-            mask | 1 << key.1
+        let mask = self
+            .detail_columns
+            .get(&column)
+            .copied()
+            .unwrap_or_default();
+        let mut next = mask;
+        if meshed {
+            next.insert(key.1 as usize);
         } else {
-            mask & !(1 << key.1)
-        };
-        if (mask == COMPLETE_COLUMN) != (next == COMPLETE_COLUMN) {
+            next.remove(key.1 as usize);
+        }
+        if complete_column(&mask) != complete_column(&next) {
             self.detail_revision += 1;
         }
-        if next == 0 {
+        if next.is_empty() {
             self.detail_columns.remove(&column);
         } else {
             self.detail_columns.insert(column, next);

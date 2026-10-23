@@ -8,7 +8,7 @@ use horizon_client::{
     beehive::HiveHost,
     biome::Biomes,
     blocks::BlockFacts,
-    chunk::{Chunk, HEIGHT, MIN_Y},
+    chunk::{Chunk, MIN_Y, height},
     collisions,
     containers::{BlockEntity, CreakingHeart},
     items::{ItemStack, Items},
@@ -798,7 +798,7 @@ fn main() -> horizon_client::Result<()> {
         for cz in ocz - R..=ocz + R {
             for cx in ocx - R..=ocx + R {
                 let mut chunk = Chunk::empty(cx, cz);
-                for qy in 0..HEIGHT / 4 {
+                for qy in 0..height() / 4 {
                     for qz in 0..4 {
                         for qx in 0..4 {
                             chunk.set_biome_cell(qx, qy, qz, plains);

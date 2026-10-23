@@ -167,6 +167,10 @@ pub struct GeneratorData {
     settings: BTreeMap<String, String>,
     presets: BTreeMap<String, String>,
     world_presets: BTreeMap<String, String>,
+    /// Dimension types a mod replaces vanilla's with (name to JSON).
+    dimension_types: BTreeMap<String, String>,
+    /// A mod's values for `tectonic:config_*` (`config.json` of the bundle).
+    config: super::tectonic::WorldgenConfig,
     conditions: MaterialConditionRegistry,
     source_catalog: BiomeSourceCatalog,
     biome_names: Vec<Arc<str>>,
@@ -342,6 +346,27 @@ impl GeneratorData {
         if reports.is_dir() {
             for entry in fs::read_dir(&reports)? {
                 let path = entry?.path();
+                // A mod's own lists: `<namespace>/<name>.json`.
+                if path.is_dir() {
+                    let ns = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    for inner in fs::read_dir(&path)? {
+                        let inner = inner?.path();
+                        let Some(stem) = inner
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .filter(|_| inner.extension().is_some_and(|e| e == "json"))
+                        else {
+                            continue;
+                        };
+                        presets
+                            .entry(format!("{ns}:{stem}"))
+                            .or_insert(quantize_parameter_report(&fs::read_to_string(&inner)?)?);
+                    }
+                    continue;
+                }
                 let Some(stem) = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -452,6 +477,11 @@ impl GeneratorData {
             rules: read_bundle(dir, "rules")?,
             settings: read_bundle(dir, "settings")?,
             world_presets: read_bundle(dir, "world_presets")?,
+            dimension_types: read_optional_bundle(dir, "dimension_types")?.unwrap_or_default(),
+            config: match fs::read_to_string(dir.join("config.json")) {
+                Ok(text) => super::tectonic::WorldgenConfig::from_json(&text)?,
+                Err(_) => Default::default(),
+            },
             presets,
             conditions,
             source_catalog,
@@ -609,10 +639,60 @@ impl ProtoChunk {
 
 /// Build range (minimum Y, height) of the vanilla dimension types.
 fn dimension_type_height(name: &str) -> Option<(i32, i32)> {
+    builtin_dimension_type_height(name)
+}
+/// The dimension types a mod's `data/minecraft/dimension_type/` brings
+/// (`worldgen_overrides`) replace vanilla's: the build range they name.
+fn custom_dimension_type_height(
+    types: &BTreeMap<String, String>,
+    name: &str,
+) -> Option<(i32, i32)> {
+    let json: Value = serde_json::from_str(types.get(name)?).ok()?;
+    let min_y = i32::try_from(json["min_y"].as_i64()?).ok()?;
+    let height = i32::try_from(json["height"].as_i64()?).ok()?;
+    // DimensionType: sections of 16, at most 4064 blocks, nothing above 2031.
+    (min_y % 16 == 0 && height % 16 == 0 && height > 0 && height <= 4064 && min_y + height <= 2032)
+        .then_some((min_y, height))
+}
+fn builtin_dimension_type_height(name: &str) -> Option<(i32, i32)> {
     match name {
         "minecraft:overworld" | "minecraft:overworld_caves" => Some((-64, 384)),
         "minecraft:the_nether" | "minecraft:the_end" => Some((0, 256)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod dimension_type_tests {
+    use super::*;
+
+    #[test]
+    fn a_mods_dimension_type_names_the_build_range_within_vanillas_limits() {
+        let types =
+            |json: &str| BTreeMap::from([("minecraft:overworld".to_owned(), json.to_owned())]);
+        let tall = types(r#"{"min_y":-64,"height":2096,"logical_height":2032}"#);
+        assert_eq!(
+            custom_dimension_type_height(&tall, "minecraft:overworld"),
+            Some((-64, 2096))
+        );
+        assert_eq!(
+            custom_dimension_type_height(&tall, "minecraft:the_end"),
+            None
+        );
+        // Not whole sections, above the 2031 ceiling, or no height at all.
+        for bad in [
+            r#"{"min_y":-64,"height":2100}"#,
+            r#"{"min_y":-64,"height":2112}"#,
+            r#"{"min_y":-60,"height":384}"#,
+            r#"{"min_y":-64}"#,
+            "not json",
+        ] {
+            assert_eq!(
+                custom_dimension_type_height(&types(bad), "minecraft:overworld"),
+                None,
+                "{bad}"
+            );
+        }
     }
 }
 
@@ -752,7 +832,8 @@ where
         let root = random.fork_positional();
         let codec = crate::registry::BlockStateJsonCodec::new(registry, data.integers.clone())
             .map_err(|e| resource(e.to_string()))?;
-        let mut densities = DensityRegistry::from_json(&data.noises, &data.densities)?;
+        let mut densities =
+            DensityRegistry::from_json_with_config(&data.noises, &data.densities, &data.config)?;
         let router =
             NoiseRouter::from_json(&settings_json["noise_router"].to_string(), &mut densities)?;
         let aquifers = settings_json
@@ -882,6 +963,34 @@ where
         };
         pipeline.decoration =
             super::generator_decoration::Decoration::new(&pipeline.data, &pipeline.source)?;
+        if let (Some(decoration), Some(resources)) = (
+            pipeline.decoration.as_mut(),
+            &pipeline.data.feature_resources,
+        ) {
+            // The density functions the placed features sample.
+            let mut densities = HashMap::new();
+            for json in resources.placed.values() {
+                if !json.contains("lithostitched:sample_density") {
+                    continue;
+                }
+                let doc: Value = serde_json::from_str(json)?;
+                for modifier in doc["placement"].as_array().into_iter().flatten() {
+                    let condition = &modifier["condition"];
+                    if let Some(name) = condition["density_function"].as_str() {
+                        let name = name.to_owned();
+                        if !densities.contains_key(&name)
+                            && let Ok(sampler) = library.named_density(&name)
+                        {
+                            densities.insert(name, sampler);
+                        }
+                    }
+                }
+            }
+            decoration.sampling = Some(super::generator_decoration::Sampling {
+                densities,
+                noises: pipeline.noises.clone(),
+            });
+        }
         if with_structures {
             let possible = pipeline
                 .source
@@ -2164,6 +2273,8 @@ pub struct DecorateStats {
 #[derive(Clone)]
 pub struct OverworldGenerator {
     pipeline: Arc<dyn SeededPipeline>,
+    /// The dimension type's build range (minimum Y, height), when known.
+    level: Option<(i32, i32)>,
 }
 impl OverworldGenerator {
     /// The `minecraft:overworld` dimension of the `minecraft:normal` world preset.
@@ -2211,7 +2322,10 @@ impl OverworldGenerator {
         let generator = preset_json["dimensions"][dimension]["generator"].clone();
         let level = preset_json["dimensions"][dimension]["type"]
             .as_str()
-            .and_then(dimension_type_height);
+            .and_then(|name| {
+                custom_dimension_type_height(&data.dimension_types, name)
+                    .or_else(|| dimension_type_height(name))
+            });
         if generator["type"].as_str() != Some("minecraft:noise") {
             return Err(resource(format!("{dimension} is not a noise generator")));
         }
@@ -2247,7 +2361,11 @@ impl OverworldGenerator {
                 level,
             )?)
         };
-        Ok(Self { pipeline })
+        Ok(Self { pipeline, level })
+    }
+    /// The dimension type's build range: minimum Y and height in blocks.
+    pub fn level_range(&self) -> Option<(i32, i32)> {
+        self.level
     }
     pub fn data(&self) -> &Arc<GeneratorData> {
         self.pipeline.data()
@@ -2717,6 +2835,7 @@ mod tests {
             .expect("pipeline"),
         );
         let generator = OverworldGenerator {
+            level: Some((-64, 384)),
             pipeline: pipeline.clone(),
         };
         let barrier = std::sync::Barrier::new(6);

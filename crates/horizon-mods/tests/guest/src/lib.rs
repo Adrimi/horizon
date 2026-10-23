@@ -6,8 +6,8 @@
 //! `tick` and `frame` do nothing, to measure the cost of
 //! a call.
 use horizon_mod_sdk::{
-    Mod, Registration, atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys,
-    lighting, chat_decorate, overlay, players, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
+    Mod, Registration, atmosphere, audio, chat, debug, entity, exchange, game, hotbar, hud, input, inventory, items, keys,
+    lighting, chat_decorate, light_events, overlay, players, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
 };
 
 struct Guest {
@@ -18,6 +18,8 @@ struct Guest {
     panel: u32,
     /// The random ticks heard so far, and the last block's description.
     heard: u32,
+    /// The removed blocks the tick hook saw, and the last one.
+    removed_seen: String,
     last: String,
     /// What the last chat hook read from `chat.get-messages`.
     said: String,
@@ -51,6 +53,8 @@ impl Mod for Guest {
             "screen",
             "browser",
             "giveitem",
+            "bigtexture",
+            "mapdetails",
             "weatherfx",
             "overlayfx",
             "entityfx",
@@ -62,6 +66,22 @@ impl Mod for Guest {
             "texfx",
             "said",
             "playersfx",
+            "detailfx",
+            "rainfx",
+            "restfx",
+            "sndfx",
+            "crossfx",
+            "tipfx",
+            "stackfx",
+            "rmdef",
+            "stylefx",
+            "rmfx",
+            "timberfx",
+            "veinfx",
+            "pfx",
+            "gsprite",
+            "removedfx",
+            "minimapfx",
             "leaffx",
             "toolfx",
             "resfx",
@@ -81,6 +101,7 @@ impl Mod for Guest {
                 screen: 0,
                 panel: 0,
                 heard: 0,
+                removed_seen: String::new(),
                 last: String::new(),
                 said: String::new(),
             },
@@ -148,6 +169,10 @@ impl Mod for Guest {
     }
     fn tick(&mut self, _tick: u64) {
         self.ticks += 1;
+        for r in world::removed_blocks() {
+            self.removed_seen
+                .push_str(&format!("{}:{};", r.block.id, r.by_world));
+        }
         for t in world::random_ticked_blocks() {
             self.heard += 1;
             self.last = format!("{} at {} {} {}", t.block.id, t.pos.x, t.pos.y, t.pos.z);
@@ -335,6 +360,378 @@ impl Mod for Guest {
                 });
                 Ok(Some(format!("removed {removed} sprite {size:?} registered {registered:?}")))
             }
+            "gsprite" => Ok(Some(format!(
+                "{:?}",
+                particles::get_game_sprite(args).map(|s| {
+                    let a: Vec<u8> = s.pixels.chunks(4).map(|p| p[3]).collect();
+                    let opaque = a.iter().filter(|v| **v == 255).count();
+                    let clear = a.iter().filter(|v| **v == 0).count();
+                    let first: Vec<u8> = s.pixels.iter().take(16).copied().collect();
+                    (s.width, s.height, s.pixels.len(), opaque, clear, first)
+                })
+            ))),
+            "pfx" => {
+                // N pictures of S by S pixels, each its own colour, in a row at x y z.
+                let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let (x, y, z) = (nums[0], nums[1], nums[2]);
+                let count = nums.get(3).copied().unwrap_or(2.0) as u32;
+                let side = nums.get(4).copied().unwrap_or(16.0) as u32;
+                let mut ids = Vec::new();
+                for i in 0..count {
+                    let rgb = [(i * 97 % 256) as u8, (i * 53 % 256) as u8, (255 - i * 40 % 256) as u8];
+                    let mut pixels = Vec::new();
+                    for _ in 0..side * side {
+                        pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                    }
+                    ids.push(particles::define_sprite(&particles::Sprite {
+                        name: format!("c{i}"),
+                        width: side,
+                        height: side,
+                        pixels,
+                    })?);
+                }
+                for (i, id) in ids.iter().enumerate() {
+                    particles::spawn(particles::Options {
+                        sprite: *id,
+                        x: x + (i % 8) as f64 * 0.5,
+                        y: y + (i / 8) as f64 * 0.5,
+                        z,
+                        vx: 0.0,
+                        vy: 0.0,
+                        vz: 0.0,
+                        color: particles::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                        size: 0.2,
+                        lifetime: 1000,
+                        gravity: 0.0,
+                        wind_x: 0.0,
+                        wind_z: 0.0,
+                        collide: false,
+                        size_curve: particles::SizeCurve::Constant,
+                        fade: particles::Fade::None,
+                        flat: false,
+                        linger: 0,
+                        sway: 0.0,
+                        sway_period: 1,
+                        spin: 0.0,
+                        tumble: 0.0,
+                    });
+                }
+                Ok(Some(format!("sprites {ids:?}")))
+            }
+            "veinfx" => {
+                let seen: Vec<String> = input::poll()
+                    .iter()
+                    .map(|e| format!("{}/{}/{}", e.wheel, e.button, e.pressed))
+                    .collect();
+                input::set_wheel_captured(true);
+                game::add_exhaustion(1.5);
+                game::set_break_speed_modifier(0.5);
+                let merged = world::merge_drops_at(world::BlockPos { x: 1, y: 64, z: 1 });
+                let (x, y, z): (f64, f64, f64) = {
+                    let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                    if nums.len() == 3 { (nums[0], nums[1], nums[2]) } else { (1.0, 64.0, 1.0) }
+                };
+                overlay::paint_world(&[
+                    overlay::WorldElement::Box(overlay::WorldBox {
+                        x,
+                        y,
+                        z,
+                        color: 0xFFFF_FFFF,
+                        width: 2.0,
+                        through_blocks: false,
+                    }),
+                    overlay::WorldElement::Box(overlay::WorldBox {
+                        x: x + 2.0,
+                        y,
+                        z,
+                        color: 0xFFFF_0000,
+                        width: 2.0,
+                        through_blocks: true,
+                    }),
+                ]);
+                Ok(Some(format!("events {} merged {merged}", seen.join(","))))
+            }
+            "timberfx" => {
+                let nums: Vec<i32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let pos = if nums.len() == 3 {
+                    world::BlockPos { x: nums[0], y: nums[1], z: nums[2] }
+                } else {
+                    world::BlockPos { x: 0, y: 64, z: 0 }
+                };
+                let mode = game::get_game_mode();
+                let tags = game::get_player_tags();
+                let fell = world::fall_block(pos, 0.1, 0.0, 0.0, true, args.contains("place"));
+                let put = world::set_block(
+                    world::BlockPos { x: pos.x + 3, y: pos.y, z: pos.z },
+                    "minecraft:oak_log",
+                    &[("axis".to_string(), "x".to_string())],
+                );
+                let item = world::spawn_item(pos, "minecraft:stick", 3);
+                let bad_item = world::spawn_item(pos, "minecraft:stick", 0);
+                Ok(Some(format!("mode {mode:?} tags {tags:?} fell {fell} put {put} item {item} {bad_item}")))
+            }
+            "restfx" => {
+                weather::set_default_splashing(false);
+                world::set_weather_passthrough(&["minecraft:oak_fence".into(), "#minecraft:fences".into()]);
+                let n = particles::get_particles().len();
+                let clouds = game::get_cloud_height();
+                let bad_name = audio::register("Bad Name", &[1, 2]).is_err();
+                let bad_file = audio::register("ok", &[1, 2, 3, 4]).is_err();
+                let fake = audio::register("fake", b"OggS-not-really").is_ok();
+                let wav = audio::register("tone", b"RIFF\x00\x00\x00\x00WAVEfmt ").is_ok();
+                Ok(Some(format!("particles {n} clouds {clouds:?} {bad_name} {bad_file} {fake} {wav}")))
+            }
+            "stackfx" => {
+                let Some(stack) = tooltip::get_hovered_stack() else {
+                    tooltip::set_hovered_tooltip(None);
+                    return Ok(Some("none".into()));
+                };
+                let first = stack.container.first().cloned().flatten();
+                tooltip::set_hovered_tooltip(Some(&tooltip::HoveredTooltip {
+                    lines: Some(vec![screen::TipLine {
+                        text: "Contains".into(),
+                        color: 0xFFFF_FFFF,
+                    }]),
+                    width: 200.0,
+                    height: 70.0,
+                    elements: (0..100)
+                        .map(|i| {
+                            screen::Element::Fill(screen::FillElement {
+                                x: i as f32,
+                                y: 0.0,
+                                width: 1.0,
+                                height: 1.0,
+                                top: 0xFF00_0000,
+                                bottom: 0xFF00_0000,
+                            })
+                        })
+                        .collect(),
+                }));
+                Ok(Some(format!(
+                    "{} {} {} {:?}",
+                    stack.item,
+                    stack.count,
+                    stack.container.len(),
+                    first.map(|f| (f.id, f.count))
+                )))
+            }
+            "tipfx" => {
+                let found = tooltip::get_hovered_enchantments();
+                let station = screen::get_station();
+                tooltip::set_lines(&[
+                    tooltip::Line {
+                        under: "enchantment.minecraft.sharpness".into(),
+                        text: " Sharp".into(),
+                        color: 0xFF55_5555,
+                    },
+                    tooltip::Line {
+                        under: String::new(),
+                        text: "Hold shift".into(),
+                        color: 0xFFAA_AAAA,
+                    },
+                ]);
+                let published = exchange::publish("descriptions", b"abc").is_ok();
+                let bad = exchange::publish("Bad Key", b"x").is_err();
+                let read = exchange::read("test_guest", "descriptions");
+                let keys = exchange::list_keys("test_guest");
+                let none = exchange::read("nobody", "descriptions").is_none();
+                Ok(Some(format!(
+                    "{} {} {:?} {station:?} {published} {bad} {read:?} {keys:?} {none}",
+                    found.len(),
+                    found.first().map_or(0, |e| e.level),
+                    found.first().map(|e| e.stored)
+                )))
+            }
+            "stylefx" => {
+                let id = particles::define_sprite(&particles::Sprite {
+                    name: "drop".into(),
+                    width: 2,
+                    height: 2,
+                    pixels: vec![255; 16],
+                })?;
+                let ok = particles::spawn_styled(
+                    particles::Options {
+                        sprite: id,
+                        x: 0.0,
+                        y: 70.0,
+                        z: 0.0,
+                        vx: 0.0,
+                        vy: 0.0,
+                        vz: 0.0,
+                        size: 0.1,
+                        lifetime: 40,
+                        gravity: 0.04,
+                        wind_x: 0.0,
+                        wind_z: 0.0,
+                        collide: true,
+                        color: particles::Color { r: 1.0, g: 1.0, b: 1.0, a: 0.5 },
+                        size_curve: particles::SizeCurve::Constant,
+                        fade: particles::Fade::None,
+                        flat: false,
+                        linger: 0,
+                        sway: 0.0,
+                        sway_period: 20,
+                        spin: 0.0,
+                        tumble: 0.0,
+                    },
+                    particles::Rotation::Camera,
+                    particles::Style {
+                        bounciness: 2.0,
+                        render_type: particles::RenderType::Opaque,
+                        distance_scaling: f32::NAN,
+                    },
+                );
+                Ok(Some(format!("{ok}")))
+            }
+            "rmdef" => {
+                let id = particles::define_sprite(&particles::Sprite {
+                    name: "drop".into(),
+                    width: 2,
+                    height: 2,
+                    pixels: vec![255; 16],
+                })?;
+                Ok(Some(format!("{id}")))
+            }
+            "rmfx" => {
+                let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let n = particles::remove(nums[0] as u32, nums[1], nums[2], nums[3]);
+                let other = particles::remove(999, nums[1], nums[2], nums[3]);
+                let file = audio::register_file("fake").is_ok();
+                let missing = audio::register_file("nofile").is_err();
+                let bad = audio::register_file("Bad Name").is_err();
+                Ok(Some(format!("removed {n} {other} {file} {missing} {bad}")))
+            }
+            "crossfx" => {
+                let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let img = particles::get_game_sprite("minecraft:block/dead_bush").ok_or("no sprite")?;
+                let id = particles::define_sprite(&particles::Sprite {
+                    name: "bush".into(),
+                    width: img.width,
+                    height: img.height,
+                    pixels: img.pixels,
+                })?;
+                let ok = particles::spawn_rotated(
+                    particles::Options {
+                        sprite: id,
+                        x: nums[0],
+                        y: nums[1],
+                        z: nums[2],
+                        vx: 0.0,
+                        vy: 0.0,
+                        vz: 0.0,
+                        color: particles::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                        size: 0.5,
+                        lifetime: 1000,
+                        gravity: 0.0,
+                        wind_x: 0.0,
+                        wind_z: 0.0,
+                        collide: false,
+                        size_curve: particles::SizeCurve::Constant,
+                        fade: particles::Fade::None,
+                        flat: false,
+                        linger: 0,
+                        sway: 0.0,
+                        sway_period: 1,
+                        spin: 0.05,
+                        tumble: 0.0,
+                    },
+                    particles::Rotation::Crossed,
+                );
+                Ok(Some(format!("bush {id} {ok}")))
+            }
+            "sndfx" => {
+                let Some(bytes) = resources::read_file("minecraft", "sounds/step/stone6.ogg") else {
+                    return Ok(Some("no file".into()));
+                };
+                let registered = audio::register("hit", &bytes);
+                let played = audio::play("test_guest:hit", None, 1.0, 1.0);
+                Ok(Some(format!("size {} registered {registered:?} played {played}", bytes.len())))
+            }
+            "rainfx" => {
+                let sprite = particles::define_sprite(&particles::Sprite {
+                    name: "drop".into(),
+                    width: 2,
+                    height: 2,
+                    pixels: vec![255; 16],
+                })?;
+                let rotated = particles::spawn_rotated(
+                    particles::Options {
+                        sprite,
+                        x: 0.5,
+                        y: 70.0,
+                        z: 0.5,
+                        vx: 0.3,
+                        vy: -0.9,
+                        vz: 0.0,
+                        color: particles::Color {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        size: 0.1,
+                        lifetime: 40,
+                        gravity: 0.0,
+                        wind_x: 0.0,
+                        wind_z: 0.0,
+                        collide: false,
+                        size_curve: particles::SizeCurve::Constant,
+                        fade: particles::Fade::None,
+                        flat: false,
+                        linger: 0,
+                        sway: 0.0,
+                        sway_period: 1,
+                        spin: 0.0,
+                        tumble: 0.0,
+                    },
+                    particles::Rotation::RelativeVelocity,
+                );
+                weather::set_default_weather(false);
+                let fog = world::get_biome_fog(world::BlockPos { x: 1, y: 64, z: 1 });
+                let sound = audio::play("minecraft:weather.rain", None, 0.2, 1.0);
+                let bad = audio::play("Bad Name", None, 1.0, 1.0);
+                Ok(Some(format!("rotated {rotated} fog {fog:?} sound {sound} bad {bad}")))
+            }
+            "removedfx" => Ok(Some(self.removed_seen.clone())),
+            "minimapfx" => {
+                let light = world::get_light_level(world::BlockPos { x: 1, y: 64, z: 1 })
+                    .map(|l| (l.block, l.sky));
+                let command = world::run_command("/tp 10 64 -20");
+                if command {
+                    overlay::paint_world(&[overlay::WorldElement::Picture(overlay::WorldPicture {
+                        x: 1.0,
+                        y: 65.0,
+                        z: 1.0,
+                        width: 8.0,
+                        height: 12.0,
+                        texture: 0,
+                        u: 0.0,
+                        v: 0.0,
+                        u_width: 8.0,
+                        v_height: 12.0,
+                        tint: 0xFFFF_FFFF,
+                        offset_y: 0.0,
+                    })]);
+                }
+                Ok(Some(format!("light {light:?} command {command}")))
+            }
+            "detailfx" => {
+                let mut lines: Vec<String> = entity::nearby("", 50.0)
+                    .iter()
+                    .map(|e| match entity::get_detail(e.id) {
+                        Some(d) => format!(
+                            "{}:{:.2}:{}:{}:{:.1}:{}:{}",
+                            e.type_id, d.swell, d.glowing, d.in_water, d.squish, d.dark_ticks, d.carried_block
+                        ),
+                        None => format!("{}:none", e.type_id),
+                    })
+                    .collect();
+                lines.push(format!("gone:{}", entity::get_detail(4_000_000).is_none()));
+                lines.extend(light_events::poll().iter().map(|f| {
+                    format!("{}@{},{},{}->{}:{}", f.kind, f.x, f.y, f.z, f.end_y, f.ticks)
+                }));
+                Ok(Some(lines.join("|")))
+            }
             "playersfx" => Ok(Some(
                 players::get_players()
                     .iter()
@@ -519,6 +916,37 @@ impl Mod for Guest {
                     "screen {id} sized {} events {}",
                     size.is_some(),
                     kinds.join(",")
+                )))
+            }
+            "mapdetails" => {
+                let d = world::get_chunk_details(0, 0).ok_or("no details")?;
+                let none = world::get_chunk_details(5, 5).is_none();
+                let v = game::get_viewport().ok_or("no viewport")?;
+                Ok(Some(format!(
+                    "details {} {} {} {} {} viewport {} {} {} view {}",
+                    d.block[0],
+                    d.ambiguous[0],
+                    d.light[0],
+                    d.block.len(),
+                    if none { "none" } else { "some" },
+                    v.gui_scale,
+                    v.width,
+                    v.height,
+                    game::get_server_view_distance()
+                )))
+            }
+            "bigtexture" => {
+                // Large screen images and their filter (API 0.1.31).
+                if self.screen == 0 {
+                    self.screen = screen::open("Test screen")?;
+                }
+                let big = screen::upload_texture(1, 512, 512, &vec![255; 512 * 512 * 4]).is_ok();
+                let too_big =
+                    screen::upload_texture(2, 1024, 1024, &vec![255; 1024 * 1024 * 4]).is_err();
+                screen::set_texture_filter(1, screen::TextureFilter::Linear);
+                Ok(Some(format!(
+                    "big {big} refused {too_big} max {}",
+                    screen::get_max_texture_side()
                 )))
             }
             "weatherfx" => {
@@ -733,8 +1161,31 @@ impl Mod for Guest {
                         }),
                     },
                 ]);
+                let uploaded = slots::upload_texture(0, 2, 2, &[255; 16]).is_ok();
+                let too_big = slots::upload_texture(9, 2, 2, &[255; 16]).is_err();
+                slots::set_screen_marks(&[slots::Mark {
+                    slot: 1,
+                    shape: slots::MarkShape::Picture(slots::PictureMark {
+                        texture: 0,
+                        width: 8.0,
+                        height: 8.0,
+                        x: 0.0,
+                        y: 0.0,
+                        color: 0xFFFF_FFFF,
+                    }),
+                }]);
+                slots::set_hud_marks(&[slots::Mark {
+                    slot: 2,
+                    shape: slots::MarkShape::Square(slots::SquareMark {
+                        color: 0xFF00_00FF,
+                        size: 3.0,
+                        x: 13.0,
+                        y: 13.0,
+                    }),
+                }]);
+                let color = items::get_name_color("minecraft:stone");
                 Ok(Some(format!(
-                    "slots {summary:?} crafting {crafting:?} session {session:?} hovered {:?}",
+                    "uploaded {uploaded} {too_big} color {color:?} slots {summary:?} crafting {crafting:?} session {session:?} hovered {:?}",
                     slots::get_hovered_slot()
                 )))
             }

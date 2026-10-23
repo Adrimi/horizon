@@ -10,7 +10,7 @@ use super::{Dim, Game, Mining, Screen};
 use horizon_client::first_person::Hand;
 use horizon_client::{
     Result,
-    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, SECTIONS, Section, block_strategy},
+    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, Section, block_strategy, section_count},
     containers::{BlockEntity, Furnace, FurnaceKind},
     entities::{Experience, ExperienceOrb, ItemEntity},
     hud::{HudBatch, rgba},
@@ -81,6 +81,13 @@ struct Lerp {
     steps: u32,
 }
 
+impl Remote {
+    /// The profile UUID and name of the player entity with this id.
+    pub(super) fn level_player(&self, id: i32) -> Option<(u128, Option<String>)> {
+        let uuid = *self.level_players.get(&id)?;
+        Some((uuid, self.tab_players.get(&uuid).map(|p| p.name.clone())))
+    }
+}
 pub(super) struct Remote {
     pub session: Session,
     pub brand: String,
@@ -261,9 +268,6 @@ impl Game<'_> {
         self.armor = [None, None, None, None];
         self.craft_grid = vec![None; 9];
         self.craft_size = 2;
-        // The Item Highlighter extra: the items a server sends are not new.
-        self.highlighter
-            .reset(self.started.elapsed().as_millis() as u64);
         self.player = None;
         self.spawn = None;
         self.mobs.clear();
@@ -515,11 +519,8 @@ impl Game<'_> {
     /// [`Game::chat_line`] for a message a player (`sender`) wrote.
     pub(super) fn chat_line_from(&mut self, text: String, sender: Option<u128>) {
         log::info!("[chat] {text}");
-        if let Some(uuid) = sender
-            && self.settings.extras.chat_heads
-        {
-            self.refresh_chat_heads(uuid);
-        }
+        // The mods hear the message first: one of them may put a picture
+        // before it (`chat-decorate`).
         let picture = self.mods_chat_message(&text, sender);
         self.ui.chat.add_decorated(
             &self.gui.atlas,
@@ -699,6 +700,8 @@ impl Game<'_> {
         self.set_mode_id(spawn.game_type);
         self.dim = Dim::from_id(&spawn.dimension);
         if !same {
+            // A server's worlds are the height of vanilla's.
+            horizon_client::chunk::set_height(horizon_client::chunk::DEFAULT_HEIGHT);
             let mut streaming = Streaming::new(
                 Arc::new(NoTerrain),
                 self.pack.context.clone(),
@@ -771,7 +774,7 @@ impl Game<'_> {
                 );
             }
             biome_cells.push(cells);
-            if !(0..SECTIONS as i32).contains(&target) {
+            if !(0..section_count() as i32).contains(&target) {
                 continue;
             }
             // A global section is as wide as the server's registry: 16 bits
@@ -811,7 +814,7 @@ impl Game<'_> {
         // (the column's top or bottom cell layer repeated).
         if !biome_cells.is_empty() {
             let last = biome_cells.len() - 1;
-            for si in 0..SECTIONS as i32 {
+            for si in 0..section_count() as i32 {
                 let i = si - offset;
                 if (0..sections.len() as i32).contains(&i) {
                     continue;
@@ -840,7 +843,7 @@ impl Game<'_> {
         &self,
         light: &horizon_protocol::chunk::LightData,
     ) -> (Vec<LightLayers>, [u8; 256]) {
-        let mut layers: Vec<LightLayers> = vec![(None, None); SECTIONS];
+        let mut layers: Vec<LightLayers> = vec![(None, None); section_count()];
         let Some(r) = self.remote.as_ref() else {
             return (layers, [0; 256]);
         };
@@ -854,9 +857,9 @@ impl Game<'_> {
             .enumerate()
         {
             let si = first + b as i32;
-            if (0..SECTIONS as i32).contains(&si) {
+            if (0..section_count() as i32).contains(&si) {
                 layers[si as usize] = layer;
-            } else if si == SECTIONS as i32
+            } else if si == section_count() as i32
                 && sky
                 && let Some(l) = &layer.0
             {
@@ -907,7 +910,7 @@ impl Game<'_> {
                 .block_entities
                 .retain(|k, _| (k.0 >> 4, k.2 >> 4) != (x, z));
             if let Some(renderer) = self.renderer.as_mut() {
-                for sy in 0..SECTIONS as i32 {
+                for sy in 0..section_count() as i32 {
                     renderer.remove((x, sy, z));
                 }
             }
@@ -1346,7 +1349,7 @@ impl Game<'_> {
                     .block_entities
                     .retain(|k, _| (k.0 >> 4, k.2 >> 4) != (x, z));
                 if let Some(renderer) = self.renderer.as_mut() {
-                    for sy in 0..SECTIONS as i32 {
+                    for sy in 0..section_count() as i32 {
                         renderer.remove((x, sy, z));
                     }
                 }
@@ -2267,13 +2270,15 @@ impl Game<'_> {
             _ => {}
         }
     }
-    /// The chat heads extra: the skins of the listed players (downloaded
-    /// ones once ready), and `sender`'s default skin when unlisted.
+    /// The skins of the listed players (downloaded ones once ready), and
+    /// `sender`'s default skin when unlisted: a mod's picture
+    /// (`chat-decorate`) draws the sender's face from them.
     pub(super) fn refresh_chat_heads(&mut self, sender: u128) {
-        if let Some((players, _, _)) = self.remote_tab_players() {
+        if let Some((players, _, upside_down)) = self.remote_tab_players() {
             for p in players {
                 self.ui.chat.head_skins.insert(p.uuid, p.skin);
             }
+            self.ui.chat.upside_down = upside_down.into_iter().collect();
         }
         self.ui
             .chat
@@ -2335,6 +2340,7 @@ impl Game<'_> {
         } else {
             let (old, slot) = self.skin_slots.remove(0);
             self.gui.atlas.sprites.remove(&old);
+            self.skin_pixels.remove(&old);
             slot
         };
         let Some(rect) = self
@@ -2347,6 +2353,7 @@ impl Game<'_> {
             return;
         };
         let (w, h) = (self.gui.atlas.width as f32, self.gui.atlas.height as f32);
+        let rgba_copy = rgba.clone();
         self.map_patches.push(horizon_client::font::Patch {
             x: (rect.u0 * w).round() as u32,
             y: (rect.v0 * h).round() as u32,
@@ -2355,6 +2362,7 @@ impl Game<'_> {
             rgba,
         });
         self.gui.atlas.sprites.insert(location.clone(), rect);
+        self.skin_pixels.insert(location.clone(), rgba_copy);
         self.skin_slots.push((location, slot));
     }
     /// Whether a downloaded skin is in the atlas, marking it recently shown.

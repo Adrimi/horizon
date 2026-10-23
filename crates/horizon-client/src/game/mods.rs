@@ -9,7 +9,9 @@ use horizon_client::{
     extras::Corner,
     extras_hud::{self, Corners},
     font::Patch,
-    hud::{HudBatch, MOD_TEXTURE_SIDE, MOD_TEXTURE_SLOTS},
+    hud::{
+        HudBatch, MOD_BIG_ROWS, MOD_BIG_SIDE, MOD_TEXTURE_ROWS, MOD_TEXTURE_SIDE, MOD_TEXTURE_SLOTS,
+    },
     mod_list::{self, Installed},
     text::{self, Text},
 };
@@ -39,6 +41,11 @@ pub(super) struct ModsState {
     /// Blocks broken since the last tick, for `world.broken-blocks`
     /// (`mod_world.rs`).
     pub(super) broken: Vec<horizon_mods::BlockBroken>,
+    /// Blocks that went since the last tick (`world.removed-blocks`), and
+    /// the positions the player or a mod broke lately, with how many ticks
+    /// they stay in mind (API 0.1.19).
+    pub(super) removed: Vec<horizon_mods::BlockRemoved>,
+    pub(super) recently_broken: Vec<([i32; 3], u8)>,
     /// Watched blocks that got a random tick (`animate_tick`), for
     /// `world.random-ticked-blocks` (API 0.1.12).
     pub(super) ticked: Vec<[i32; 3]>,
@@ -62,6 +69,8 @@ pub(super) struct ModsState {
     pub(super) screen: ModScreen,
     /// Every item of the game, for `items.list` (API 0.1.5); built on first use.
     items: std::sync::OnceLock<Arc<Vec<Item>>>,
+    /// The colour of each item's name (API 0.1.20); built with `items`.
+    item_colors: std::sync::OnceLock<Arc<HashMap<String, u32>>>,
     /// Every recipe of the game, for `recipes.list` (API 0.1.5); built on first use.
     recipes: std::sync::OnceLock<Arc<Vec<Recipe>>>,
     /// The width of the first characters of the font, for `screen.get-text-width`.
@@ -71,7 +80,19 @@ pub(super) struct ModsState {
     /// Particle pictures waiting to go into the atlas' particle sheet, and
     /// the names the mods' numbers stand for (API 0.1.6).
     particle_patches: Vec<Patch>,
+    /// Every particle picture sent so far, by its cell (`x`, `y`), and how
+    /// many frames more the atlas gets them again: a patch that reaches the
+    /// GPU before its atlas exists, or a rebuilt atlas, would lose them.
+    particle_store: Vec<Patch>,
+    pub(super) atlas_resend: u32,
+    /// The passthrough list the particle engine has (API 0.1.25).
+    passthrough_last: Vec<String>,
+    /// Falling blocks that vanish where they land, by where they fell
+    /// from (`world.fall-block`, API 0.1.24).
+    pub(super) vanish_falls: std::collections::HashSet<[i32; 3]>,
     particle_names: HashMap<u32, String>,
+    /// The mods' command particles by `<mod id>:<name>` (API 0.1.19).
+    command_particles: HashMap<String, horizon_mods::ParticleOptions>,
     /// The bars the game drew in the last frame, and the camera it drew with
     /// (`hud.get-bars`, `overlay`; API 0.1.7).
     pub(super) bars: Option<horizon_mods::Bars>,
@@ -84,6 +105,12 @@ pub(super) struct ModsState {
     /// for (`tooltip`, API 0.1.11).
     pub(super) tooltip_frame: std::cell::Cell<[f32; 4]>,
     tooltip_hovered: std::cell::Cell<Option<(String, [f32; 4])>>,
+    /// The enchantments of that item (`tooltip`, API 0.1.27), and the
+    /// translation keys of the enchantment lines of the last tooltip the
+    /// game built, by the index of the line.
+    tooltip_enchantments: std::cell::RefCell<Vec<horizon_mods::TooltipEnchantment>>,
+    tooltip_stack: std::cell::RefCell<Option<horizon_mods::TooltipHoveredStack>>,
+    pub(super) tooltip_keys: std::cell::RefCell<Vec<(usize, String)>>,
     /// What eating each food gives and whether it can hurt, built once.
     foods: std::sync::OnceLock<Arc<HashMap<String, (Food, bool)>>>,
     /// The light of each block that gives any, built on first use
@@ -223,10 +250,13 @@ pub(super) fn content_root(
                     out.display()
                 );
             }
+            mod_content::init_world_types(&out);
+            horizon_client::mobs::wolf_variants::init(&out);
             out
         }
         Err(e) => {
             log::warn!("Horizon: content mods not loaded: {e}");
+            mod_content::init_world_types(root);
             root.to_owned()
         }
     }
@@ -260,6 +290,10 @@ impl Game<'_> {
         self.mods.mods.set_storage(Some(
             Self::options_path().with_file_name(mod_list::DATA_DIR),
         ));
+        self.mods.mods.set_sprite_source(Some(Self::sprite_source(
+            self.pack.render.clone(),
+            self.mod_gui_sprites(),
+        )));
         self.sync_mod_keys();
         self.list_mods();
         self.sync_mod_commands();
@@ -356,7 +390,7 @@ impl Game<'_> {
         }
     }
     /// What mods read this tick.
-    fn mod_snapshot(&self) -> Snapshot {
+    fn mod_snapshot(&mut self) -> Snapshot {
         let player = self.player.as_ref().map(|p| Player {
             x: p.position.x,
             y: p.position.y,
@@ -402,9 +436,65 @@ impl Game<'_> {
         }
         if mods.uses(Capability::ItemsRead) || mods.uses(Capability::InventoryEdit) {
             snapshot.items = self.mod_items();
+            if let Some(items) = snapshot.items.as_ref() {
+                let colors = self.mods.item_colors.get_or_init(|| {
+                    use horizon_client::text;
+                    Arc::new(
+                        items
+                            .iter()
+                            .map(|i| {
+                                let color = match self.item_rarity(&i.id).as_str() {
+                                    "uncommon" => text::YELLOW,
+                                    "rare" => text::AQUA,
+                                    "epic" => text::LIGHT_PURPLE,
+                                    _ => text::WHITE,
+                                };
+                                (i.id.clone(), color)
+                            })
+                            .collect(),
+                    )
+                });
+                snapshot.item_colors = Some(Arc::clone(colors));
+            }
         }
         if mods.uses(Capability::RecipesRead) {
             snapshot.recipes = self.mod_recipes();
+        }
+        if mods.uses(Capability::Particles) {
+            snapshot.mod_particles = Some(Arc::new(
+                self.particles
+                    .mod_particles()
+                    .into_iter()
+                    .map(|(sprite, p, v, remaining)| horizon_mods::ModParticleInfo {
+                        sprite,
+                        x: p[0],
+                        y: p[1],
+                        z: p[2],
+                        vx: v[0],
+                        vy: v[1],
+                        vz: v[2],
+                        remaining,
+                    })
+                    .collect(),
+            ));
+        }
+        if mods.uses(Capability::GameRead) && self.player.is_some() {
+            // Only the overworld has clouds (CloudRenderer's height).
+            snapshot.cloud_height = (self.dim == super::Dim::Overworld).then_some(192);
+            snapshot.viewport = self.renderer.as_ref().map(|r| {
+                let size = [r.config.width, r.config.height];
+                (
+                    HudBatch::new(size).scale,
+                    r.config.width as f32,
+                    r.config.height as f32,
+                )
+            });
+            snapshot.server_view_distance = match self.remote {
+                Some(_) => 0,
+                None => self.settings.render_distance.max(2) as u32,
+            };
+            snapshot.game_mode = Some(self.mode.name().to_owned());
+            snapshot.player_tags = self.tags_of(super::commands::Target::Player);
         }
         if mods.uses(Capability::GameRead)
             && let Some(p) = self.player.as_ref()
@@ -485,9 +575,20 @@ impl Game<'_> {
             snapshot.inventory = Some(self.mod_inventory());
             snapshot.crafting = self.mod_crafting();
         }
-        if mods.uses(Capability::EntityRead) && self.player.is_some() {
-            snapshot.entities = Some(Arc::new(self.mod_entities()));
+        let (entity_read, light_events) = (
+            mods.uses(Capability::EntityRead),
+            mods.uses(Capability::LightEvents),
+        );
+        if entity_read && self.player.is_some() {
+            let entities = self.mod_entities();
+            snapshot.entity_details = Some(Arc::new(self.mod_entity_details(&entities)));
+            snapshot.faces = Some(Arc::new(self.mod_faces(&entities)));
+            snapshot.entities = Some(Arc::new(entities));
             snapshot.entities_editable = self.remote.is_none();
+        }
+        self.particles.watch_light = light_events;
+        if light_events && self.player.is_some() {
+            snapshot.flashes = Some(Arc::new(self.mod_flashes()));
         }
         if snapshot.player.is_none() {
             return snapshot;
@@ -638,7 +739,26 @@ impl Game<'_> {
         if let (Some(h), Some(p)) = (snapshot.health.as_mut(), self.player.as_mut()) {
             h.max_health = p.attribute("minecraft:max_health").unwrap_or(20.0) as f32;
         }
+        if self.mods.mods.uses(Capability::Players) {
+            snapshot.players = Some(Arc::new(self.mod_players()));
+        }
+        // The blocks the world's writes turned into air since the last tick,
+        // whoever did it (the player, a mod, a leaf decaying, a server).
+        if self.mods.mods.uses(Capability::WorldRead) {
+            let log = self.world.removed_log.get_or_insert_with(Vec::new);
+            let gone = std::mem::take(log);
+            for ((x, y, z), before) in gone {
+                self.mod_block_removed([x, y, z], BlockStateId(before));
+            }
+        } else {
+            self.world.removed_log = None;
+        }
         snapshot.broken = std::mem::take(&mut self.mods.broken);
+        snapshot.removed = std::mem::take(&mut self.mods.removed);
+        self.mods.recently_broken.retain_mut(|(_, age)| {
+            *age = age.saturating_sub(1);
+            *age > 0
+        });
         snapshot.ticked = self.mod_ticked();
         let landed: Vec<horizon_mods::Landing> = std::mem::take(&mut self.particles.mod_landings)
             .into_iter()
@@ -655,9 +775,11 @@ impl Game<'_> {
         self.lend_mod_world();
         self.mods.mods.tick(self.ticks);
         self.take_mod_world();
+        self.sync_command_particles();
         self.sync_mod_textures();
         self.show_mod_output();
         self.apply_mod_particles();
+        self.sync_weather_passthrough();
     }
     /// The mods' pictures and rules for faces (API 0.1.14): when they change,
     /// the atlas is built again with them and every section is meshed again,
@@ -751,8 +873,8 @@ impl Game<'_> {
                 continue;
             }
             batch.patches.push(Patch {
-                x: slot as u32 * MOD_TEXTURE_SIDE,
-                y: atlas.height - MOD_TEXTURE_SIDE,
+                x: slot as u32 * MOD_BIG_SIDE,
+                y: atlas.height - MOD_TEXTURE_ROWS - MOD_BIG_ROWS,
                 width: texture.width,
                 height: texture.height,
                 rgba: texture.pixels.clone(),
@@ -805,7 +927,7 @@ impl Game<'_> {
                     };
                     let Some(rect) = atlas
                         .sprites
-                        .get(&format!("horizon/mod-texture{slot}"))
+                        .get(&format!("horizon/mod-big{slot}"))
                         .copied()
                     else {
                         continue;
@@ -814,14 +936,19 @@ impl Game<'_> {
                     // the part that was uploaded.
                     let texture = screen.textures.iter().find(|t| t.id == i.texture);
                     let (w, h) = texture.map_or((1, 1), |t| (t.width, t.height));
+                    let smooth = texture.is_some_and(|t| t.smooth);
                     let rect = horizon_client::hud::Rect {
-                        u1: rect.u0 + (rect.u1 - rect.u0) * (w as f32 / MOD_TEXTURE_SIDE as f32),
-                        v1: rect.v0 + (rect.v1 - rect.v0) * (h as f32 / MOD_TEXTURE_SIDE as f32),
+                        u1: rect.u0 + (rect.u1 - rect.u0) * (w as f32 / MOD_BIG_SIDE as f32),
+                        v1: rect.v0 + (rect.v1 - rect.v0) * (h as f32 / MOD_BIG_SIDE as f32),
                         w,
                         h,
                         ..rect
                     };
-                    batch.rect_uv(i.x, i.y, i.width, i.height, rect, u32::MAX);
+                    if smooth {
+                        batch.rect_uv_smooth(i.x, i.y, i.width, i.height, rect, u32::MAX);
+                    } else {
+                        batch.rect_uv(i.x, i.y, i.width, i.height, rect, u32::MAX);
+                    }
                 }
             }
         }
@@ -940,7 +1067,10 @@ impl Game<'_> {
             return false;
         }
         // The command may follow a teleport in the same tick.
-        let snapshot = self.mod_snapshot();
+        let mut snapshot = self.mod_snapshot();
+        if self.mods.mods.uses(Capability::Players) {
+            snapshot.players = Some(Arc::new(self.mod_players()));
+        }
         self.mods.mods.set_snapshot(snapshot);
         self.lend_mod_world();
         let owned = self.mods.mods.command(command);
@@ -984,8 +1114,25 @@ impl Game<'_> {
                 uuid: format!("{uuid:032x}"),
             }),
         };
-        let picture = self.mods.mods.chat_message(message)?;
+        let decoration = self.mods.mods.chat_message(message)?;
+        let (gap, place, styles) = (decoration.gap, decoration.place, decoration.styles);
+        let picture = decoration.picture;
         Some(Picture {
+            gap: gap.map_or(2, |g| g as i32),
+            place: match place {
+                horizon_mods::ChatPlace::LineStart => None,
+                horizon_mods::ChatPlace::Text(at) => Some(at as usize),
+            },
+            styles: styles
+                .iter()
+                .map(|s| horizon_client::chat::PictureStyle {
+                    dx: s.offset_x,
+                    dy: s.offset_y,
+                    width: s.width as i32,
+                    height: s.height as i32,
+                    color: s.color,
+                })
+                .collect(),
             source: match picture.source {
                 ChatSource::SenderSkin => PictureSource::Sender,
                 ChatSource::PlayerSkin(uuid) => {
@@ -1002,10 +1149,105 @@ impl Game<'_> {
             height: picture.height as i32,
         })
     }
+    /// The player list for `players.get-players` (API 0.1.18): the listed
+    /// players of the connection, else the player of this game alone.
+    fn mod_players(&mut self) -> Vec<horizon_mods::ListedPlayer> {
+        if let Some((players, _, _)) = self.remote_tab_players() {
+            return players
+                .into_iter()
+                .map(|p| {
+                    let display = p
+                        .display_name
+                        .as_ref()
+                        .map(|d| horizon_client::scoreboard::comp_text(d).plain())
+                        .filter(|d| *d != p.name)
+                        .unwrap_or_default();
+                    horizon_mods::ListedPlayer {
+                        name: p.name,
+                        display_name: display,
+                        uuid: format!("{:032x}", p.uuid),
+                    }
+                })
+                .collect();
+        }
+        let me = self.level.player_uuid.map(|u| {
+            u.iter()
+                .fold(0u128, |a, &w| (a << 32) | u128::from(w as u32))
+        });
+        me.map(|uuid| horizon_mods::ListedPlayer {
+            name: super::chat::PLAYER_NAME.to_owned(),
+            display_name: String::new(),
+            uuid: format!("{uuid:032x}"),
+        })
+        .into_iter()
+        .collect()
+    }
     /// Chat lines, command feedback and stopped mods, into the chat.
     pub(super) fn show_mod_output(&mut self) {
+        let mut commands = Vec::new();
         for output in self.mods.mods.drain() {
             let line = match output {
+                Output::RegisterSound { mod_id, name, path } => {
+                    self.audio.add_mod_sound(&mod_id, &name, path);
+                    continue;
+                }
+                Output::RemoveParticles { sprite, pos } => {
+                    self.particles.remove_mod(sprite, pos);
+                    continue;
+                }
+                Output::FallBlock {
+                    pos,
+                    velocity,
+                    drops,
+                    place,
+                } => {
+                    self.mod_fall_block(pos, velocity, drops, place);
+                    continue;
+                }
+                Output::SetBlock {
+                    pos,
+                    id,
+                    properties,
+                } => {
+                    self.mod_set_block(pos, &id, &properties);
+                    continue;
+                }
+                Output::SpawnItem { pos, id, count } => {
+                    self.mod_spawn_item(pos, &id, count);
+                    continue;
+                }
+                Output::Exhaust { amount } => {
+                    if self.remote.is_none()
+                        && let Some(p) = self.player.as_mut()
+                    {
+                        p.cause_food_exhaustion(amount);
+                    }
+                    continue;
+                }
+                Output::MergeDrops { pos } => {
+                    self.mod_merge_drops(pos);
+                    continue;
+                }
+                Output::PlaySound {
+                    sound,
+                    place,
+                    volume,
+                    pitch,
+                } => {
+                    let at = place.or_else(|| {
+                        self.player
+                            .as_ref()
+                            .map(|p| [p.position.x, p.position.y, p.position.z])
+                    });
+                    self.audio.play(&sound, at, volume, pitch);
+                    continue;
+                }
+                Output::Command { command } => {
+                    if self.remote.is_none() {
+                        commands.push(command);
+                    }
+                    continue;
+                }
                 Output::Chat { name, text } => {
                     let mut line = Text::literal(format!("[{name}] ")).with_color(text::GRAY);
                     line.push(Text::literal(text));
@@ -1070,6 +1312,9 @@ impl Game<'_> {
                 .chat
                 .add(&self.gui.atlas, line, None, self.ticks, focused);
         }
+        for command in commands {
+            self.run_command(&command);
+        }
     }
     /// The mods' HUD panels, stacked with the extras in their corners.
     pub(super) fn draw_mod_panels(&self, batch: &mut HudBatch, corners: &mut Corners) {
@@ -1123,6 +1368,25 @@ impl Game<'_> {
             Screen::Inventory => GameScreen::Inventory,
             _ => GameScreen::Other,
         }
+    }
+    /// The workstation screen that is open, for `screen.get-station`.
+    fn mod_station(&self) -> Option<String> {
+        use super::stations::Kind;
+        if self.screen != Screen::Inventory {
+            return None;
+        }
+        let id = match self.station.as_ref()?.kind {
+            Kind::Enchanting => "minecraft:enchanting_table",
+            Kind::Anvil => "minecraft:anvil",
+            Kind::Grindstone => "minecraft:grindstone",
+            Kind::Smithing => "minecraft:smithing_table",
+            Kind::Stonecutter => "minecraft:stonecutter",
+            Kind::Merchant => "minecraft:villager",
+            Kind::Beacon => "minecraft:beacon",
+            Kind::Cartography => "minecraft:cartography_table",
+            Kind::Loom => "minecraft:loom",
+        };
+        Some(id.to_owned())
     }
     /// A mod's panel is painted over the inventory-like screens only.
     fn mod_overlay_screen(&self) -> bool {
@@ -1217,6 +1481,9 @@ impl Game<'_> {
                 .filter_map(|k| horizon_client::keybinds::key_name(*k))
                 .map(str::to_owned)
                 .collect(),
+            enchantments: self.mods.tooltip_enchantments.take(),
+            station: self.mod_station(),
+            stack: self.mods.tooltip_stack.take(),
             tooltip: self.mods.tooltip_hovered.take().map(|(item, f)| {
                 horizon_mods::TooltipHovered {
                     item,
@@ -1451,6 +1718,7 @@ impl Game<'_> {
                     );
                 }
                 ScreenElement::Picture(p) if pictures.is_some() => {
+                    let overlay = matches!(pictures, Some(Some(_)));
                     let slot = match pictures {
                         Some(Some(mod_id)) => self
                             .mods
@@ -1462,16 +1730,24 @@ impl Game<'_> {
                     let Some(slot) = slot else {
                         continue;
                     };
-                    let Some(rect) = self
-                        .gui
-                        .atlas
-                        .sprites
-                        .get(&format!("horizon/mod-texture{slot}"))
-                        .copied()
-                    else {
+                    let (name, side) = if overlay {
+                        (
+                            format!("horizon/mod-texture{slot}"),
+                            MOD_TEXTURE_SIDE as f32,
+                        )
+                    } else {
+                        (format!("horizon/mod-big{slot}"), MOD_BIG_SIDE as f32)
+                    };
+                    let Some(rect) = self.gui.atlas.sprites.get(&name).copied() else {
                         continue;
                     };
-                    let side = MOD_TEXTURE_SIDE as f32;
+                    let smooth = !overlay
+                        && self.mods.mods.open_screen().is_some_and(|(_, _, screen)| {
+                            screen
+                                .textures
+                                .iter()
+                                .any(|t| t.id == p.texture && t.smooth)
+                        });
                     let (du, dv) = (rect.u1 - rect.u0, rect.v1 - rect.v0);
                     let part = horizon_client::hud::Rect {
                         u0: rect.u0 + du * (p.u / side),
@@ -1481,7 +1757,11 @@ impl Game<'_> {
                         w: p.u_width.max(1.0) as u32,
                         h: p.v_height.max(1.0) as u32,
                     };
-                    batch.rect_uv(p.x, p.y, p.width, p.height, part, argb(p.tint));
+                    if smooth {
+                        batch.rect_uv_smooth(p.x, p.y, p.width, p.height, part, argb(p.tint));
+                    } else {
+                        batch.rect_uv(p.x, p.y, p.width, p.height, part, argb(p.tint));
+                    }
                 }
                 ScreenElement::Picture(_) => {}
                 ScreenElement::Item(i) => {
@@ -1680,6 +1960,8 @@ impl Game<'_> {
 
 /// The sheet of the mods' particle pictures: the atlas' last reserved slot,
 /// 256 pixels square, split into 64 pixel cells (API 0.1.6).
+/// How many frames the mods' pictures are sent again after a change.
+const RESEND_FRAMES: u32 = 180;
 const PARTICLE_CELL: u32 = 64;
 const PARTICLE_CELLS_PER_ROW: u32 = 4;
 
@@ -1729,53 +2011,351 @@ impl Game<'_> {
                 h: def.height,
             };
             self.particles.register_sprite(&def.name, rect);
-            self.mods.particle_patches.push(Patch {
+            let patch = Patch {
                 x: slot_x + cx,
                 y: atlas_height - MOD_TEXTURE_SIDE + cy,
                 width: def.width,
                 height: def.height,
                 rgba: def.pixels,
-            });
+            };
+            self.mods
+                .particle_store
+                .retain(|p| (p.x, p.y) != (patch.x, patch.y));
+            self.mods.particle_store.push(patch.clone());
+            self.mods.particle_patches.push(patch);
+            self.mods.atlas_resend = RESEND_FRAMES;
             self.mods.particle_names.insert(def.id, def.name);
         }
-        for p in particles {
-            let Some(name) = self.mods.particle_names.get(&p.sprite) else {
-                continue;
-            };
-            use horizon_client::particles::{ModFade, ModParticle, ModSize};
-            self.particles.add_mod(&ModParticle {
-                sprite_name: name.clone(),
-                sprite: p.sprite,
-                position: [p.x, p.y, p.z],
-                velocity: [p.vx, p.vy, p.vz],
-                rgba: [p.color.r, p.color.g, p.color.b, p.color.a],
-                size: p.size,
-                lifetime: p.lifetime as i32,
-                gravity: p.gravity,
-                wind: [p.wind_x, p.wind_z],
-                collide: p.collide,
-                size_curve: match p.size_curve {
-                    horizon_mods::ParticleSizeCurve::Constant => ModSize::Constant,
-                    horizon_mods::ParticleSizeCurve::Grow => ModSize::Grow,
-                    horizon_mods::ParticleSizeCurve::Shrink => ModSize::Shrink,
-                },
-                fade: match p.fade {
-                    horizon_mods::ParticleFade::None => ModFade::None,
-                    horizon_mods::ParticleFade::Late => ModFade::Late,
-                    horizon_mods::ParticleFade::Full => ModFade::Full,
-                },
-                flat: p.flat,
-                linger: p.linger,
-                sway: p.sway,
-                sway_period: p.sway_period,
-                spin: p.spin,
-                tumble: p.tumble,
-            });
+        for (p, rotation, style) in particles {
+            if let Some(mut m) = self.mod_particle_of(&p) {
+                m.rotation = match rotation {
+                    horizon_mods::ParticleRotation::Camera => 0,
+                    horizon_mods::ParticleRotation::RelativeVelocity => 1,
+                    horizon_mods::ParticleRotation::CopyCamera => 2,
+                    horizon_mods::ParticleRotation::Vertical => 3,
+                    horizon_mods::ParticleRotation::Crossed => 4,
+                };
+                m.bounciness = style.bounciness;
+                m.opaque = matches!(style.render_type, horizon_mods::ParticleRenderType::Opaque);
+                m.distance_scaling = style.distance_scaling;
+                self.particles.add_mod(&m);
+            }
         }
+    }
+    /// The sprites of the render assets for `particles.get-game-sprite`
+    /// (API 0.1.19).
+    pub(super) fn sprite_source(
+        render: Arc<horizon_client::assets::RenderAssets>,
+        gui: Arc<HashMap<String, (u32, u32, Vec<u8>)>>,
+    ) -> horizon_mods::SpriteSource {
+        Arc::new(move |name: &str| {
+            // The weather and the particles of the GUI atlas.
+            let short = name.strip_prefix("minecraft:").unwrap_or(name);
+            if let Some((w, h, pixels)) = gui.get(short) {
+                return Some((*w, *h, pixels.clone()));
+            }
+            let layer = *render.sprite_layers.get(name)? as usize;
+            let side = render.sprite_size as usize;
+            let layer_bytes = side * side * 4;
+            let from = layer * layer_bytes;
+            let pixels = render.pixels.get(from..from + layer_bytes)?.to_vec();
+            Some((side as u32, side as u32, pixels))
+        })
+    }
+    /// The blocks the mods' particles fly through, with the tags resolved
+    /// (`world.set-weather-passthrough`, API 0.1.25).
+    pub(super) fn sync_weather_passthrough(&mut self) {
+        if !self.mods.mods.is_running() {
+            if !self.particles.passthrough.is_empty() {
+                self.particles.passthrough.clear();
+                self.mods.passthrough_last.clear();
+            }
+            return;
+        }
+        let wanted = self.mods.mods.weather_passthrough();
+        if wanted == self.mods.passthrough_last {
+            return;
+        }
+        let mut set = std::collections::HashSet::new();
+        for entry in &wanted {
+            if let Some(tag) = entry.strip_prefix('#') {
+                if let Some(blocks) = self.res.items().block_tags.get(tag) {
+                    set.extend(blocks.iter().cloned());
+                }
+            } else {
+                set.insert(entry.clone());
+            }
+        }
+        self.particles.passthrough = set;
+        self.mods.passthrough_last = wanted;
+    }
+    /// `world.fall-block` (API 0.1.24): the block leaves the world and
+    /// falls as a falling block.
+    fn mod_fall_block(&mut self, pos: [i32; 3], velocity: [f64; 3], drops: bool, place: bool) {
+        use horizon_core::geometry::Vec3;
+        if self.remote.is_some() {
+            return;
+        }
+        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let facts = self.res.facts().get(state).clone();
+        if facts.hardness < 0.0 || self.res.facts().is_air(state) {
+            return;
+        }
+        if drops {
+            let held = self.held().cloned();
+            let harvest = !facts.requires_tool
+                || self
+                    .res
+                    .items()
+                    .correct_for_drops(held.as_ref(), &facts.name);
+            if harvest {
+                for d in self.block_loot_at(pos, state, held.as_ref()) {
+                    if &*d.item != "minecraft:air" {
+                        self.pop_resource(pos, d);
+                    }
+                }
+            }
+        }
+        let air = self.world.air;
+        if self.level_set(pos, air).is_err() {
+            return;
+        }
+        let start = horizon_core::position::BlockPos::new(pos[0], pos[1], pos[2]);
+        let p = Vec3::new(
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]),
+            f64::from(pos[2]) + 0.5,
+        );
+        if !place {
+            self.mods.vanish_falls.insert(pos);
+        }
+        self.falling.push(super::FallingBlock {
+            id: 0,
+            state,
+            start_pos: start,
+            position: p,
+            previous: p,
+            velocity: Vec3::new(velocity[0], velocity[1], velocity[2]),
+            age: 0,
+            no_gravity: false,
+            // As `FallingBlockEntity.dropItem`: a block that cannot be placed where it
+            // lands (another one is there) drops as an item instead of vanishing.
+            drop_item: place,
+            fall_distance: 0.0,
+            stuck: Vec3::ZERO,
+            damage: Default::default(),
+            saved: None,
+        });
+    }
+    /// `world.set-block` (API 0.1.24).
+    fn mod_set_block(&mut self, pos: [i32; 3], id: &str, properties: &[(String, String)]) {
+        if self.remote.is_some() {
+            return;
+        }
+        let registry = self.pack.assets.registry;
+        let Some(default) = registry.default_state(id) else {
+            return;
+        };
+        let Some(mut state) = registry.state(default).cloned() else {
+            return;
+        };
+        for (k, v) in properties {
+            if !state.properties.contains_key(k) {
+                return;
+            }
+            state.properties.insert(k.clone(), v.clone());
+        }
+        let Ok(resolved) = registry.resolve(&state) else {
+            return;
+        };
+        let _ = self.place_state(pos, resolved, false);
+    }
+    /// `world.spawn-item` (API 0.1.24).
+    fn mod_spawn_item(&mut self, pos: [i32; 3], id: &str, count: u32) {
+        if self.remote.is_some() || self.res.items().get(id).is_none() {
+            return;
+        }
+        let mut stack = horizon_client::items::ItemStack::new(id, 1);
+        stack.count = count.min(self.max_stack(&stack).max(1));
+        self.pop_resource(pos, stack);
+    }
+    /// `world.merge-drops-at` (API 0.1.23): the items and experience dropped
+    /// in the last few ticks within 16 blocks of `pos` gather at its middle.
+    fn mod_merge_drops(&mut self, pos: [i32; 3]) {
+        if self.remote.is_some() {
+            return;
+        }
+        let middle = horizon_core::geometry::Vec3::new(
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]) + 0.25,
+            f64::from(pos[2]) + 0.5,
+        );
+        let near = |v: horizon_core::geometry::Vec3| {
+            let (dx, dy, dz) = (v.x - middle.x, v.y - middle.y, v.z - middle.z);
+            dx * dx + dy * dy + dz * dz <= 16.0 * 16.0
+        };
+        for i in &mut self.dropped {
+            if i.age <= 5 && near(i.position) {
+                i.position = middle;
+                i.previous = middle;
+                i.velocity = horizon_core::geometry::Vec3::ZERO;
+            }
+        }
+        for o in &mut self.orbs {
+            if o.age <= 5 && near(o.position) {
+                o.position = middle;
+                o.previous = middle;
+                o.velocity = horizon_core::geometry::Vec3::ZERO;
+            }
+        }
+    }
+    /// The mouse while playing, for `input` (API 0.1.23).
+    pub(super) fn mod_play_mouse(&mut self, button: i32, pressed: bool, wheel: f32) {
+        if !self.mods.mods.is_running() || !self.mods.mods.uses(Capability::Input) {
+            return;
+        }
+        let (x, y) = self.cursor;
+        self.mods.mods.push_mouse_event(horizon_mods::MouseEvent {
+            wheel,
+            button,
+            pressed,
+            x,
+            y,
+        });
+    }
+    /// The weather and particle pictures of the GUI atlas by name
+    /// (`environment/rain`, `particle/splash_0`), cut to their own size, for
+    /// `particles.get-game-sprite` (API 0.1.22).
+    pub(super) fn mod_gui_sprites(&self) -> Arc<HashMap<String, (u32, u32, Vec<u8>)>> {
+        let atlas = &self.gui.atlas;
+        let (aw, ah) = (atlas.width as usize, atlas.height as usize);
+        let mut out = HashMap::new();
+        for (name, r) in &atlas.sprites {
+            if !(name.starts_with("environment/") || name.starts_with("particle/")) {
+                continue;
+            }
+            let (x0, y0) = (
+                (r.u0 * aw as f32).round() as usize,
+                (r.v0 * ah as f32).round() as usize,
+            );
+            let (w, h) = (r.w as usize, r.h as usize);
+            if w == 0 || h == 0 || x0 + w > aw || y0 + h > ah {
+                continue;
+            }
+            let mut pixels = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                let from = ((y0 + y) * aw + x0) * 4;
+                let Some(row) = atlas.pixels.get(from..from + w * 4) else {
+                    break;
+                };
+                pixels.extend_from_slice(row);
+            }
+            if pixels.len() == w * h * 4 {
+                out.insert(name.clone(), (w as u32, h as u32, pixels));
+            }
+        }
+        Arc::new(out)
+    }
+    /// A mod's particle as the engine takes it; none for a picture that is
+    /// not in the atlas (yet).
+    fn mod_particle_of(
+        &self,
+        p: &horizon_mods::ParticleOptions,
+    ) -> Option<horizon_client::particles::ModParticle> {
+        use horizon_client::particles::{ModFade, ModParticle, ModSize};
+        let name = self.mods.particle_names.get(&p.sprite)?;
+        Some(ModParticle {
+            sprite_name: name.clone(),
+            sprite: p.sprite,
+            position: [p.x, p.y, p.z],
+            velocity: [p.vx, p.vy, p.vz],
+            rgba: [p.color.r, p.color.g, p.color.b, p.color.a],
+            size: p.size,
+            lifetime: p.lifetime as i32,
+            gravity: p.gravity,
+            wind: [p.wind_x, p.wind_z],
+            collide: p.collide,
+            size_curve: match p.size_curve {
+                horizon_mods::ParticleSizeCurve::Constant => ModSize::Constant,
+                horizon_mods::ParticleSizeCurve::Grow => ModSize::Grow,
+                horizon_mods::ParticleSizeCurve::Shrink => ModSize::Shrink,
+            },
+            fade: match p.fade {
+                horizon_mods::ParticleFade::None => ModFade::None,
+                horizon_mods::ParticleFade::Late => ModFade::Late,
+                horizon_mods::ParticleFade::Full => ModFade::Full,
+            },
+            flat: p.flat,
+            linger: p.linger,
+            sway: p.sway,
+            sway_period: p.sway_period,
+            spin: p.spin,
+            tumble: p.tumble,
+            rotation: 0,
+            bounciness: 0.0,
+            opaque: false,
+            distance_scaling: 0.0,
+        })
+    }
+    /// Whether `name` is a mod's command particle.
+    pub(super) fn command_particle_exists(&self, name: &str) -> bool {
+        self.mods.command_particles.contains_key(name)
+    }
+    /// `/particle <mod id>:<name>` (API 0.1.19): spawns the mod's particle
+    /// at `pos` with `velocity`; false when the name is not a mod's.
+    pub(super) fn spawn_command_particle(
+        &mut self,
+        name: &str,
+        pos: [f64; 3],
+        velocity: [f64; 3],
+    ) -> bool {
+        let Some(template) = self.mods.command_particles.get(name).cloned() else {
+            return false;
+        };
+        if let Some(mut m) = self.mod_particle_of(&template) {
+            m.position = pos;
+            m.velocity = velocity;
+            self.particles.add_mod(&m);
+        }
+        true
+    }
+    /// Keeps the commands' particle names (`particles.register-command-
+    /// particle`) in the registry the `/particle` argument reads.
+    fn sync_command_particles(&mut self) {
+        let names: HashMap<String, horizon_mods::ParticleOptions> =
+            self.mods.mods.command_particles().into_iter().collect();
+        if names.is_empty() && self.mods.command_particles.is_empty() {
+            return;
+        }
+        let entry = self
+            .ui
+            .registries
+            .by_registry
+            .entry("minecraft:particle_type".to_owned())
+            .or_default();
+        if entry.ids.is_empty() {
+            entry.ids = horizon_client::particles::ParticleType::ALL
+                .iter()
+                .map(|t| format!("minecraft:{}", t.name()))
+                .collect();
+        }
+        let old: Vec<String> = self.mods.command_particles.keys().cloned().collect();
+        entry.ids.retain(|id| !old.contains(id));
+        entry.ids.extend(names.keys().cloned());
+        self.mods.command_particles = names;
     }
     /// The particle pictures that wait to go into the atlas.
     pub(super) fn flush_mod_particle_sprites(&mut self, batch: &mut HudBatch) {
         batch.patches.append(&mut self.mods.particle_patches);
+        // For a while after a change the atlas gets everything again, so a
+        // frame that had no atlas texture to take it does not lose it.
+        if self.mods.atlas_resend > 0 {
+            self.mods.atlas_resend -= 1;
+            batch
+                .patches
+                .extend(self.mods.particle_store.iter().cloned());
+            self.mods.overlay_versions.clear();
+        }
     }
     /// The mods' haze in the fog (API 0.1.6): the fog closes in and takes the
     /// colour of the strongest.
@@ -1790,7 +2370,12 @@ impl Game<'_> {
             return;
         };
         fog.environmental_end *= 1.0 - h.density;
-        fog.color = horizon_client::rain::mix_fog(fog.color, [h.red, h.green, h.blue], h.amount);
+        // The haze takes the fog's colour: each part moves towards the
+        // haze's own, the fog's alpha stays.
+        let haze = [h.red, h.green, h.blue];
+        for (i, part) in fog.color.iter_mut().enumerate().take(3) {
+            *part += (haze[i] - *part) * h.amount;
+        }
     }
 }
 
@@ -1867,33 +2452,7 @@ impl Game<'_> {
         if !self.mods.mods.is_running() || !self.mods.mods.uses(Capability::Overlay) {
             return;
         }
-        // Upload the images the mods changed.
-        let textures: Vec<(String, Vec<horizon_mods::Texture>)> = self
-            .mods
-            .mods
-            .overlay_textures()
-            .into_iter()
-            .map(|(id, t)| (id.to_owned(), t.to_vec()))
-            .collect();
-        let atlas_height = self.gui.atlas.height;
-        for (mod_id, list) in &textures {
-            for t in list {
-                let Some(slot) = self.overlay_slot(mod_id, t.id) else {
-                    continue;
-                };
-                if self.mods.overlay_versions.get(&slot) == Some(&t.version) {
-                    continue;
-                }
-                self.mods.overlay_versions.insert(slot, t.version);
-                batch.patches.push(Patch {
-                    x: slot as u32 * MOD_TEXTURE_SIDE,
-                    y: atlas_height - MOD_TEXTURE_SIDE,
-                    width: t.width,
-                    height: t.height,
-                    rgba: t.pixels.clone(),
-                });
-            }
-        }
+        self.sync_mod_images(batch);
         let layers: Vec<(String, Vec<ScreenElement>)> = self
             .mods
             .mods
@@ -1905,19 +2464,68 @@ impl Game<'_> {
             self.draw_mod_elements_of(batch, Some(&mod_id), &elements);
         }
     }
+    /// The boxes the mods drew in the world as lines (API 0.1.23): the ones
+    /// behind blocks hidden by them first, those through blocks second.
+    pub(super) fn mod_world_boxes(
+        &self,
+    ) -> (
+        Vec<horizon_client::gizmos::Line>,
+        Vec<horizon_client::gizmos::Line>,
+    ) {
+        use horizon_client::gizmos::Line;
+        let (mut hidden, mut over) = (Vec::new(), Vec::new());
+        if !self.mods.mods.is_running() || !self.mods.mods.uses(Capability::Overlay) {
+            return (hidden, over);
+        }
+        for (_, elements) in self.mods.mods.overlay_world() {
+            for e in elements {
+                let horizon_mods::WorldElement::Box(b) = e else {
+                    continue;
+                };
+                let (x0, y0, z0) = (b.x - 0.5, b.y - 0.5, b.z - 0.5);
+                let (x1, y1, z1) = (b.x + 0.5, b.y + 0.5, b.z + 0.5);
+                let corners = |i: usize| {
+                    [
+                        if i & 1 == 0 { x0 } else { x1 },
+                        if i & 2 == 0 { y0 } else { y1 },
+                        if i & 4 == 0 { z0 } else { z1 },
+                    ]
+                };
+                let target = if b.through_blocks {
+                    &mut over
+                } else {
+                    &mut hidden
+                };
+                for a in 0..8usize {
+                    for bit in [1usize, 2, 4] {
+                        let c = a | bit;
+                        if c != a {
+                            target.push(Line {
+                                start: corners(a),
+                                end: corners(c),
+                                color: b.color,
+                                width: b.width.clamp(1.0, 8.0),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        (hidden, over)
+    }
     /// What the mods drew at points of the world (API 0.1.7).
     pub(super) fn draw_mod_world(&mut self, batch: &mut HudBatch) {
         if !self.mods.mods.is_running() || !self.mods.mods.uses(Capability::Overlay) {
             return;
         }
-        let worlds: Vec<horizon_mods::WorldElement> = self
+        let worlds: Vec<(String, horizon_mods::WorldElement)> = self
             .mods
             .mods
             .overlay_world()
             .into_iter()
-            .flat_map(|(_, e)| e.to_vec())
+            .flat_map(|(id, e)| e.iter().map(move |e| (id.to_owned(), e.clone())))
             .collect();
-        for e in worlds {
+        for (mod_id, e) in worlds {
             use horizon_mods::WorldElement as W;
             match e {
                 W::Label(l) => {
@@ -1952,6 +2560,48 @@ impl Game<'_> {
                         argb(s.tint),
                     );
                 }
+                W::Picture(p) => {
+                    let Some((x, y)) = self.project_to_gui(batch, [p.x, p.y, p.z]) else {
+                        continue;
+                    };
+                    let Some(slot) = self
+                        .mods
+                        .overlay_slots
+                        .get(&(mod_id.clone(), p.texture))
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    let Some(rect) = self
+                        .gui
+                        .atlas
+                        .sprites
+                        .get(&format!("horizon/mod-texture{slot}"))
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    let side = MOD_TEXTURE_SIDE as f32;
+                    let (du, dv) = (rect.u1 - rect.u0, rect.v1 - rect.v0);
+                    let part = horizon_client::hud::Rect {
+                        u0: rect.u0 + du * (p.u / side),
+                        v0: rect.v0 + dv * (p.v / side),
+                        u1: rect.u0 + du * ((p.u + p.u_width) / side),
+                        v1: rect.v0 + dv * ((p.v + p.v_height) / side),
+                        w: p.u_width.max(1.0) as u32,
+                        h: p.v_height.max(1.0) as u32,
+                    };
+                    batch.rect_uv(
+                        x - p.width / 2.0,
+                        y - p.height / 2.0 + p.offset_y,
+                        p.width,
+                        p.height,
+                        part,
+                        argb(p.tint),
+                    );
+                }
+                // Drawn as lines by `mod_world_boxes`.
+                W::Box(_) => {}
                 W::Fill(f) => {
                     let Some((x, y)) = self.project_to_gui(batch, [f.x, f.y, f.z]) else {
                         continue;
@@ -1994,14 +2644,26 @@ impl Game<'_> {
                 let key = format!("entity.{}", m.kind.id.replace(':', "."));
                 horizon_client::lang::get_or(&key, &m.kind.id)
             });
+            let player = self
+                .remote
+                .as_ref()
+                .and_then(|r| r.level_player(m.id as i32));
+            let (kind, name, uuid) = match player {
+                Some((uuid, profile)) => (
+                    EntityKind::Player,
+                    profile.unwrap_or(name),
+                    format!("{uuid:032x}"),
+                ),
+                None => (EntityKind::Mob, name, String::new()),
+            };
             found.push((
                 dist2(m.position),
                 WorldEntity {
                     id: m.id,
                     type_id: m.kind.id.clone(),
-                    kind: EntityKind::Mob,
+                    kind,
                     name,
-                    uuid: String::new(),
+                    uuid,
                     x: m.position.x,
                     y: m.position.y,
                     z: m.position.z,
@@ -2075,6 +2737,108 @@ impl Game<'_> {
                 },
             ));
         }
+        for (i, a) in self.creatures.projectiles.iter().enumerate() {
+            if !near(a.position) {
+                continue;
+            }
+            let (type_id, item) = projectile_type(&a.kind);
+            found.push((
+                dist2(a.position),
+                WorldEntity {
+                    id: tracked_or_synthetic(a.id, 0, i),
+                    type_id: type_id.into(),
+                    kind: EntityKind::Other,
+                    name: horizon_client::lang::get_or(
+                        &format!("entity.{}", type_id.replace(':', ".")),
+                        type_id,
+                    ),
+                    uuid: String::new(),
+                    x: a.position.x,
+                    y: a.position.y,
+                    z: a.position.z,
+                    yaw: a.yaw,
+                    height: 0.25,
+                    health: 0.0,
+                    max_health: 0.0,
+                    xp: 0,
+                    on_fire: matches!(
+                        a.kind,
+                        horizon_client::projectiles::ProjectileKind::SmallFireball
+                            | horizon_client::projectiles::ProjectileKind::LargeFireball { .. }
+                    ),
+                    hostile: false,
+                    held_item: item.map(str::to_owned),
+                    off_hand_item: None,
+                },
+            ));
+        }
+        for (i, t) in self.tnts.iter().enumerate() {
+            if !near(t.position) {
+                continue;
+            }
+            found.push((
+                dist2(t.position),
+                WorldEntity {
+                    id: tracked_or_synthetic(t.id, 1, i),
+                    type_id: "minecraft:tnt".into(),
+                    kind: EntityKind::Other,
+                    name: horizon_client::lang::get_or("entity.minecraft.tnt", "Primed TNT"),
+                    uuid: String::new(),
+                    x: t.position.x,
+                    y: t.position.y,
+                    z: t.position.z,
+                    yaw: 0.0,
+                    height: 0.98,
+                    health: 0.0,
+                    max_health: 0.0,
+                    xp: 0,
+                    on_fire: false,
+                    hostile: false,
+                    held_item: Some("minecraft:tnt".into()),
+                    off_hand_item: None,
+                },
+            ));
+        }
+        for f in &self.item_frames {
+            let at = horizon_core::geometry::Vec3::new(
+                f64::from(f.pos[0]) + 0.5,
+                f64::from(f.pos[1]) + 0.5,
+                f64::from(f.pos[2]) + 0.5,
+            );
+            if !near(at) {
+                continue;
+            }
+            let type_id = if f.glow {
+                "minecraft:glow_item_frame"
+            } else {
+                "minecraft:item_frame"
+            };
+            found.push((
+                dist2(at),
+                WorldEntity {
+                    id: f.id,
+                    type_id: type_id.into(),
+                    kind: EntityKind::Other,
+                    name: horizon_client::lang::get_or(
+                        &format!("entity.{}", type_id.replace(':', ".")),
+                        "Item Frame",
+                    ),
+                    uuid: String::new(),
+                    x: at.x,
+                    y: at.y,
+                    z: at.z,
+                    yaw: 0.0,
+                    height: 0.75,
+                    health: 0.0,
+                    max_health: 0.0,
+                    xp: 0,
+                    on_fire: false,
+                    hostile: false,
+                    held_item: f.item.as_ref().map(|s| s.item.to_string()),
+                    off_hand_item: None,
+                },
+            ));
+        }
         if !p.spectator {
             let feet = p.position;
             let held = |slot: usize| {
@@ -2124,6 +2888,215 @@ impl Game<'_> {
                 o.age = u32::MAX / 2;
             }
         }
+    }
+}
+
+/// The id of an entity the game does not track (0): a synthetic one above
+/// 2^31 from its kind of entity and its place in the list, valid for one tick.
+fn tracked_or_synthetic(id: u32, class: u32, index: usize) -> u32 {
+    if id != 0 {
+        id
+    } else {
+        0x8000_0000 | (class << 24) | (index as u32 & 0x00ff_ffff)
+    }
+}
+/// The type id of a projectile and the item it is drawn as.
+fn projectile_type(
+    kind: &horizon_client::projectiles::ProjectileKind,
+) -> (&'static str, Option<&'static str>) {
+    use horizon_client::projectiles::ProjectileKind as K;
+    match kind {
+        K::Arrow { .. } => ("minecraft:arrow", Some("minecraft:arrow")),
+        K::Snowball => ("minecraft:snowball", Some("minecraft:snowball")),
+        K::Egg => ("minecraft:egg", Some("minecraft:egg")),
+        K::EnderPearl => ("minecraft:ender_pearl", Some("minecraft:ender_pearl")),
+        K::SmallFireball => ("minecraft:small_fireball", Some("minecraft:fire_charge")),
+        K::LargeFireball { .. } => ("minecraft:fireball", Some("minecraft:fire_charge")),
+        K::LlamaSpit => ("minecraft:llama_spit", None),
+        K::WindCharge => ("minecraft:wind_charge", Some("minecraft:wind_charge")),
+        K::BreezeWindCharge => (
+            "minecraft:breeze_wind_charge",
+            Some("minecraft:wind_charge"),
+        ),
+        K::ShulkerBullet { .. } => ("minecraft:shulker_bullet", None),
+        K::WitherSkull { .. } => ("minecraft:wither_skull", None),
+        K::Potion { .. } => ("minecraft:splash_potion", Some("minecraft:splash_potion")),
+    }
+}
+/// `entity.get-detail` and `light-events` (API 0.1.20).
+impl Game<'_> {
+    /// The extra state of the mobs and primed TNT among `entities`, by id.
+    fn mod_entity_details(
+        &self,
+        entities: &[horizon_mods::WorldEntity],
+    ) -> std::collections::HashMap<u32, horizon_mods::EntityDetail> {
+        use horizon_mods::EntityDetail;
+        let mut out = std::collections::HashMap::new();
+        for e in entities {
+            if let Some(m) = self
+                .mobs
+                .iter()
+                .find(|m| m.id == e.id && e.id < 0x8000_0000)
+            {
+                let carried = m
+                    .extra
+                    .carried
+                    .map(|s| self.res.facts().get(s).name.to_string())
+                    .unwrap_or_default();
+                let cube = m.extra.size > 0;
+                out.insert(
+                    e.id,
+                    EntityDetail {
+                        swell: if m.kind.id == "minecraft:creeper" {
+                            (m.swell as f32 / 28.0).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        },
+                        glowing: m.glowing,
+                        in_water: m.was_eye_in_water,
+                        squish: if cube { m.anim.v[0].max(0.0) } else { 0.0 },
+                        dark_ticks: 0,
+                        carried_block: carried,
+                    },
+                );
+            }
+        }
+        for (i, t) in self.tnts.iter().enumerate() {
+            let id = tracked_or_synthetic(t.id, 1, i);
+            if entities.iter().any(|e| e.id == id) {
+                out.insert(
+                    id,
+                    EntityDetail {
+                        swell: (t.fuse as f32 / 80.0).clamp(0.0, 1.0),
+                        glowing: false,
+                        in_water: false,
+                        squish: 0.0,
+                        dark_ticks: 0,
+                        carried_block: String::new(),
+                    },
+                );
+            }
+        }
+        out
+    }
+    /// The faces (the 8 by 8 face with the hat over it) of the players
+    /// among `entities` whose skin was downloaded, by UUID.
+    fn mod_faces(
+        &mut self,
+        entities: &[horizon_mods::WorldEntity],
+    ) -> std::collections::HashMap<String, horizon_mods::Face> {
+        let mut out = std::collections::HashMap::new();
+        if !entities.iter().any(|e| !e.uuid.is_empty()) {
+            return out;
+        }
+        let Some((players, _, _)) = self.remote_tab_players() else {
+            return out;
+        };
+        for e in entities.iter().filter(|e| !e.uuid.is_empty()) {
+            let Ok(uuid) = u128::from_str_radix(&e.uuid, 16) else {
+                continue;
+            };
+            let Some(player) = players.iter().find(|p| p.uuid == uuid) else {
+                continue;
+            };
+            let Some(pixels) = self.skin_pixels.get(&player.skin) else {
+                continue;
+            };
+            if pixels.len() < 64 * 64 * 4 {
+                continue;
+            }
+            let mut face = vec![0u8; 8 * 8 * 4];
+            for y in 0..8usize {
+                for x in 0..8usize {
+                    let at = |sx: usize| ((8 + y) * 64 + sx + x) * 4;
+                    let (base, hat) = (at(8), at(40));
+                    let src = if pixels[hat + 3] > 0 { hat } else { base };
+                    face[(y * 8 + x) * 4..][..4].copy_from_slice(&pixels[src..src + 4]);
+                }
+            }
+            out.insert(
+                e.uuid.clone(),
+                horizon_mods::Face {
+                    width: 8,
+                    height: 8,
+                    rgba: face,
+                },
+            );
+        }
+        out
+    }
+    /// What shines in the world besides entities: standing beacon beams
+    /// and guardian beams within 128 blocks of the player, and the
+    /// fireflies and sonic booms spawned since the last call.
+    fn mod_flashes(&mut self) -> Vec<horizon_mods::LightFlash> {
+        use horizon_client::containers::BlockEntity;
+        use horizon_mods::LightFlash;
+        let Some(p) = self.player.as_ref() else {
+            return Vec::new();
+        };
+        let origin = p.position;
+        let within = |x: f64, y: f64, z: f64| {
+            let (dx, dy, dz) = (x - origin.x, y - origin.y, z - origin.z);
+            dx * dx + dy * dy + dz * dz <= 128.0 * 128.0
+        };
+        let mut out = Vec::new();
+        for (&(x, y, z), entity) in &self.world.block_entities {
+            let BlockEntity::Beacon(b) = entity else {
+                continue;
+            };
+            let height: i32 = b.sections.iter().map(|(_, h)| *h).sum();
+            let (fx, fy, fz) = (f64::from(x) + 0.5, f64::from(y) + 1.0, f64::from(z) + 0.5);
+            if height > 0 && within(fx, fy, fz) {
+                out.push(LightFlash {
+                    kind: "minecraft:beacon_beam".into(),
+                    x: fx,
+                    y: fy,
+                    z: fz,
+                    end_x: fx,
+                    end_y: fy + f64::from(height.min(1024)),
+                    end_z: fz,
+                    ticks: 2,
+                });
+            }
+        }
+        for m in &self.mobs {
+            if horizon_client::mobs::guardian::beam(m, 1.0).is_none()
+                || !within(m.position.x, m.position.y, m.position.z)
+            {
+                continue;
+            }
+            let Some(target) = self.beam_target(m.ai.target, 1.0) else {
+                continue;
+            };
+            out.push(LightFlash {
+                kind: "minecraft:guardian_beam".into(),
+                x: m.position.x,
+                y: m.position.y + m.eye_height(),
+                z: m.position.z,
+                end_x: target.x,
+                end_y: target.y,
+                end_z: target.z,
+                ticks: 2,
+            });
+        }
+        for (ty, at) in std::mem::take(&mut self.particles.lit) {
+            let kind = match ty {
+                horizon_client::particles::ParticleType::Firefly => "minecraft:firefly",
+                _ => "minecraft:sonic_boom",
+            };
+            out.push(LightFlash {
+                kind: kind.into(),
+                x: at[0],
+                y: at[1],
+                z: at[2],
+                end_x: at[0],
+                end_y: at[1],
+                end_z: at[2],
+                ticks: if kind == "minecraft:firefly" { 20 } else { 10 },
+            });
+        }
+        out.truncate(256);
+        out
     }
 }
 
@@ -2261,16 +3234,17 @@ impl Game<'_> {
     }
     /// Draws one mark at the slot's top left corner (x, y).
     fn draw_slot_mark(
-        &self,
+        &mut self,
         batch: &mut HudBatch,
         x: f32,
         y: f32,
+        mod_id: &str,
         shape: &horizon_mods::MarkShape,
     ) {
         use horizon_mods::MarkShape as M;
-        let atlas = &self.gui.atlas;
         match shape {
             M::Frame(f) => {
+                let atlas = &self.gui.atlas;
                 let c = argb(f.color);
                 batch.fill(atlas, x, y, 16.0, 1.0, c);
                 batch.fill(atlas, x, y + 15.0, 16.0, 1.0, c);
@@ -2279,9 +3253,97 @@ impl Game<'_> {
             }
             M::Dot(d) => {
                 let size = d.size.clamp(0.0, 16.0);
+                let atlas = &self.gui.atlas;
                 batch.fill(atlas, x + 15.0 - size, y + 1.0, size, size, argb(d.color));
             }
-            M::Fill(f) => batch.fill(atlas, x, y, 16.0, 16.0, argb(f.color)),
+            M::Fill(f) => batch.fill(&self.gui.atlas, x, y, 16.0, 16.0, argb(f.color)),
+            M::Square(q) => {
+                let size = q.size.clamp(0.0, 16.0);
+                batch.fill(&self.gui.atlas, x + q.x, y + q.y, size, size, argb(q.color));
+            }
+            M::Picture(p) => {
+                let Some(slot) = self
+                    .mods
+                    .overlay_slots
+                    .get(&(mod_id.to_owned(), p.texture))
+                    .copied()
+                else {
+                    return;
+                };
+                let Some(rect) = self
+                    .gui
+                    .atlas
+                    .sprites
+                    .get(&format!("horizon/mod-texture{slot}"))
+                    .copied()
+                else {
+                    return;
+                };
+                let size = self
+                    .mods
+                    .mods
+                    .overlay_textures()
+                    .into_iter()
+                    .find(|(id, _)| *id == mod_id)
+                    .and_then(|(_, t)| {
+                        t.iter()
+                            .find(|t| t.id == p.texture)
+                            .map(|t| (t.width, t.height))
+                    });
+                let Some((tw, th)) = size else {
+                    return;
+                };
+                let side = MOD_TEXTURE_SIDE as f32;
+                let (du, dv) = (rect.u1 - rect.u0, rect.v1 - rect.v0);
+                let part = horizon_client::hud::Rect {
+                    u0: rect.u0,
+                    v0: rect.v0,
+                    u1: rect.u0 + du * (tw as f32 / side),
+                    v1: rect.v0 + dv * (th as f32 / side),
+                    w: tw,
+                    h: th,
+                };
+                batch.rect_uv(x + p.x, y + p.y, p.width, p.height, part, argb(p.color));
+            }
+        }
+    }
+    /// The marks of the mods with the id of the mod that set them.
+    fn owned_marks(&self, hud: bool) -> Vec<(String, horizon_mods::Mark)> {
+        self.mods
+            .mods
+            .slot_marks_for(hud)
+            .into_iter()
+            .map(|(id, m)| (id.to_owned(), m.clone()))
+            .collect()
+    }
+    /// Uploads the images the mods changed (the store of `overlay` and of
+    /// the slot marks is the same) so `picture` marks can be drawn.
+    fn sync_mod_images(&mut self, batch: &mut HudBatch) {
+        let textures: Vec<(String, Vec<horizon_mods::Texture>)> = self
+            .mods
+            .mods
+            .overlay_textures()
+            .into_iter()
+            .map(|(id, t)| (id.to_owned(), t.to_vec()))
+            .collect();
+        let atlas_height = self.gui.atlas.height;
+        for (mod_id, list) in &textures {
+            for t in list {
+                let Some(slot) = self.overlay_slot(mod_id, t.id) else {
+                    continue;
+                };
+                if self.mods.overlay_versions.get(&slot) == Some(&t.version) {
+                    continue;
+                }
+                self.mods.overlay_versions.insert(slot, t.version);
+                batch.patches.push(Patch {
+                    x: slot as u32 * MOD_TEXTURE_SIDE,
+                    y: atlas_height - MOD_TEXTURE_SIDE,
+                    width: t.width,
+                    height: t.height,
+                    rgba: t.pixels.clone(),
+                });
+            }
         }
     }
     /// The mods' marks on the hotbar's slots of the HUD.
@@ -2289,12 +3351,13 @@ impl Game<'_> {
         if !self.mods.mods.uses(Capability::SlotDecorate) {
             return;
         }
+        self.sync_mod_images(batch);
         let center = w / 2;
-        for m in self.mods.mods.slot_marks() {
+        for (id, m) in self.owned_marks(true) {
             if m.slot < 9 {
                 let x = (center - 90 + m.slot as i32 * 20 + 2) as f32;
                 let y = (h - 16 - 3) as f32;
-                self.draw_slot_mark(batch, x, y, &m.shape);
+                self.draw_slot_mark(batch, x, y, &id, &m.shape);
             }
         }
     }
@@ -2303,12 +3366,13 @@ impl Game<'_> {
         if !self.mods.mods.uses(Capability::SlotDecorate) {
             return;
         }
+        self.sync_mod_images(batch);
         let shown = self.slots();
-        for m in self.mods.mods.slot_marks() {
+        for (id, m) in self.owned_marks(false) {
             let slot = m.slot as usize;
             if shown.contains(&slot) {
                 let (sx, sy) = self.slot_position(slot);
-                self.draw_slot_mark(batch, ox + sx, oy + sy, &m.shape);
+                self.draw_slot_mark(batch, ox + sx, oy + sy, &id, &m.shape);
             }
         }
     }
@@ -2317,10 +3381,11 @@ impl Game<'_> {
         if !self.mods.mods.uses(Capability::SlotDecorate) {
             return;
         }
-        for m in self.mods.mods.slot_marks() {
+        self.sync_mod_images(batch);
+        for (id, m) in self.owned_marks(false) {
             if m.slot < 9 {
                 let x = ox + 9.0 + m.slot as f32 * 18.0;
-                self.draw_slot_mark(batch, x, oy + 112.0, &m.shape);
+                self.draw_slot_mark(batch, x, oy + 112.0, &id, &m.shape);
             }
         }
     }
@@ -2372,10 +3437,68 @@ impl Game<'_> {
             .into_iter()
             .map(|(id, c)| (id.to_owned(), c.clone()))
             .collect();
+        let mut lines = self.stack_tooltip(stack);
+        let keys = self.mods.tooltip_keys.take();
+        let enchantments = |levels: &[(Arc<str>, u32)], stored: bool| -> Vec<_> {
+            levels
+                .iter()
+                .map(|(id, level)| horizon_mods::TooltipEnchantment {
+                    id: id.to_string(),
+                    level: *level,
+                    stored,
+                })
+                .collect()
+        };
+        let mut shown = enchantments(stack.stored_enchantments(), true);
+        shown.extend(enchantments(stack.enchantments(), false));
+        *self.mods.tooltip_enchantments.borrow_mut() = shown;
+        let hovered = hovered_stack(stack);
+        let own = self
+            .mods
+            .mods
+            .hovered_tooltip(&format!("{hovered:?}"))
+            .map(|(id, t)| (id.to_owned(), t.clone()));
+        *self.mods.tooltip_stack.borrow_mut() = Some(hovered);
+        let added = self.mods.mods.tooltip_lines();
+        // The mods' lines go in the text, right under the line of their key.
+        if !added.is_empty() {
+            let mut merged = Vec::with_capacity(lines.len() + added.len());
+            for (i, line) in lines.into_iter().enumerate() {
+                merged.push(line);
+                for under in keys.iter().filter(|(at, _)| *at == i).map(|(_, k)| k) {
+                    merged.extend(
+                        added
+                            .iter()
+                            .filter(|l| l.under == *under)
+                            .map(|l| (l.text.clone(), l.color)),
+                    );
+                }
+            }
+            merged.extend(
+                added
+                    .iter()
+                    .filter(|l| l.under.is_empty())
+                    .map(|l| (l.text.clone(), l.color)),
+            );
+            lines = merged;
+        }
+        let mut contents = contents;
+        if let Some((mod_id, t)) = own {
+            if let Some(own_lines) = t.lines {
+                lines = own_lines.into_iter().map(|l| (l.text, l.color)).collect();
+            }
+            contents.push((
+                mod_id,
+                horizon_mods::TooltipContent {
+                    width: t.width,
+                    height: t.height,
+                    elements: t.elements,
+                },
+            ));
+        }
         let (width, height) = contents.iter().fold((0.0f32, 0.0f32), |(w, h), (_, c)| {
             (w.max(c.width), h + c.height)
         });
-        let lines = self.stack_tooltip(stack);
         let (x, y) = self.cursor;
         if !contents.is_empty() {
             let Some((gx, mut gy)) = self.draw_tooltip_box(batch, &lines, x, y, (width, height))
@@ -2398,6 +3521,35 @@ impl Game<'_> {
             .tooltip_hovered
             .set(Some((item, self.mods.tooltip_frame.get())));
         true
+    }
+}
+/// A stack for `tooltip.get-hovered-stack`: its counts and the items of its
+/// container component (API 0.1.28).
+fn hovered_stack(stack: &horizon_client::items::ItemStack) -> horizon_mods::TooltipHoveredStack {
+    use horizon_mods::TooltipContainerItem;
+    let mut container = Vec::new();
+    if let Some(data) = stack.data().filter(|d| !d.container.is_empty()) {
+        let slots = data
+            .container
+            .iter()
+            .map(|(slot, _)| usize::from(*slot) + 1)
+            .max()
+            .unwrap_or(0)
+            .max(27);
+        container.resize(slots, None);
+        for (slot, item) in &data.container {
+            container[usize::from(*slot)] = Some(TooltipContainerItem {
+                id: item.item.to_string(),
+                count: item.count,
+                damage: item.damage,
+            });
+        }
+    }
+    horizon_mods::TooltipHoveredStack {
+        item: stack.item.to_string(),
+        count: stack.count,
+        damage: stack.damage,
+        container,
     }
 }
 /// An element moved by (dx, dy); none for the kinds that have their own place.

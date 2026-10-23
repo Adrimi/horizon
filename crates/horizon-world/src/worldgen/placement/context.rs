@@ -26,6 +26,20 @@ pub enum LayerBlock {
     Ground,
 }
 pub trait PlacementContext {
+    /// A named density function's value at a block position, in single
+    /// precision (`lithostitched:sample_density`).
+    fn sample_density(
+        &mut self,
+        _function: &str,
+        _position: [i32; 3],
+    ) -> Result<f32, PlacementQueryError> {
+        Err(PlacementQueryError::Unavailable)
+    }
+    /// A named noise's value at a point (`lithostitched:noise_slope`), in
+    /// single precision.
+    fn sample_noise(&mut self, _noise: &str, _point: [f64; 3]) -> Result<f32, PlacementQueryError> {
+        Err(PlacementQueryError::Unavailable)
+    }
     /// StructureTemplate.updateShapeAtEdge for one outer face of a placed
     /// voxel shape: update the state at `position` against its neighbor in
     /// `direction`, then the neighbor against the (possibly new) state, writing

@@ -35,7 +35,7 @@ naga = { version = "30.0.1", features = ["wgsl-in"] }
 horizon-shaderpack = { path = "../horizon-shaderpack" }
 # Sound (ALSA on Linux); the `audio` feature.
 cpal = { version = "0.16", optional = true }
-symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis"] }
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis", "wav", "pcm"] }
 miniz_oxide = "0.8"
 ab_glyph = "0.2.32"
 log = "0.4"

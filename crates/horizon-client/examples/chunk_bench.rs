@@ -8,7 +8,7 @@ use horizon_client::{
     assets::Assets,
     biome::Biomes,
     blocks::BlockFacts,
-    chunk::{Chunk, MIN_Y, SECTIONS},
+    chunk::{Chunk, MIN_Y, section_count},
     light::{LightTables, apply_lighting, light_chunk},
     mesher::{MeshTables, Mesher},
     models,
@@ -156,7 +156,7 @@ fn main() -> Result<()> {
                     std::array::from_fn(|dx| Some(at(x + dx as i32 - 1, z + dz as i32 - 1)))
                 });
                 let borrowed = horizon_client::mesher::borrow(&region);
-                for sy in 0..SECTIONS as i32 {
+                for sy in 0..section_count() as i32 {
                     let mesh = mesher.mesh(&borrowed, sy);
                     quads += (mesh.solid.len() + mesh.translucent.len()) / 4;
                     jobs += 1;

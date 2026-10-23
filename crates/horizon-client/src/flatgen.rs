@@ -40,7 +40,7 @@ impl FlatTerrain {
         let mut surface = None;
         for (i, &id) in layers
             .iter()
-            .take(crate::chunk::HEIGHT as usize)
+            .take(crate::chunk::height() as usize)
             .enumerate()
             .rev()
         {
@@ -73,7 +73,7 @@ impl FlatTerrain {
     }
     /// FlatLevelSource.getSpawnHeight: the top of the layers.
     pub fn spawn_height(&self) -> i32 {
-        crate::chunk::MIN_Y + self.layers.len().min(crate::chunk::HEIGHT as usize) as i32
+        crate::chunk::MIN_Y + self.layers.len().min(crate::chunk::height() as usize) as i32
     }
 }
 /// DimensionType.Y_SIZE: the most layers FlatLevelGeneratorSettings takes.

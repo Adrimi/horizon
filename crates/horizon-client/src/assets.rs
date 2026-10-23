@@ -96,8 +96,6 @@ pub struct RenderAssets {
     pub translucent_layers: Vec<bool>,
     /// Each layer's `MipmapGenerator` settings.
     pub sprite_mips: Vec<crate::mipmap::Settings>,
-    /// Connected-texture rules of the resource packs (`ctm`).
-    pub ctm: Arc<crate::ctm::Ctm>,
     /// The texture rules mods gave (`texture_rules`).
     pub mod_rules: Arc<crate::texture_rules::ModRules>,
 }
@@ -221,18 +219,6 @@ impl RenderAssets {
         for stage in 0..10 {
             sprites.insert(root, &format!("minecraft:block/destroy_stage_{stage}"))?;
         }
-        let ctm = crate::ctm::Ctm::load(root, registry, &mut sprites, |state| {
-            models
-                .catalog
-                .collect(state, horizon_core::position::BlockPos::new(0, 0, 0))
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .flat_map(|(_, model)| model.faces.iter().map(|f| f.layer))
-                        .collect()
-                })
-                .unwrap_or_default()
-        });
         let mod_rules = crate::texture_rules::ModRules::load(registry, &mut sprites, |state| {
             models
                 .catalog
@@ -261,7 +247,6 @@ impl RenderAssets {
             sprite_layers: sprites.layers,
             translucent_layers: sprites.translucent,
             sprite_mips: sprites.mips,
-            ctm: Arc::new(ctm),
             mod_rules: Arc::new(mod_rules),
         })
     }

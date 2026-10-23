@@ -261,7 +261,12 @@ impl Game<'_> {
                     }
                 }
                 // Text screens consume raw presses; releases follow key binds.
-                let typing = matches!(self.screen, Screen::Chat | Screen::Options);
+                // A mod's own screen takes every key, bound or not, as the
+                // keyboard hook does (API 0.1.4).
+                let typing = matches!(
+                    self.screen,
+                    Screen::Chat | Screen::Options | Screen::ModOwned
+                );
                 let key = if typing && arg(2)? != "up" {
                     key
                 } else {
@@ -290,6 +295,9 @@ impl Game<'_> {
                         // The mods' own key bindings (API 0.1.4).
                         self.mod_key(key, false, false);
                         self.mod_overlay_key(key, None, false);
+                        if self.screen == Screen::ModOwned {
+                            self.mod_screen_key(key, None, false);
+                        }
                     }
                     // The system's auto-repeat while the key is held.
                     "repeat" => {
@@ -303,6 +311,9 @@ impl Game<'_> {
                         self.physical_keys.remove(&physical);
                         self.mod_key(key, false, false);
                         self.mod_overlay_key(key, None, false);
+                        if self.screen == Screen::ModOwned {
+                            self.mod_screen_key(key, None, false);
+                        }
                         self.debug_key(physical, horizon_client::debug_keys::KeyAction::Release);
                     }
                     other => {
@@ -335,13 +346,32 @@ impl Game<'_> {
                         "down" => self.mod_overlay_mouse(button, true),
                         "up" => self.mod_overlay_mouse(button, false),
                         "click" => {
-                            self.mod_overlay_mouse(button, true) && self.mod_overlay_mouse(button, false)
+                            self.mod_overlay_mouse(button, true)
+                                && self.mod_overlay_mouse(button, false)
                         }
                         _ => false,
                     };
                     if taken {
                         return ok();
                     }
+                }
+                // A mod's own screen takes the mouse as the window does (API 0.1.4).
+                if self.screen == Screen::ModOwned {
+                    match arg(2)? {
+                        "down" => self.mod_screen_mouse(button, true),
+                        "up" => self.mod_screen_mouse(button, false),
+                        "click" => {
+                            self.mod_screen_mouse(button, true);
+                            self.mod_screen_mouse(button, false);
+                        }
+                        other => {
+                            return Err(format!(
+                                "mouse action must be down, up or click, not {other}"
+                            )
+                            .into());
+                        }
+                    }
+                    return ok();
                 }
                 if self.screen != Screen::Playing {
                     return Err(format!(
@@ -379,6 +409,9 @@ impl Game<'_> {
                 };
                 self.cursor = (number(1)?, number(2)?);
                 self.mod_overlay_move();
+                if self.screen == Screen::ModOwned {
+                    self.mod_screen_move();
+                }
                 ok()
             }
             "look" => {
@@ -542,12 +575,6 @@ impl Game<'_> {
                         self.recipe_text(Some(text), false)
                     }
                     Screen::Inventory if self.mod_overlay_typing() => self.mod_overlay_text(text),
-                    Screen::Inventory if self.item_browser_typing() && text == "\\b" => {
-                        self.item_browser_text(None, true)
-                    }
-                    Screen::Inventory if self.item_browser_typing() => {
-                        self.item_browser_text(Some(text), false)
-                    }
                     Screen::Creative if self.creative_screen.tab().search => {
                         // As typed: replaces a selected query, keeps the length limit.
                         self.creative_search_edit(Some(text), false)

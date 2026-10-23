@@ -6,7 +6,7 @@ use super::{Game, dispenser::entity_random};
 use horizon_client::{
     Result,
     assets::Properties,
-    chunk::{HEIGHT, MIN_Y},
+    chunk::{MIN_Y, height},
     collisions::{SceneCollisions, no_collision_or_liquid},
     world::World,
     world_spawn::{
@@ -34,7 +34,7 @@ impl SpawnLevel for Columns<'_, '_> {
         MIN_Y
     }
     fn height(&self, kind: HeightmapType, x: i32, z: i32) -> i32 {
-        (MIN_Y..MIN_Y + HEIGHT)
+        (MIN_Y..MIN_Y + height())
             .rev()
             .find(|&y| kind.is_opaque(self.properties.heightmap_state(self.world.block(x, y, z))))
             .map_or(MIN_Y, |y| y + 1)
@@ -195,7 +195,7 @@ impl Game<'_> {
     /// down onto the ground.
     fn fixup_spawn_height(&self, pos: [i32; 3]) -> Vec3 {
         let [x, mut y, z] = pos;
-        while !self.player_fits([x, y, z]) && y < MIN_Y + HEIGHT - 1 {
+        while !self.player_fits([x, y, z]) && y < MIN_Y + height() - 1 {
             y += 1;
         }
         y -= 1;

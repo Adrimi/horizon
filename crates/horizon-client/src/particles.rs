@@ -343,22 +343,6 @@ enum Light {
     /// `FireflyParticle.getLightCoords`: block light fading in and out, no sky.
     Firefly,
 }
-/// Horizon's particle rain: what a weather particle does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WeatherKind {
-    /// A drop of rain.
-    Drop,
-    /// A droplet of water thrown up by a splash.
-    Droplet,
-    /// A snowflake.
-    Flake,
-    /// A grain of sand.
-    Grain,
-    /// A ring spreading over the water.
-    Ripple,
-    /// A ring of splashed water on the ground.
-    Splash,
-}
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Behaviour {
     Base,
@@ -418,9 +402,6 @@ enum Behaviour {
         flow: bool,
         flow_scale: [f64; 2],
         swirl_period: f64,
-        /// Horizon's falling leaves: ticks the leaf lies where it lands
-        /// (vanilla's vanish at once, 0).
-        linger: u16,
     },
     FallingDust {
         rot_speed: f32,
@@ -465,12 +446,6 @@ enum Behaviour {
     },
     /// A mod's own particle (API 0.1.6).
     Mod(ModMotion),
-    /// Horizon's particle rain: a drop, a flake, a grain of sand or a ring.
-    Weather {
-        kind: WeatherKind,
-        /// The wind that carries the flake and the grain (blocks per tick).
-        wind: [f64; 2],
-    },
 }
 /// How a mod's particle fades.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,6 +484,15 @@ pub struct ModParticle {
     pub sway_period: u32,
     pub spin: f32,
     pub tumble: f32,
+    /// How the picture is turned: 0 faces the camera, 1 follows the
+    /// velocity, 2 copies the camera, 3 stands upright (API 0.1.22).
+    pub rotation: u8,
+    /// Share of its speed a colliding particle keeps bouncing up (API 0.1.30).
+    pub bounciness: f32,
+    /// Drawn solid, ignoring alpha and fade.
+    pub opaque: bool,
+    /// 0: perspective size; 1: constant size on the screen.
+    pub distance_scaling: f32,
 }
 /// Where a mod's colliding particle landed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -532,7 +516,11 @@ pub struct ModMotion {
     sway_period: u32,
     spin: f32,
     tumble: f32,
+    rotation: u8,
     alpha: f32,
+    bounciness: f32,
+    opaque: bool,
+    distance_scaling: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum DripStage {
@@ -1227,6 +1215,13 @@ pub struct ParticleEngine {
     /// When set, particles ask the level for other particles here instead
     /// (type, position, velocity), as the parity probe's stand-in level does.
     pub requested: Option<Vec<(ParticleOptions, [f64; 3], [f64; 3])>>,
+    /// Whether the spawns of the particles that shine (fireflies, sonic
+    /// booms) are noted in `lit` for the mods (`light-events`, API 0.1.20).
+    pub watch_light: bool,
+    pub lit: Vec<(ParticleType, [f64; 3])>,
+    /// The block ids the mods' colliding particles fly through
+    /// (`world.set-weather-passthrough`, API 0.1.25).
+    pub passthrough: std::collections::HashSet<String>,
     names: Vec<String>,
     rects: Vec<Option<Rect>>,
     atlas: HashMap<String, Rect>,
@@ -1249,117 +1244,6 @@ pub struct ParticleEngine {
 }
 /// `ParticleGroup.MAX_PARTICLES` (per render group; one group here).
 const MAX_PARTICLES: usize = 16384;
-/// Sprite of Horizon's falling leaves in the HUD atlas: a small leaf Horizon
-/// draws itself, rather than borrowing a vanilla particle texture.
-pub const HORIZON_LEAF_SPRITE: &str = "particle/horizon_leaf";
-/// Horizon's leaf texture edge (16x16): white with a rib, transparent outside
-/// the leaf. White so the particle's tint (the biome's foliage colour, or the
-/// block's own) sets the hue.
-pub fn horizon_leaf_texture() -> (u32, Vec<u8>) {
-    const SIDE: u32 = 16;
-    // The leaf's axis: from the stem (bottom left) to the tip (top right).
-    let (ax, ay) = (3.0f32, 12.5);
-    let (bx, by) = (12.5f32, 3.0);
-    let (dx, dy) = (bx - ax, by - ay);
-    let len2 = dx * dx + dy * dy;
-    let mut pixels = Vec::with_capacity((SIDE * SIDE * 4) as usize);
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Where the pixel sits along the leaf's axis, and how far from it.
-            let t = (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
-            let (qx, qy) = (ax + t * dx, ay + t * dy);
-            let d = ((px - qx).powi(2) + (py - qy).powi(2)).sqrt();
-            // The half width: narrow at the stem and at the pointed tip.
-            let w = (std::f32::consts::PI * t).sin().powf(0.8) * 3.6;
-            let alpha = ((w - d) * 2.0).clamp(0.0, 1.0);
-            // The rib down the middle is a shade darker.
-            let shade = if d < 0.5 { 205 } else { 255 };
-            pixels.extend_from_slice(&[shade, shade, shade, (alpha * 255.0).round() as u8]);
-        }
-    }
-    (SIDE, pixels)
-}
-/// Sprite of Horizon's rain drops in the HUD atlas: a thin streak Horizon
-/// draws itself.
-pub const HORIZON_RAIN_SPRITE: &str = "particle/horizon_rain";
-/// Sprite of Horizon's snowflakes.
-pub const HORIZON_SNOW_SPRITE: &str = "particle/horizon_snow";
-/// Sprite of Horizon's grains of sand.
-pub const HORIZON_SAND_SPRITE: &str = "particle/horizon_sand";
-/// Sprite of Horizon's rings: the ripple on the water, the splash on the
-/// ground.
-pub const HORIZON_RING_SPRITE: &str = "particle/horizon_ring";
-/// Horizon's rain drop texture (8x8): a thin streak that fades at both
-/// ends. White, so the light of the world tints it.
-pub fn horizon_rain_texture() -> (u32, Vec<u8>) {
-    const SIDE: u32 = 8;
-    // The alpha of the streak, row by row: soft at the ends.
-    const ALPHA: [u8; 8] = [40, 110, 200, 255, 255, 200, 110, 40];
-    let mut pixels = Vec::with_capacity((SIDE * SIDE * 4) as usize);
-    for row in 0..SIDE {
-        for x in 0..SIDE {
-            // The streak is three pixels wide, in the middle, its edges soft.
-            let a = match x {
-                2 | 4 => ALPHA[row as usize] / 2,
-                3 => ALPHA[row as usize],
-                _ => 0,
-            };
-            pixels.extend_from_slice(&[255, 255, 255, a]);
-        }
-    }
-    (SIDE, pixels)
-}
-/// Horizon's snowflake texture (8x8): a little six-armed star.
-pub fn horizon_snow_texture() -> (u32, Vec<u8>) {
-    const FLAKE: [&str; 8] = [
-        "...##...", "..####..", ".##..##.", "..####..", "...##...", "..#..#..", ".#....#.",
-        "........",
-    ];
-    const SIDE: u32 = 8;
-    let mut pixels = Vec::with_capacity((SIDE * SIDE * 4) as usize);
-    for row in FLAKE {
-        for c in row.bytes() {
-            if c == b'#' {
-                pixels.extend_from_slice(&[255, 255, 255, 255]);
-            } else {
-                pixels.extend_from_slice(&[255, 255, 255, 0]);
-            }
-        }
-    }
-    (SIDE, pixels)
-}
-/// Horizon's grain of sand texture (8x8): a little speck in the middle.
-pub fn horizon_sand_texture() -> (u32, Vec<u8>) {
-    const SIDE: u32 = 8;
-    let mut pixels = Vec::with_capacity((SIDE * SIDE * 4) as usize);
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            // A two by two speck, a quarter of the quad.
-            let on = (3..5).contains(&x) && (3..5).contains(&y);
-            pixels.extend_from_slice(&[255, 255, 255, if on { 255 } else { 0 }]);
-        }
-    }
-    (SIDE, pixels)
-}
-/// Horizon's ring texture (16x16): a thin circle, the ripple a drop leaves
-/// on the water and the splash it leaves on the ground.
-pub fn horizon_ring_texture() -> (u32, Vec<u8>) {
-    const SIDE: u32 = 16;
-    let mut pixels = Vec::with_capacity((SIDE * SIDE * 4) as usize);
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            // The distance from the middle of the texture.
-            let dx = f64::from(x) - 7.5;
-            let dy = f64::from(y) - 7.5;
-            let d = (dx * dx + dy * dy).sqrt();
-            // A ring of about a pixel and a half thick.
-            let a = if (d - 6.5).abs() < 0.75 { 255 } else { 0 };
-            pixels.extend_from_slice(&[255, 255, 255, a]);
-        }
-    }
-    (SIDE, pixels)
-}
 impl ParticleEngine {
     pub fn new(root: &Path, atlas: &HashMap<String, Rect>) -> Self {
         let mut engine = Self {
@@ -1370,6 +1254,9 @@ impl ParticleEngine {
             spell_random: LegacyRandom::new(0x7370_656c),
             seeds: LegacyRandom::new(0x7365_6564),
             requested: None,
+            watch_light: false,
+            lit: Vec::new(),
+            passthrough: std::collections::HashSet::new(),
             names: Vec::new(),
             rects: Vec::new(),
             atlas: atlas.clone(),
@@ -1461,22 +1348,39 @@ impl ParticleEngine {
     pub fn level_random(&mut self) -> &mut LegacyRandom {
         &mut self.level_random
     }
-    /// Horizon's falling leaves: a leaf that lies `linger` ticks where it
-    /// lands instead of vanishing, drawn with Horizon's own small leaf
-    /// texture ([`HORIZON_LEAF_SPRITE`]).
-    pub fn add_horizon_leaf(&mut self, options: &ParticleOptions, p: [f64; 3], linger: u16) {
-        let before = self.pending.len();
-        self.add(options, p, [0.0; 3]);
-        for q in &mut self.pending[before..] {
-            if let Behaviour::Leaves { linger: l, .. } = &mut q.behaviour {
-                *l = linger;
-                q.sprite = Sprite::Named(HORIZON_LEAF_SPRITE.into());
-            }
-        }
-    }
     /// Adds a picture of a mod's to the atlas under `name` (API 0.1.6).
     pub fn register_sprite(&mut self, name: &str, rect: Rect) {
         self.atlas.insert(name.to_owned(), rect);
+    }
+    /// The mods' living particles: picture number, place, speed and the
+    /// ticks they have left (`particles.get-particles`, API 0.1.25).
+    pub fn mod_particles(&self) -> Vec<(u32, [f64; 3], [f64; 3], u32)> {
+        self.particles
+            .iter()
+            .filter(|p| !p.removed)
+            .filter_map(|p| match p.behaviour {
+                Behaviour::Mod(m) => Some((
+                    m.sprite,
+                    p.position,
+                    p.velocity,
+                    (p.lifetime - p.age).max(0) as u32,
+                )),
+                _ => None,
+            })
+            .take(4096)
+            .collect()
+    }
+    /// Removes the mods' particles with `sprite` within a block of `at`
+    /// (`particles.remove`, API 0.1.26).
+    pub fn remove_mod(&mut self, sprite: u32, at: [f64; 3]) {
+        for p in self.particles.iter_mut() {
+            if let Behaviour::Mod(m) = p.behaviour
+                && m.sprite == sprite
+                && (0..3).all(|i| (p.position[i] - at[i]).abs() <= 1.0)
+            {
+                p.removed = true;
+            }
+        }
     }
     /// A particle of a mod's (API 0.1.6).
     pub fn add_mod(&mut self, m: &ModParticle) {
@@ -1506,136 +1410,13 @@ impl ParticleEngine {
             sway_period: m.sway_period.max(1),
             spin: m.spin,
             tumble: m.tumble,
+            rotation: m.rotation,
             alpha: m.rgba[3],
+            bounciness: m.bounciness,
+            opaque: m.opaque,
+            distance_scaling: m.distance_scaling,
         });
         self.pending.push(q);
-    }
-    /// Horizon's particle rain: a drop of rain, falling at the speed it is
-    /// given, drawn with Horizon's own streak.
-    pub fn add_rain_drop(&mut self, p: [f64; 3], v: [f64; 3]) {
-        let mut q = Particle::blank(ParticleType::Rain, p);
-        q.sprite = Sprite::Named(HORIZON_RAIN_SPRITE.into());
-        q.velocity = v;
-        q.size = 0.1;
-        q.lifetime = 60;
-        q.has_physics = false;
-        q.set_size(0.05, 0.05);
-        q.behaviour = Behaviour::Weather {
-            kind: WeatherKind::Drop,
-            wind: [0.0; 2],
-        };
-        self.pending.push(q);
-    }
-    /// Horizon's particle rain: a flake of snow, drifting down with the
-    /// wind.
-    pub fn add_snow_flake(&mut self, p: [f64; 3], v: [f64; 3]) {
-        let mut q = Particle::blank(ParticleType::Snowflake, p);
-        q.sprite = Sprite::Named(HORIZON_SNOW_SPRITE.into());
-        q.velocity = v;
-        q.size = 0.1;
-        q.lifetime = 200;
-        q.has_physics = false;
-        q.set_size(0.05, 0.05);
-        q.behaviour = Behaviour::Weather {
-            kind: WeatherKind::Flake,
-            wind: [v[0], v[2]],
-        };
-        self.pending.push(q);
-    }
-    /// Horizon's particle rain: a grain of sand, blown along by the wind and
-    /// coloured like the ground it blows over.
-    pub fn add_sand_grain(&mut self, p: [f64; 3], v: [f64; 3], color: [f32; 3]) {
-        let mut q = Particle::blank(ParticleType::FallingDust, p);
-        q.sprite = Sprite::Named(HORIZON_SAND_SPRITE.into());
-        q.velocity = v;
-        q.size = 0.07;
-        q.lifetime = 30;
-        q.gravity = 0.02;
-        q.has_physics = false;
-        q.set_size(0.05, 0.05);
-        q.rgba = [color[0], color[1], color[2], 1.0];
-        q.behaviour = Behaviour::Weather {
-            kind: WeatherKind::Grain,
-            wind: [v[0], v[2]],
-        };
-        self.pending.push(q);
-    }
-    /// Horizon's particle rain: the ring a drop leaves where it lands, on
-    /// the water (`WeatherKind::Ripple`) or on the ground
-    /// (`WeatherKind::Splash`).
-    pub fn add_rain_ring(
-        &mut self,
-        p: [f64; 3],
-        color: [f32; 3],
-        size: f32,
-        life: i32,
-        kind: WeatherKind,
-    ) {
-        let mut q = Particle::blank(ParticleType::Rain, p);
-        q.sprite = Sprite::Named(HORIZON_RING_SPRITE.into());
-        q.size = size;
-        q.lifetime = life;
-        q.has_physics = false;
-        q.size_curve = Size::Grow;
-        q.rgba = [color[0], color[1], color[2], 1.0];
-        q.behaviour = Behaviour::Weather {
-            kind,
-            wind: [0.0; 2],
-        };
-        self.pending.push(q);
-    }
-    /// Horizon's particle rain: a droplet of water thrown up by a splash.
-    pub fn add_splash_droplet(&mut self, p: [f64; 3], v: [f64; 3]) {
-        let mut q = Particle::blank(ParticleType::Splash, p);
-        q.sprite = Sprite::Named(HORIZON_RAIN_SPRITE.into());
-        q.velocity = v;
-        q.size = 0.05;
-        q.lifetime = 12;
-        q.gravity = 0.06;
-        q.has_physics = false;
-        q.set_size(0.03, 0.03);
-        q.behaviour = Behaviour::Weather {
-            kind: WeatherKind::Droplet,
-            wind: [0.0; 2],
-        };
-        self.pending.push(q);
-    }
-    /// Horizon's particle rain: where a drop lands. On the water a ring
-    /// spreads over the surface, on the ground a ring and a few droplets.
-    fn rain_splash(&mut self, level: &ParticleLevel, at: [f64; 3], block: [i32; 3], fluid: Fluid) {
-        let (y, color, size, life, kind) = if fluid != Fluid::None {
-            // The ring lies on the water.
-            let (_, height) = level.fluid(block);
-            (
-                [at[0], f64::from(block[1]) + height, at[2]],
-                [0.72, 0.82, 0.95],
-                0.5,
-                16,
-                WeatherKind::Ripple,
-            )
-        } else {
-            (
-                [at[0], f64::from(block[1]) + 1.0, at[2]],
-                [0.82, 0.88, 0.95],
-                0.3,
-                8,
-                WeatherKind::Splash,
-            )
-        };
-        self.add_rain_ring(y, color, size, life, kind);
-        // A few droplets are thrown up.
-        let mut speeds = [[0.0; 3]; 2];
-        for v in &mut speeds {
-            let r = &mut self.random;
-            *v = [
-                f64::from(r.next_float() - 0.5) * 0.12,
-                0.08 + f64::from(r.next_float()) * 0.08,
-                f64::from(r.next_float() - 0.5) * 0.12,
-            ];
-        }
-        for v in speeds {
-            self.add_splash_droplet(y, v);
-        }
     }
     /// `ClientLevel.addParticle`: dropped beyond 32 blocks of the camera unless
     /// the type overrides the limiter.
@@ -1648,6 +1429,12 @@ impl ParticleEngine {
         }
         if !options.ty.override_limiter() && d2 > 1024.0 {
             return;
+        }
+        if self.watch_light
+            && matches!(options.ty, ParticleType::Firefly | ParticleType::SonicBoom)
+            && self.lit.len() < 256
+        {
+            self.lit.push((options.ty, p));
         }
         self.create(options, p, v);
     }
@@ -2817,7 +2604,6 @@ impl ParticleEngine {
                     flow,
                     flow_scale,
                     swirl_period,
-                    linger: 0,
                 };
                 q
             }
@@ -3850,7 +3636,6 @@ impl ParticleEngine {
                 flow,
                 flow_scale,
                 swirl_period,
-                mut linger,
             } => {
                 p.previous = p.position;
                 let lifetime = p.lifetime;
@@ -3858,11 +3643,7 @@ impl ParticleEngine {
                 if lifetime <= 0 {
                     p.removed = true;
                 }
-                if !p.removed && linger > 0 && p.on_ground {
-                    // A landed leaf of Horizon's falling leaves lies still.
-                    p.o_roll = p.roll;
-                    p.removed = land_leaf(&mut linger);
-                } else if !p.removed {
+                if !p.removed {
                     let alive = (300 - p.lifetime) as f32;
                     let relative = (alive / 300.0).min(1.0);
                     let (mut xa, mut za) = (0.0f64, 0.0f64);
@@ -3882,9 +3663,7 @@ impl ParticleEngine {
                     p.o_roll = p.roll;
                     p.roll += rot_speed / 20.0;
                     p.move_by(level, p.velocity);
-                    if p.on_ground && linger > 0 {
-                        p.velocity = [0.0; 3];
-                    } else if p.on_ground
+                    if p.on_ground
                         || p.lifetime < 299 && (p.velocity[0] == 0.0 || p.velocity[2] == 0.0)
                     {
                         p.removed = true;
@@ -3904,7 +3683,6 @@ impl ParticleEngine {
                     flow,
                     flow_scale,
                     swirl_period,
-                    linger,
                 };
             }
             Behaviour::FallingDust { rot_speed } => {
@@ -4013,62 +3791,6 @@ impl ParticleEngine {
                 p.set_color(lerp(16), lerp(8), lerp(0));
                 p.rgba[3] = lerp(24);
             }
-            // Horizon's particle rain: the drop falls, the flake drifts, the
-            // grain is blown along, and the ring spreads and fades.
-            Behaviour::Weather { kind, wind } => {
-                p.previous = p.position;
-                let age = p.age;
-                p.age += 1;
-                if age >= p.lifetime {
-                    p.removed = true;
-                    return;
-                }
-                match kind {
-                    WeatherKind::Drop | WeatherKind::Droplet => {
-                        p.velocity[1] -= f64::from(p.gravity);
-                        p.move_by(level, p.velocity);
-                        let b = ParticleLevel::block_at(p.position);
-                        let f = level.facts.get(level.world.block(b[0], b[1], b[2]));
-                        if f.full_collision || f.fluid != Fluid::None {
-                            p.removed = true;
-                            if kind == WeatherKind::Drop {
-                                self.rain_splash(level, p.position, b, f.fluid);
-                            }
-                        } else if p.position[1] < f64::from(crate::chunk::MIN_Y) {
-                            p.removed = true;
-                        }
-                    }
-                    WeatherKind::Flake => {
-                        // The flake sways as it falls.
-                        let sway = (p.age as f64 * 0.3).sin() * 0.02;
-                        p.velocity[0] = wind[0] + sway;
-                        p.velocity[2] = wind[1] + sway * 0.6;
-                        p.velocity[1] = -0.07;
-                        p.move_by(level, p.velocity);
-                        let b = ParticleLevel::block_at(p.position);
-                        let f = level.facts.get(level.world.block(b[0], b[1], b[2]));
-                        if f.full_collision || f.fluid != Fluid::None {
-                            p.removed = true;
-                        }
-                    }
-                    WeatherKind::Grain => {
-                        // The wind carries the grain.
-                        p.velocity[0] += (wind[0] * 1.5 - p.velocity[0]) * 0.2;
-                        p.velocity[2] += (wind[1] * 1.5 - p.velocity[2]) * 0.2;
-                        p.velocity[1] -= f64::from(p.gravity);
-                        p.move_by(level, p.velocity);
-                        let b = ParticleLevel::block_at(p.position);
-                        let f = level.facts.get(level.world.block(b[0], b[1], b[2]));
-                        if f.full_collision {
-                            p.removed = true;
-                        }
-                    }
-                    WeatherKind::Ripple | WeatherKind::Splash => {
-                        // The ring spreads and fades.
-                        p.rgba[3] = 1.0 - p.age as f32 / p.lifetime as f32;
-                    }
-                }
-            }
             // A mod's own particle: gravity, wind and sway, a landing the mod
             // hears of, and a rest where it landed.
             Behaviour::Mod(mut m) => {
@@ -4110,13 +3832,24 @@ impl ParticleEngine {
                 if m.collide {
                     let b = ParticleLevel::block_at(p.position);
                     let f = level.facts.get(level.world.block(b[0], b[1], b[2]));
-                    if f.full_collision || f.fluid != Fluid::None {
+                    if (f.full_collision || f.fluid != Fluid::None)
+                        && !(self.passthrough.contains(&*f.name) && f.fluid == Fluid::None)
+                    {
                         let water = f.fluid != Fluid::None;
                         let y = if water {
                             f64::from(b[1]) + level.fluid(b).1
                         } else {
                             f64::from(b[1]) + 1.0
                         };
+                        if m.bounciness > 0.0 && !water && p.velocity[1] < -0.05 {
+                            // Back up with a share of the speed, a little slower sideways.
+                            p.position[1] = y + 0.01;
+                            p.velocity[1] = -p.velocity[1] * f64::from(m.bounciness);
+                            p.velocity[0] *= 0.8;
+                            p.velocity[2] *= 0.8;
+                            p.behaviour = Behaviour::Mod(m);
+                            return;
+                        }
                         self.mod_landings.push(ModLanding {
                             sprite: m.sprite,
                             position: [p.position[0], y, p.position[2]],
@@ -4204,6 +3937,7 @@ impl ParticleEngine {
                 p.previous[2] + (p.position[2] - p.previous[2]) * a,
             ) - camera;
             let center = pos.as_vec3();
+            let mut second: Option<Quat> = None;
             let mut rotation = if p.roll != 0.0 {
                 base * Quat::from_rotation_z(p.o_roll + (p.roll - p.o_roll) * partial)
             } else {
@@ -4213,14 +3947,70 @@ impl ParticleEngine {
             if let Behaviour::Mod(ModMotion {
                 tumble,
                 flat: false,
+                rotation: 0,
                 ..
             }) = p.behaviour
                 && tumble != 0.0
             {
                 rotation *= Quat::from_rotation_x(tumble * (p.age as f32 + partial));
             }
-            let size = p.quad_size(partial);
+            // A plant's two crossed quads (API 0.1.25).
+            if let Behaviour::Mod(ModMotion {
+                rotation: 4,
+                tumble,
+                ..
+            }) = p.behaviour
+            {
+                let turn = p.o_roll + (p.roll - p.o_roll) * partial;
+                let over = Quat::from_rotation_x(tumble * (p.age as f32 + partial));
+                let quarter = std::f32::consts::FRAC_PI_4;
+                rotation = Quat::from_rotation_y(turn + quarter) * over;
+                second = Some(Quat::from_rotation_y(turn - quarter) * over);
+            }
+            // A mod's particle with its own way of being turned (API 0.1.22).
+            if let Behaviour::Mod(ModMotion {
+                rotation: mode @ 1..=3,
+                flat: false,
+                ..
+            }) = p.behaviour
+            {
+                rotation = match mode {
+                    // The picture's up along the velocity as the camera sees it.
+                    1 => {
+                        let v = FVec3::new(
+                            p.velocity[0] as f32,
+                            p.velocity[1] as f32,
+                            p.velocity[2] as f32,
+                        );
+                        let seen = base.inverse() * v;
+                        if seen.x.abs() + seen.y.abs() < 1.0e-6 {
+                            base
+                        } else {
+                            base * Quat::from_rotation_z((-seen.x).atan2(seen.y))
+                        }
+                    }
+                    // The camera's own orientation.
+                    2 => base,
+                    // Upright, facing the camera about the vertical axis only.
+                    _ => {
+                        let toward = base * FVec3::Z;
+                        Quat::from_rotation_y(toward.x.atan2(toward.z))
+                    }
+                };
+            }
+            let mut size = p.quad_size(partial);
+            if let Behaviour::Mod(ModMotion {
+                distance_scaling, ..
+            }) = p.behaviour
+                && distance_scaling > 0.0
+            {
+                let distance = ((pos.length() as f32) / 8.0).clamp(0.25, 8.0);
+                size *= 1.0 + distance_scaling * (distance - 1.0);
+            }
             let mut alpha = p.rgba[3];
+            if let Behaviour::Mod(ModMotion { opaque: true, .. }) = p.behaviour {
+                alpha = 1.0;
+            }
             // OverlayParticle.extract: the flash fades as it pulses.
             if p.ty == ParticleType::Flash {
                 alpha = 0.6 - (p.age as f32 + partial - 1.0) * 0.25 * 0.5;
@@ -4228,7 +4018,7 @@ impl ParticleEngine {
             if let Behaviour::FlyTowards { alpha: la, .. } = p.behaviour {
                 alpha = lifetime_alpha(la, p.age, p.lifetime, partial);
             }
-            let mut rotations = [Some(rotation), None];
+            let mut rotations = [Some(rotation), second];
             let mut rgb = [p.rgba[0], p.rgba[1], p.rgba[2]];
             match p.behaviour {
                 // ShriekParticle.extract: two tilted quads, fading out.
@@ -4285,16 +4075,6 @@ impl ParticleEngine {
                         None,
                     ];
                 }
-                // Horizon's rain rings lie flat on the ground or the water.
-                Behaviour::Weather {
-                    kind: WeatherKind::Ripple | WeatherKind::Splash,
-                    ..
-                } => {
-                    rotations = [
-                        Some(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
-                        None,
-                    ];
-                }
                 _ => {}
             }
             let block = ParticleLevel::block_at(p.position);
@@ -4335,12 +4115,6 @@ impl ParticleEngine {
         }
     }
 }
-/// One tick of a leaf of Horizon's falling leaves lying on the ground:
-/// `linger` counts the ticks left, and true means it vanishes this tick.
-fn land_leaf(linger: &mut u16) -> bool {
-    *linger = linger.saturating_sub(1);
-    *linger == 0
-}
 /// `Particle.LifetimeAlpha.currentAlphaForAge`.
 fn lifetime_alpha(a: [f32; 4], age: i32, lifetime: i32, partial: f32) -> f32 {
     if (a[0] - a[1]).abs() < 1.0e-5 {
@@ -4353,162 +4127,6 @@ fn lifetime_alpha(a: [f32; 4], age: i32, lifetime: i32, partial: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_horizons_falling_leaves_linger() {
-        let mut engine = ParticleEngine::new(Path::new(""), &HashMap::new());
-        let leaf = ParticleOptions::colored(ParticleType::TintedLeaves, [0.4, 0.6, 0.3, 1.0]);
-        engine.add(&leaf, [0.5, 0.5, 0.5], [0.0; 3]);
-        engine.add_horizon_leaf(&leaf, [0.5, 0.5, 0.5], 60);
-        // Not a leaf: nothing to mark.
-        engine.add_horizon_leaf(&ParticleOptions::simple(ParticleType::Smoke), [0.5; 3], 60);
-        let linger = |p: &Particle| match p.behaviour {
-            Behaviour::Leaves { linger, .. } => Some(linger),
-            _ => None,
-        };
-        let lingers: Vec<_> = engine.pending.iter().map(linger).collect();
-        assert_eq!(lingers, [Some(0), Some(60), None]);
-        // A Horizon leaf falls as vanilla's does, slowly, and lives long
-        // enough to reach the ground.
-        assert_eq!(engine.pending[0].gravity, engine.pending[1].gravity);
-        assert!(engine.pending[1].gravity < 0.001);
-        assert_eq!(engine.pending[0].lifetime, 300);
-        assert_eq!(engine.pending[1].lifetime, 300);
-        // It is drawn with Horizon's own texture; vanilla's leaf is not.
-        match &engine.pending[1].sprite {
-            Sprite::Named(name) => assert_eq!(name, HORIZON_LEAF_SPRITE),
-            Sprite::Index(_) => panic!("Horizon's leaf kept a vanilla sprite"),
-        }
-        assert!(matches!(engine.pending[0].sprite, Sprite::Index(_)));
-    }
-
-    #[test]
-    fn a_landed_leaf_lies_sixty_ticks_then_vanishes() {
-        let mut linger = 60u16;
-        for tick in 1..60 {
-            assert!(!land_leaf(&mut linger), "tick {tick}");
-            assert_eq!(linger, 60 - tick);
-        }
-        assert!(land_leaf(&mut linger));
-        // Vanilla's leaf (0) never lies; it must not underflow either.
-        let mut vanilla = 0;
-        assert!(land_leaf(&mut vanilla));
-    }
-
-    #[test]
-    fn the_leaf_texture_is_a_small_white_leaf() {
-        let (side, pixels) = horizon_leaf_texture();
-        assert_eq!(side, 16);
-        assert_eq!(pixels.len(), 16 * 16 * 4);
-        let opaque = pixels.chunks_exact(4).filter(|p| p[3] == 255).count();
-        // Leaf-shaped, not a square: some pixels are clear.
-        assert!(opaque > 40 && opaque < 100, "{opaque} opaque pixels");
-        assert!(pixels.chunks_exact(4).filter(|p| p[3] == 0).count() > 100);
-        // White or the darker rib, never a colour: the tint sets the hue.
-        assert!(
-            pixels
-                .chunks_exact(4)
-                .filter(|p| p[3] > 0)
-                .all(|p| p[0] == p[1] && p[1] == p[2] && p[0] >= 200)
-        );
-        // The leaf lies on the diagonal: both of its ends are drawn.
-        let at = |x: usize, y: usize| pixels[(y * 16 + x) * 4 + 3] > 0;
-        assert!(at(12, 3) && at(3, 12));
-    }
-
-    #[test]
-    fn the_weather_textures_are_horizons_own() {
-        // A rain drop: a thin streak, soft at both ends.
-        let (side, pixels) = horizon_rain_texture();
-        assert_eq!(side, 8);
-        assert_eq!(pixels.len(), 8 * 8 * 4);
-        let streak: Vec<_> = pixels.chunks_exact(4).filter(|p| p[3] > 0).collect();
-        // Two pixels wide, in the middle of the texture.
-        assert!(streak.iter().all(|p| p[3] == 255 || p[3] < 255));
-        assert!(
-            streak
-                .iter()
-                .all(|p| p[0] == 255 && p[1] == 255 && p[2] == 255)
-        );
-        let columns: Vec<u8> = streak.iter().map(|p| p[3]).collect();
-        assert!(columns.iter().all(|a| *a > 0));
-        // The ends fade, the middle does not.
-        let column = |y: usize| pixels[(y * 8 + 3) * 4 + 3];
-        assert!(column(0) < column(3));
-        assert!(column(7) < column(3));
-        assert_eq!(column(3), 255);
-        // A snowflake: a little star, not a square.
-        let (side, pixels) = horizon_snow_texture();
-        assert_eq!(side, 8);
-        assert_eq!(pixels.len(), 8 * 8 * 4);
-        let opaque = pixels.chunks_exact(4).filter(|p| p[3] == 255).count();
-        assert!(opaque > 8 && opaque < 40, "{opaque} opaque pixels");
-        assert!(pixels.chunks_exact(4).any(|p| p[3] == 0));
-        // A grain of sand: a speck in the middle.
-        let (side, pixels) = horizon_sand_texture();
-        assert_eq!(side, 8);
-        assert_eq!(pixels.len(), 8 * 8 * 4);
-        let opaque = pixels.chunks_exact(4).filter(|p| p[3] == 255).count();
-        assert_eq!(opaque, 4);
-        // A ring: a circle, with the middle of it clear.
-        let (side, pixels) = horizon_ring_texture();
-        assert_eq!(side, 16);
-        assert_eq!(pixels.len(), 16 * 16 * 4);
-        let middle = 7 * 16 * 4 + 7 * 4;
-        assert_eq!(pixels[middle + 3], 0);
-        // The ring itself, a little left of the middle.
-        let edge = 7 * 16 * 4 + 1 * 4;
-        assert_eq!(pixels[edge + 3], 255);
-    }
-
-    #[test]
-    fn the_weather_particles_are_their_own_kind() {
-        let mut engine = ParticleEngine::new(Path::new(""), &HashMap::new());
-        engine.add_rain_drop([0.5; 3], [0.0, -0.5, 0.0]);
-        engine.add_snow_flake([0.5; 3], [0.1, -0.05, 0.1]);
-        engine.add_sand_grain([0.5; 3], [0.5, 0.0, 0.5], [0.8, 0.7, 0.5]);
-        engine.add_rain_ring([0.5; 3], [0.7, 0.8, 0.9], 0.4, 12, WeatherKind::Ripple);
-        let kinds: Vec<WeatherKind> = engine
-            .pending
-            .iter()
-            .map(|p| match p.behaviour {
-                Behaviour::Weather { kind, .. } => kind,
-                _ => panic!("a weather particle is not one"),
-            })
-            .collect();
-        assert_eq!(
-            kinds,
-            [
-                WeatherKind::Drop,
-                WeatherKind::Flake,
-                WeatherKind::Grain,
-                WeatherKind::Ripple
-            ]
-        );
-        // Each is drawn with Horizon's own texture.
-        let sprites: Vec<String> = engine
-            .pending
-            .iter()
-            .map(|p| match &p.sprite {
-                Sprite::Named(name) => name.clone(),
-                Sprite::Index(_) => panic!("a weather particle kept a vanilla sprite"),
-            })
-            .collect();
-        assert_eq!(
-            sprites,
-            [
-                HORIZON_RAIN_SPRITE,
-                HORIZON_SNOW_SPRITE,
-                HORIZON_SAND_SPRITE,
-                HORIZON_RING_SPRITE
-            ]
-        );
-        // The grain takes the colour of the ground, the ring its own.
-        assert_eq!(engine.pending[2].rgba, [0.8, 0.7, 0.5, 1.0]);
-        assert_eq!(engine.pending[3].rgba, [0.7, 0.8, 0.9, 1.0]);
-        // A ring spreads as it fades.
-        assert_eq!(engine.pending[3].size_curve, Size::Grow);
-    }
 
     #[test]
     fn egg_teleport_unpacks_offsets_and_preserves_seeded_draw_order() {

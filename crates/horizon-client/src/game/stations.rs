@@ -1332,6 +1332,7 @@ impl Game<'_> {
         let (ox, oy) = self.inventory_origin(batch);
         let local = (self.cursor.0 - ox, self.cursor.1 - oy);
         let mut tooltip: Option<Vec<(String, u32)>> = None;
+        let mut stack_tip: Option<ItemStack> = None;
         {
             let atlas = &self.gui.atlas;
             batch.fill(
@@ -1807,7 +1808,7 @@ impl Game<'_> {
                             );
                             self.draw_item(batch, &result, ox + x, oy + y);
                             if hover {
-                                tooltip = Some(self.stack_tooltip(&result));
+                                stack_tip = Some(result.clone());
                             }
                         }
                     }
@@ -1834,15 +1835,18 @@ impl Game<'_> {
             );
             if self.carried.is_none()
                 && tooltip.is_none()
+                && stack_tip.is_none()
                 && let Some(stack) = self.slot_mut(slot).clone()
             {
-                tooltip = Some(self.stack_tooltip(&stack));
+                stack_tip = Some(stack);
             }
         }
         if self.carried.is_some() {
             self.draw_carried(batch);
         } else if let Some(lines) = tooltip {
             self.draw_tooltip_lines(batch, &lines, self.cursor.0, self.cursor.1);
+        } else if let Some(stack) = stack_tip {
+            self.draw_stack_tooltip(batch, &stack);
         }
         true
     }
@@ -1867,11 +1871,11 @@ impl Game<'_> {
     /// `ItemStack.getTooltipLines` subset: name in rarity colour, potion
     /// effects, enchantments (gray, curses red), stored enchantments, trims.
     pub(super) fn stack_tooltip(&self, stack: &ItemStack) -> Vec<(String, u32)> {
-        self.stack_tooltip_with(stack, false)
+        self.stack_tooltip_with(stack)
     }
     /// `stack_tooltip`; `preview` leaves out the container lines that the
     /// shulker box preview grid replaces.
-    fn stack_tooltip_with(&self, stack: &ItemStack, preview: bool) -> Vec<(String, u32)> {
+    fn stack_tooltip_with(&self, stack: &ItemStack) -> Vec<(String, u32)> {
         let e: &Enchantments = &self.res.stations().enchantments;
         let props = e.props(&stack.item);
         let rarity = horizon_client::item_tooltip::rarity(
@@ -1910,7 +1914,7 @@ impl Game<'_> {
             s.custom_name()
                 .map_or_else(|| self.pack.names.item(&s.item), str::to_owned)
         };
-        if display.shows("minecraft:container") && !preview {
+        if display.shows("minecraft:container") {
             for line in
                 horizon_client::item_tooltip::container_lines(stack, &hover_name, &translate)
             {
@@ -1959,10 +1963,12 @@ impl Game<'_> {
             lines.push((format!(" {p}"), rgba(170, 170, 170, 255)));
             lines.push((format!(" {m}"), rgba(170, 170, 170, 255)));
         }
-        // Horizon's enchantment descriptions extra adds a dark gray line under each.
-        let described = self.settings.extras.enchant_descriptions;
+        let keys = &self.mods.tooltip_keys;
+        keys.borrow_mut().clear();
         let enchantment_lines = |levels: &[(Arc<str>, u32)], lines: &mut Vec<(String, u32)>| {
             for (id, text, curse) in e.tooltip_entries(levels) {
+                keys.borrow_mut()
+                    .push((lines.len(), format!("enchantment.{}", id.replace(':', "."))));
                 lines.push((
                     text,
                     if curse {
@@ -1971,11 +1977,6 @@ impl Game<'_> {
                         rgba(170, 170, 170, 255)
                     },
                 ));
-                if described
-                    && let Some(about) = horizon_client::enchant_descriptions::description(&id)
-                {
-                    lines.push((format!(" {about}"), rgba(85, 85, 85, 255)));
-                }
             }
         };
         if display.shows("minecraft:stored_enchantments") {
@@ -2148,7 +2149,9 @@ impl Game<'_> {
         if y + h + 3.0 > batch.height {
             y = batch.height - h - 3.0;
         }
-        self.mods.tooltip_frame.set([x - 4.0, y - 4.0, w + 8.0, h + 8.0]);
+        self.mods
+            .tooltip_frame
+            .set([x - 4.0, y - 4.0, w + 8.0, h + 8.0]);
         y = y.max(4.0);
         batch.fill(atlas, x - 3.0, y - 4.0, w + 6.0, 1.0, rgba(16, 0, 16, 240));
         batch.fill(
@@ -2192,38 +2195,14 @@ impl Game<'_> {
         }
         Some((x, y + text_h + 2.0))
     }
-    /// A stack's tooltip; with the shulker box preview extra, a shulker box
-    /// shows its slots as a 9x3 grid of items instead of the item list.
+    /// A stack's tooltip (what mods add to it included).
     pub(super) fn draw_stack_tooltip(&mut self, batch: &mut HudBatch, stack: &ItemStack) {
-        let (x, y) = self.cursor;
         if self.draw_mod_tooltip(batch, stack) {
             return;
         }
-        let slots = horizon_client::shulker_preview::grid(stack)
-            .filter(|_| self.settings.extras.shulker_preview);
-        let Some(slots) = slots else {
-            let lines = self.stack_tooltip(stack);
-            self.draw_tooltip_lines(batch, &lines, x, y);
-            return;
-        };
-        let lines = self.stack_tooltip_with(stack, true);
-        let size = horizon_client::shulker_preview::SIZE;
-        let Some((gx, gy)) = self.draw_tooltip_box(batch, &lines, x, y, size) else {
-            return;
-        };
-        let (light, dark) = horizon_client::shulker_preview::colors(&stack.item);
-        let atlas = &self.gui.atlas;
-        batch.fill(atlas, gx, gy, size.0, size.1, dark);
-        for i in 0..27 {
-            let (sx, sy) = horizon_client::shulker_preview::slot_origin(i);
-            batch.fill(atlas, gx + sx + 1.0, gy + sy + 1.0, 16.0, 16.0, light);
-        }
-        for (i, item) in slots.into_iter().enumerate() {
-            if let Some(item) = item {
-                let (sx, sy) = horizon_client::shulker_preview::slot_origin(i);
-                self.draw_item(batch, &item, gx + sx + 1.0, gy + sy + 1.0);
-            }
-        }
+        let (x, y) = self.cursor;
+        let lines = self.stack_tooltip(stack);
+        self.draw_tooltip_lines(batch, &lines, x, y);
     }
     /// Hovered-slot tooltip on the plain inventory, crafting and container screens.
     pub(super) fn draw_slot_tooltip(&mut self, batch: &mut HudBatch) {

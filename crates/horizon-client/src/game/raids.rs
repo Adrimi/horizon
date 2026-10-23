@@ -212,7 +212,11 @@ impl Game<'_> {
     /// `Heightmap.Types.WORLD_SURFACE`: the first free block above the
     /// highest non-air one.
     pub(super) fn surface_height(&self, x: i32, z: i32) -> i32 {
-        let top = if self.dim == Dim::Nether { 127 } else { 319 };
+        let top = if self.dim == Dim::Nether {
+            127
+        } else {
+            horizon_client::chunk::MIN_Y + horizon_client::chunk::height() - 1
+        };
         (horizon_client::chunk::MIN_Y..=top)
             .rev()
             .find(|&y| !self.res.facts().is_air(self.world.block(x, y, z)))

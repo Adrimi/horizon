@@ -145,9 +145,51 @@ fn build(release: bool) -> Result<PathBuf, String> {
     let path = dir.join(format!("{}.hmod", manifest.id));
     // Write then rename, so a running game never reads half a file.
     let partial = path.with_extension("hmod.partial");
-    std::fs::write(&partial, Package::write(&manifest_text, &wasm)?).map_err(|e| e.to_string())?;
+    // The crate's `sounds/*.ogg` and `*.wav` go into the `.hmod` for `audio.register-file`.
+    let mut sounds = Vec::new();
+    if let Ok(dir) = std::fs::read_dir("sounds") {
+        for e in dir.flatten() {
+            let file = e.file_name().to_string_lossy().into_owned();
+            if file.ends_with(".ogg") || file.ends_with(".wav") {
+                let bytes = std::fs::read(e.path()).map_err(|e| format!("sounds/{file}: {e}"))?;
+                sounds.push((format!("sounds/{file}"), bytes));
+            }
+        }
+    }
+    // A mod with capability registries (api 0.2) carries `assets/` and
+    // `data/` too: lang files, textures, tags.
+    for top in ["assets", "data"] {
+        pack_folder(Path::new(top), top, &mut sounds)?;
+    }
+    sounds.sort();
+    let files: Vec<(&str, &[u8])> = sounds
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let packed = Package::write_files(&manifest_text, Some(&wasm), &files)?;
+    std::fs::write(&partial, packed).map_err(|e| e.to_string())?;
     std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Adds the files under `dir` to `out` as `prefix/...`.
+fn pack_folder(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for e in read.flatten() {
+        let name = format!("{prefix}/{}", e.file_name().to_string_lossy());
+        let path = e.path();
+        if path.is_dir() {
+            pack_folder(&path, &name, out)?;
+        } else {
+            out.push((
+                name.clone(),
+                std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn run(args: &[String]) -> Result<(), String> {

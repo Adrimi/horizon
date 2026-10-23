@@ -694,8 +694,7 @@ impl Mesher<'_> {
             [center.x, center.z, base_y],
         );
         let info = &self.tables.info;
-        // Connected textures (an extra): only with resource packs that have them.
-        let ctm = Some(&*self.render.ctm).filter(|c| !c.is_empty() && crate::ctm::enabled());
+        // Connected textures: the rules the mods gave (API 0.1.14).
         let mod_rules = Some(&*self.render.mod_rules).filter(|r| !r.is_empty());
         for y in 0..16 {
             for z in 0..16 {
@@ -770,26 +769,16 @@ impl Mesher<'_> {
                             if face.quad.cull.is_some_and(|d| !visible[d as usize]) {
                                 continue;
                             }
-                            let mut tile = ctm.map_or(crate::ctm::Resolved::Keep, |c| {
-                                c.resolve(
-                                    id,
-                                    face.layer,
-                                    Direction::ALL[face.quad.facing as usize],
-                                    [world.x, world.y, world.z],
-                                    |[dx, dy, dz]| pad.blocks[pi(x + dx, y + dy, z + dz)],
-                                )
-                            });
-                            if tile == crate::ctm::Resolved::Keep
-                                && let Some(rules) = mod_rules
-                            {
-                                tile = rules.resolve(
-                                    id,
-                                    face.layer,
-                                    Direction::ALL[face.quad.facing as usize],
-                                    [world.x, world.y, world.z],
-                                    |[dx, dy, dz]| pad.blocks[pi(x + dx, y + dy, z + dz)],
-                                );
-                            }
+                            let tile =
+                                mod_rules.map_or(crate::texture_rules::Resolved::Keep, |rules| {
+                                    rules.resolve(
+                                        id,
+                                        face.layer,
+                                        Direction::ALL[face.quad.facing as usize],
+                                        [world.x, world.y, world.z],
+                                        |[dx, dy, dz]| pad.blocks[pi(x + dx, y + dy, z + dz)],
+                                    )
+                                });
                             self.face(
                                 &pad,
                                 &mut tints,
@@ -839,7 +828,7 @@ impl Mesher<'_> {
         face: &BakedFace,
         ao: bool,
         state: &Info,
-        tile: crate::ctm::Resolved,
+        tile: crate::texture_rules::Resolved,
     ) {
         let q = &face.quad;
         let shade_face = q.shade_direction_override.unwrap_or(q.facing);
@@ -873,7 +862,7 @@ impl Mesher<'_> {
             }
         };
         let layer = match tile {
-            crate::ctm::Resolved::Layer(l) => l,
+            crate::texture_rules::Resolved::Layer(l) => l,
             _ => face.layer as u16,
         };
         let vertices: [TerrainVertex; 4] = std::array::from_fn(|i| {
@@ -891,7 +880,7 @@ impl Mesher<'_> {
                 pack_coords(lighting::with_emission(coords[i], q.light_emission)),
             )
         });
-        if let crate::ctm::Resolved::Quarters(tiles) = tile
+        if let crate::texture_rules::Resolved::Quarters(tiles) = tile
             && let Some(quarters) = quarters(&vertices, tiles.map(flags))
         {
             target.extend(quarters);

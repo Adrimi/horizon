@@ -57,6 +57,9 @@ pub fn constant(key: &str) -> f32 {
         // The noodle caves and their strength.
         "noodle_enabled" => 1.0,
         "noodle_additive" => -0.075,
+        // Whether the underground rivers get their lanterns and their ice.
+        "river_lanterns" => 1.0,
+        "river_ice" => 0.0,
         _ => 0.0,
     }
 }
@@ -106,6 +109,59 @@ pub fn noise_state(key: &str) -> Option<NoiseState> {
     Some(state)
 }
 
+/// A mod's own values for the configuration (`worldgen/config.json` of a
+/// world generation root, from the mod's `data/<namespace>/worldgen_config.json`):
+/// `{"constants": {"key": number or boolean}, "noises": {"key": {"scale", "multiplier",
+/// "offset"}}}`. What it does not name keeps the defaults above.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorldgenConfig {
+    constants: std::collections::BTreeMap<String, f32>,
+    noises: std::collections::BTreeMap<String, NoiseState>,
+}
+impl WorldgenConfig {
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        let doc: serde_json::Value = serde_json::from_str(json)?;
+        let mut config = Self::default();
+        let number = |v: &serde_json::Value| match v {
+            serde_json::Value::Bool(b) => Some(f32::from(u8::from(*b))),
+            other => other.as_f64().map(|n| n as f32),
+        };
+        for (key, value) in doc["constants"].as_object().into_iter().flatten() {
+            if let Some(n) = number(value) {
+                config.constants.insert(key.clone(), n);
+            }
+        }
+        for (key, value) in doc["noises"].as_object().into_iter().flatten() {
+            let base = noise_state(key).unwrap_or(NoiseState {
+                scale: 1.0,
+                multiplier: 1.0,
+                offset: 0.0,
+            });
+            let field = |name: &str, default: f32| number(&value[name]).unwrap_or(default);
+            config.noises.insert(
+                key.clone(),
+                NoiseState {
+                    scale: field("scale", base.scale),
+                    multiplier: field("multiplier", base.multiplier),
+                    offset: field("offset", base.offset),
+                },
+            );
+        }
+        Ok(config)
+    }
+    /// The number for `key`: the file's, else the mod's default.
+    pub fn constant(&self, key: &str) -> f32 {
+        self.constants
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| constant(key))
+    }
+    /// The scale of the noise `key`: the file's, else the mod's default.
+    pub fn noise_state(&self, key: &str) -> Option<NoiseState> {
+        self.noises.get(key).copied().or_else(|| noise_state(key))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +194,19 @@ mod tests {
             })
         );
         assert_eq!(noise_state("no_such_noise"), None);
+    }
+    #[test]
+    fn a_mods_file_overrides_the_defaults_it_names() {
+        let config = WorldgenConfig::from_json(
+            r#"{"constants": {"vertical_scale": 1.2, "river_ice": true},
+                "noises": {"continents": {"scale": 0.2}}}"#,
+        )
+        .unwrap();
+        assert_eq!(config.constant("vertical_scale"), 1.2);
+        assert_eq!(config.constant("river_ice"), 1.0);
+        assert_eq!(config.constant("ocean_offset"), -0.8);
+        let continents = config.noise_state("continents").unwrap();
+        assert_eq!((continents.scale, continents.multiplier), (0.2, 1.0));
+        assert_eq!(config.noise_state("erosion"), noise_state("erosion"));
     }
 }

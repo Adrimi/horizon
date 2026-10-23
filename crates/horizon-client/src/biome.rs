@@ -81,6 +81,16 @@ fn sample(map: &[u32], temperature: f32, downfall: f32, fallback: u32) -> u32 {
 /// Every `*.json` under `dir`, as (`<namespace>:<relative path without
 /// .json>`, path). Overlay roots link vanilla's files, so links are followed.
 fn biome_files(dir: &Path, namespace: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
+    biome_files_under(dir, dir, namespace, out);
+}
+/// The biome files under `dir`, named by their path from `base`
+/// (`cave/deep_caves.json` is `<namespace>:cave/deep_caves`).
+fn biome_files_under(
+    base: &Path,
+    dir: &Path,
+    namespace: &str,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) {
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
@@ -90,9 +100,9 @@ fn biome_files(dir: &Path, namespace: &str, out: &mut Vec<(String, std::path::Pa
             continue;
         };
         if meta.is_dir() {
-            biome_files(&path, namespace, out);
+            biome_files_under(base, &path, namespace, out);
         } else if meta.is_file() && path.extension().is_some_and(|e| e == "json") {
-            let rel = match path.strip_prefix(dir).ok().and_then(|p| p.to_str()) {
+            let rel = match path.strip_prefix(base).ok().and_then(|p| p.to_str()) {
                 Some(rel) => match rel.strip_suffix(".json") {
                     Some(rel) => rel,
                     None => continue,

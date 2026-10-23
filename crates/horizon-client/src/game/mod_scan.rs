@@ -4,7 +4,7 @@
 //! blocks itself.
 use horizon_client::{
     blocks::{BlockFacts, Fluid},
-    chunk::{Chunk, MIN_Y, SECTIONS},
+    chunk::{Chunk, MIN_Y, section_count},
 };
 
 /// Water's and lava's map colours (`MapColor.WATER`, `MapColor.FIRE`).
@@ -71,7 +71,7 @@ pub struct Columns {
 
 /// The highest block of a chunk worth scanning from.
 fn top_of(chunk: &Chunk, air: u32) -> i32 {
-    (0..SECTIONS)
+    (0..section_count())
         .rev()
         .find(|&s| {
             chunk

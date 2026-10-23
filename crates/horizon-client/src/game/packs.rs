@@ -177,7 +177,12 @@ impl Game<'_> {
         self.mods.mods.set_resource_root(Some(root.to_path_buf()));
         let context = pack.context.clone();
         self.pack = pack;
+        self.mods.mods.set_sprite_source(Some(Self::sprite_source(
+            self.pack.render.clone(),
+            self.mod_gui_sprites(),
+        )));
         self.gui = gui;
+        self.mods.atlas_resend = 180;
         horizon_client::ui_theme::reset_atlas();
         // Villager hats come from the pack's texture metadata (shared data, swapped in place).
         *self

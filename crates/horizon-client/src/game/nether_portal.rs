@@ -580,13 +580,13 @@ impl Game<'_> {
         reach: horizon_core::geometry::Aabb,
         sections: &mut horizon_client::portal_sections::PortalSections,
     ) -> bool {
-        use horizon_client::chunk::{MIN_Y, SECTIONS};
+        use horizon_client::chunk::{MIN_Y, section_count};
         let (min, max) = (reach.min_position(), reach.max_position());
         if !min.is_finite() || !max.is_finite() {
             return true;
         }
         let (min, max) = (BlockPos::containing(min), BlockPos::containing(max));
-        let top = SECTIONS as i32 - 1;
+        let top = section_count() as i32 - 1;
         let (x0, x1) = (min.x >> 4, max.x >> 4);
         let (z0, z1) = (min.z >> 4, max.z >> 4);
         let (y0, y1) = (
@@ -599,21 +599,20 @@ impl Game<'_> {
         if count > 64 {
             return true;
         }
-        let mut y_mask = 0u32;
-        for sy in y0..=y1 {
-            y_mask |= 1 << sy;
-        }
+        let y_range = y0 as usize..=y1 as usize;
         let behaviours = self.res.behaviours();
         let chunks = &self.world.chunks;
         (x0..=x1).any(|cx| {
             (z0..=z1).any(|cz| {
                 chunks.get(&(cx, cz)).is_some_and(|chunk| {
-                    sections.get((cx, cz), chunk, |v| {
-                        behaviours
-                            .portal_axis(horizon_world::registry::BlockStateId(v))
-                            .is_some()
-                    }) & y_mask
-                        != 0
+                    sections
+                        .get((cx, cz), chunk, |v| {
+                            behaviours
+                                .portal_axis(horizon_world::registry::BlockStateId(v))
+                                .is_some()
+                        })
+                        .iter()
+                        .any(|i| y_range.contains(&i))
                 })
             })
         })

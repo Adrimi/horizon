@@ -19,7 +19,7 @@ use horizon_mods::content::{Block, Content, Rarity};
 use horizon_world::nbt::{self, JavaString, Limits, Tag};
 use serde::{Deserialize, Serialize, de};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -704,6 +704,19 @@ const WORLDGEN_BUNDLES: [(&str, &str); 15] = [
 /// quantized tables the biome source uses.
 const PARAMETER_LIST: &str = "data/minecraft/worldgen/multi_noise_biome_source_parameter_list/";
 
+/// A mod's file `data/<ns>/<kind>...<path>.json` in a namespace it owns
+/// (not vanilla's): the namespace and the path. `kind` starts with a slash.
+fn own_namespace_file<'a>(
+    content: &Content,
+    file: &'a str,
+    kind: &str,
+) -> Option<(&'a str, &'a str)> {
+    let (ns, path) = file.strip_prefix("data/")?.split_once(kind)?;
+    let path = path.strip_suffix(".json")?;
+    (ns != "minecraft" && !ns.contains('/') && content.namespaces.iter().any(|n| n == ns))
+        .then_some((ns, path))
+}
+
 /// A mod file that adds to a worldgen bundle: (bundle, id).
 fn worldgen_entry(file: &str) -> Option<(&'static str, String)> {
     let (ns, rest) = file.strip_prefix("data/")?.split_once("/worldgen/")?;
@@ -713,6 +726,12 @@ fn worldgen_entry(file: &str) -> Option<(&'static str, String)> {
         return None;
     }
     let (kind, path) = rest.split_once('/')?;
+    // 26.3 calls the configured features' folder `feature`.
+    let kind = if kind == "feature" {
+        "configured_feature"
+    } else {
+        kind
+    };
     let (_, bundle) = WORLDGEN_BUNDLES.iter().find(|(k, _)| *k == kind)?;
     Some((bundle, format!("{ns}:{}", path.strip_suffix(".json")?)))
 }
@@ -810,6 +829,9 @@ impl Overlay<'_> {
             return Ok(());
         };
         for entry in read.flatten() {
+            if rel.as_os_str().is_empty() && entry.file_name() == TYPES_DIR {
+                continue;
+            }
             let rel = rel.join(entry.file_name());
             link(&self.base.join(&rel), &self.out.join(&rel))?;
         }
@@ -1062,12 +1084,21 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     let mut warnings = Vec::new();
     let mut worldgen: BTreeMap<&str, Vec<(String, String)>> = BTreeMap::new();
     let mut additions: BTreeMap<&str, Vec<Addition>> = BTreeMap::new();
-    // A worldgen-override mod's Overworld: its dimension definition (type and
-    // generator) and its multi-noise parameter list.
-    let mut dimensions: BTreeMap<String, J> = BTreeMap::new();
-    let mut parameter_lists: BTreeMap<String, J> = BTreeMap::new();
+    // What each worldgen-override mod replaces of vanilla's world generation:
+    // it is a world type of its own (docs/mods.md), and vanilla's stays whole.
+    let mut types: BTreeMap<String, TypeData> = BTreeMap::new();
+    // The mods' own dimension types and biome parameter lists, which every
+    // world reads (a world type's preset names them).
+    let mut own_dimension_types: BTreeMap<String, String> = BTreeMap::new();
+    // Wolf variants the mods give (`wolf_variant`), read by the mobs.
+    let mut wolf_variants: BTreeMap<String, String> = BTreeMap::new();
+    // Lithostitched's worldgen modifiers of each mod and the values of its
+    // worldgen configuration (`worldgen_config.json`), applied after the files.
+    let mut modifier_files: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut configs: BTreeMap<String, String> = BTreeMap::new();
     for m in mods {
         let declarations = format!("data/{}/horizon/", m.id);
+        let typed = m.content.worldgen_overrides;
         for file in &m.content.files {
             let bytes = m.content.file(file)?;
             let is_tag = file.starts_with("data/") && file.contains("/tags/");
@@ -1088,7 +1119,22 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                 // The dimension the world preset names (the Overworld), as
                 // vanilla's own `dimension/overworld.json` overrides it.
                 let doc: J = serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
-                dimensions.insert(format!("minecraft:{path}"), doc);
+                types
+                    .entry(m.id.clone())
+                    .or_default()
+                    .dimensions
+                    .insert(format!("minecraft:{path}"), doc);
+            } else if let Some(path) = file
+                .strip_prefix("data/minecraft/dimension_type/")
+                .and_then(|p| p.strip_suffix(".json"))
+            {
+                // Read by the generator for the build range (`min_y`, `height`).
+                let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
+                types
+                    .entry(m.id.clone())
+                    .or_default()
+                    .dimension_types
+                    .insert(format!("minecraft:{path}"), text);
             } else if let Some(path) = file
                 .strip_prefix(PARAMETER_LIST)
                 .and_then(|p| p.strip_suffix(".json"))
@@ -1100,22 +1146,91 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                     .get("biomes")
                     .or_else(|| doc.get("lithostitched:biomes"));
                 if let Some(list) = list {
-                    parameter_lists.insert(
-                        format!("minecraft:{path}"),
-                        J::Obj(vec![("biomes".into(), list.clone())]),
-                    );
+                    types
+                        .entry(m.id.clone())
+                        .or_default()
+                        .parameter_lists
+                        .insert(
+                            format!("minecraft:{path}"),
+                            J::Obj(vec![("biomes".into(), list.clone())]),
+                        );
                 }
-            } else if !file.starts_with(&declarations) {
+            } else if file
+                .strip_prefix("data/")
+                .and_then(|r| r.split_once("/lithostitched/worldgen_modifier/"))
+                .is_some_and(|(ns, _)| m.content.namespaces.iter().any(|n| n == ns))
+                && file.ends_with(".json")
+            {
+                let doc: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
+                modifier_files.push((m.id.clone(), doc));
+            } else if file
+                .strip_prefix("data/")
+                .and_then(|r| r.split_once('/'))
+                .is_some_and(|(ns, rest)| {
+                    rest == "worldgen_config.json" && m.content.namespaces.iter().any(|n| n == ns)
+                })
+            {
+                configs.insert(
+                    m.id.clone(),
+                    String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?,
+                );
+            } else if let Some((ns, path)) = file
+                .strip_prefix("data/")
+                .and_then(|r| r.split_once("/wolf_variant/"))
+                .and_then(|(ns, p)| Some((ns, p.strip_suffix(".json")?)))
+                .filter(|(ns, p)| !ns.contains('/') && !p.contains('/'))
+            {
+                let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
+                wolf_variants.insert(format!("{ns}:{path}"), text);
+            } else if let Some((ns, path)) =
+                own_namespace_file(&m.content, file, "/dimension_type/")
+            {
+                let text = String::from_utf8(bytes.clone()).map_err(|e| format!("{file}: {e}"))?;
+                own_dimension_types.insert(format!("{ns}:{path}"), text);
                 overlay.write(file, &bytes)?;
-                if let Some((bundle, id)) = worldgen_entry(file) {
+            } else if let Some((ns, path)) = own_namespace_file(
+                &m.content,
+                file,
+                "/worldgen/multi_noise_biome_source_parameter_list/",
+            ) {
+                let doc: J = serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
+                let list = doc
+                    .get("biomes")
+                    .or_else(|| doc.get("lithostitched:biomes"));
+                if let Some(list) = list {
+                    overlay.write(
+                        &format!("worldgen/biome_parameters/{ns}/{path}.json"),
+                        &serde_json::to_vec(&J::Obj(vec![("biomes".into(), list.clone())]))?,
+                    )?;
+                }
+                overlay.write(file, &bytes)?;
+            } else if !file.starts_with(&declarations) {
+                let entry = worldgen_entry(file);
+                // A world type's replacement of vanilla's entry stays out of
+                // the root every world reads (it is written into the type's).
+                let replaces = typed
+                    && entry
+                        .as_ref()
+                        .is_some_and(|(_, id)| id.starts_with("minecraft:"));
+                if !replaces {
+                    overlay.write(file, &bytes)?;
+                }
+                if let Some((bundle, id)) = entry {
                     // A worldgen mod's file under vanilla's namespace replaces
                     // vanilla's (the fence in horizon-mods lets only one that
                     // declares `worldgen_overrides` do that).
                     let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
-                    let entries = worldgen.entry(bundle).or_default();
                     match Addition::read(bundle, &text).map_err(|e| format!("{file}: {e}"))? {
                         Some(addition) => additions.entry(bundle).or_default().push(addition),
-                        None => entries.push((id, text)),
+                        None if replaces => types
+                            .entry(m.id.clone())
+                            .or_default()
+                            .worldgen
+                            .entry(bundle)
+                            .or_default()
+                            .push((id, text)),
+                        None => worldgen.entry(bundle).or_default().push((id, text)),
                     }
                 } else if let Some(template) = file
                     .strip_prefix("data/")
@@ -1218,73 +1333,57 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
         }
         overlay.write(bundle, &serde_json::to_vec(&doc)?)?;
     }
-    // A worldgen mod's multi-noise parameter list replaces the Overworld's
-    // biome distribution: the worldgen loader reads the quantized tables the
-    // biome source uses from `worldgen/biome_parameters/<name>.json`.
-    for (id, doc) in &parameter_lists {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        overlay.write(
-            &format!("worldgen/biome_parameters/{name}.json"),
-            &serde_json::to_vec(doc)?,
-        )?;
+    // Worldgen configuration and Lithostitched's modifiers: a world type's mod
+    // keeps them in its own root, any other mod's apply to every world.
+    let typed_of = |id: &str| {
+        mods.iter()
+            .any(|m| m.id == id && m.content.worldgen_overrides)
+    };
+    let mut main_modifiers: Vec<AddFeatures> = Vec::new();
+    let mut main_config: Option<String> = None;
+    for (id, text) in &configs {
+        if typed_of(id) {
+            types.entry(id.clone()).or_default().config = Some(text.clone());
+        } else {
+            main_config = Some(text.clone());
+        }
     }
-    // A worldgen mod's dimension definition replaces the world preset's entry
-    // for it: the game reads dimensions from `worldgen/world_presets`, not
-    // from `dimension/` files (26.3 has none). Its type and generator carry
-    // over; the rest of the file is its loader's (conditions and the like).
-    if !dimensions.is_empty() {
-        let written = out.join("worldgen/world_presets.json");
-        let source = match written.exists() {
-            true => written,
-            false => base.join("worldgen/world_presets.json"),
+    for (id, doc) in &modifier_files {
+        let config = match configs.get(id) {
+            Some(text) => horizon_world::worldgen::tectonic::WorldgenConfig::from_json(text)
+                .map_err(|e| format!("{id}: worldgen_config.json: {e}"))?,
+            None => Default::default(),
         };
-        if source.exists() {
-            let mut doc = read_json(&source)?;
-            let names: Vec<String> = match &doc {
-                J::Obj(o) => o.iter().map(|(k, _)| k.clone()).collect(),
-                _ => Vec::new(),
-            };
-            let mut changed = false;
-            for name in names {
-                let Some(J::Str(text)) = doc.get(&name) else {
-                    continue;
-                };
-                let mut preset: J = serde_json::from_str(text)?;
-                let mut overridden = false;
-                for (id, dimension) in &dimensions {
-                    let Some(entry) = preset.at(&format!("dimensions/{id}")) else {
-                        continue;
-                    };
-                    for key in ["type", "generator"] {
-                        if let Some(value) = dimension.get(key) {
-                            entry.set(key, value.clone());
-                            overridden = true;
-                        }
-                    }
-                    // A dimension file may hold the biome list itself; the
-                    // parameter list holds the same list, and the biome
-                    // source reads the quantized tables, so it takes over.
-                    if let Some(generator) = entry.get_mut("generator") {
-                        let inline = generator
-                            .get("biome_source")
-                            .is_some_and(|s| s.get("biomes").is_some());
-                        if inline && parameter_lists.contains_key(id) {
-                            let source = J::Obj(vec![
-                                ("type".into(), J::Str("minecraft:multi_noise".into())),
-                                ("preset".into(), J::Str(id.clone())),
-                            ]);
-                            generator.set("biome_source", source);
-                        }
-                    }
-                }
-                if overridden {
-                    doc.set(&name, J::Str(serde_json::to_string(&preset)?));
-                    changed = true;
-                }
-            }
-            if changed {
-                overlay.write("worldgen/world_presets.json", &serde_json::to_vec(&doc)?)?;
-            }
+        match AddFeatures::read(doc, &config) {
+            Ok(Some(modifier)) => match typed_of(id) {
+                true => types
+                    .entry(id.clone())
+                    .or_default()
+                    .modifiers
+                    .push(modifier),
+                false => main_modifiers.push(modifier),
+            },
+            Ok(None) => {}
+            Err(why) => warnings.push(format!(
+                "mod {id}: a worldgen modifier is not applied: {why}"
+            )),
+        }
+    }
+    if let Some(text) = &main_config {
+        overlay.write("worldgen/config.json", text.as_bytes())?;
+    }
+    if !main_modifiers.is_empty() {
+        let biomes = out.join("worldgen/biomes.json");
+        let biomes = if biomes.exists() {
+            biomes
+        } else {
+            base.join("worldgen/biomes.json")
+        };
+        if biomes.exists() {
+            let mut doc = read_json(&biomes)?;
+            let tags = read_biome_tags(out, base);
+            apply_add_features(&mut doc, &tags, &main_modifiers)?;
+            overlay.write("worldgen/biomes.json", &serde_json::to_vec(&doc)?)?;
         }
     }
     // The registries the commands check ids against: a mod's biomes and
@@ -1361,7 +1460,510 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     namespaces.sort();
     overlay.write(MARKER, &serde_json::to_vec(&namespaces)?)?;
     overlay.write(WARNINGS, warnings.join("\n").as_bytes())?;
+    if !wolf_variants.is_empty() {
+        overlay.write("wolf-variants.json", &serde_json::to_vec(&wolf_variants)?)?;
+    }
+    if !own_dimension_types.is_empty() {
+        overlay.write(
+            "worldgen/dimension_types.json",
+            &serde_json::to_vec(&own_dimension_types)?,
+        )?;
+    }
+    // The world types: the mods' world generation, one root each.
+    let mut listed = Vec::new();
+    let mut declared_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for m in mods {
+        let data = types.get(&m.id).filter(|d| !d.is_empty());
+        let declared: Vec<String> = m
+            .content
+            .files
+            .iter()
+            .filter_map(|f| {
+                let (ns, rest) = f
+                    .strip_prefix("data/")?
+                    .split_once("/worldgen/world_preset/")?;
+                let path = rest.strip_suffix(".json")?;
+                (m.content.namespaces.iter().any(|n| n == ns) && !path.contains('/'))
+                    .then(|| format!("{ns}:{path}"))
+            })
+            .collect();
+        if data.is_none() && declared.is_empty() {
+            continue;
+        }
+        declared_by.insert(m.id.clone(), declared.clone());
+        let dir = match data {
+            Some(_) => format!("{TYPES_DIR}/{}", m.id),
+            None => String::new(),
+        };
+        // The mod's replacements are a type of their own, the Overworld's
+        // normal preset with them; each preset it declares is another.
+        let mut presets = Vec::new();
+        if data.is_some() {
+            presets.push((
+                m.id.clone(),
+                "minecraft:normal".to_owned(),
+                m.content.name.clone(),
+            ));
+        }
+        for p in declared {
+            // A preset whose noise settings lack what 26.3 needs (as some
+            // 1.21 packs') does not load in the game either: it is not offered.
+            if !preset_is_usable(m, &p, out) {
+                warnings.push(format!(
+                    "mod {}: world preset {p} is not offered: its noise settings are not valid for 26.3",
+                    m.id
+                ));
+                continue;
+            }
+            let path = p.split_once(':').map_or(p.as_str(), |(_, path)| path);
+            let words: Vec<String> = path
+                .split('_')
+                .map(|w| {
+                    let mut c = w.chars();
+                    c.next()
+                        .map(|f| f.to_uppercase().chain(c).collect())
+                        .unwrap_or_default()
+                })
+                .collect();
+            let name = format!("{}: {}", m.content.name, words.join(" "));
+            presets.push((p.clone(), p, name));
+        }
+        for (id, preset, name) in presets {
+            listed.push(WorldType {
+                id,
+                name,
+                mod_id: m.id.clone(),
+                preset,
+                dir: dir.clone(),
+            });
+        }
+    }
+    overlay.write(WORLD_TYPES, &serde_json::to_vec(&listed)?)?;
+    for m in mods {
+        if let Some(data) = types.get(&m.id).filter(|d| !d.is_empty()) {
+            data.write_root(
+                base,
+                out,
+                &m.id,
+                &own_dimension_types,
+                declared_by.get(&m.id).map_or(&[][..], Vec::as_slice),
+            )
+            .map_err(|e| format!("world type {}: {e}", m.id))?;
+        }
+    }
     Ok(warnings)
+}
+
+/// Whether the Overworld noise settings a mod's preset names have a
+/// `material_rule` naming a rule, as 26.3's noise settings need.
+fn preset_is_usable(m: &ContentMod, preset: &str, out: &Path) -> bool {
+    let Some((ns, name)) = preset.split_once(':') else {
+        return true;
+    };
+    let file = format!("data/{ns}/worldgen/world_preset/{name}.json");
+    let Ok(doc) = m
+        .content
+        .file(&file)
+        .map_err(|_| ())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).map_err(|_| ()))
+    else {
+        return true;
+    };
+    let Some(settings) = doc["dimensions"]["minecraft:overworld"]["generator"]["settings"].as_str()
+    else {
+        return true;
+    };
+    let Ok(J::Obj(bundle)) = read_json(&out.join("worldgen/settings.json")) else {
+        return true;
+    };
+    bundle
+        .iter()
+        .find(|(id, _)| id == settings)
+        .is_none_or(|(_, text)| {
+            matches!(text, J::Str(t) if serde_json::from_str::<serde_json::Value>(t)
+                .is_ok_and(|v| v["material_rule"].is_string()))
+        })
+}
+
+/// Where a root built by [`build`] keeps the roots of its world types.
+const TYPES_DIR: &str = "horizon-types";
+/// In a root built by [`build`]: its world types.
+const WORLD_TYPES: &str = "horizon-world-types.json";
+
+/// A world type: what the Create World screen offers beside Default and
+/// Superflat. A mod with `worldgen_overrides` has one (its replacements of
+/// vanilla's world generation); a mod's own `world_preset` is one too.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldType {
+    /// What the world's settings name it by.
+    pub id: String,
+    /// What the button says.
+    pub name: String,
+    /// The mod that adds it.
+    pub mod_id: String,
+    /// The world preset its dimensions are read from.
+    pub preset: String,
+    /// The root its world generation is read from, under the content root
+    /// (empty: the content root itself).
+    pub dir: String,
+}
+
+static WORLD_TYPE_LIST: std::sync::OnceLock<Vec<WorldType>> = std::sync::OnceLock::new();
+
+/// The world types of the content root in use, read once at start.
+pub fn init_world_types(root: &Path) {
+    let list = fs::read(root.join(WORLD_TYPES))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<WorldType>>(&b).ok())
+        .map(|mut list| {
+            for t in &mut list {
+                t.dir = match t.dir.is_empty() {
+                    true => root.to_string_lossy().into_owned(),
+                    false => root.join(&t.dir).to_string_lossy().into_owned(),
+                };
+            }
+            list
+        })
+        .unwrap_or_default();
+    let _ = WORLD_TYPE_LIST.set(list);
+}
+
+/// The world types the mods that are on add (`dir` is their root's path).
+pub fn world_types() -> &'static [WorldType] {
+    WORLD_TYPE_LIST.get().map_or(&[], Vec::as_slice)
+}
+
+/// The world type called `id`, if its mod is on.
+pub fn world_type(id: &str) -> Option<&'static WorldType> {
+    world_types().iter().find(|t| t.id == id)
+}
+
+/// Lithostitched's `add_features` modifier: placed features appended to a
+/// decoration step of the biomes it names.
+struct AddFeatures {
+    /// Biome ids and `#tags`.
+    biomes: Vec<String>,
+    features: Vec<String>,
+    step: usize,
+}
+/// `GenerationStep.Decoration`, in order.
+const STEPS: [&str; 11] = [
+    "raw_generation",
+    "lakes",
+    "local_modifications",
+    "underground_structures",
+    "surface_structures",
+    "strongholds",
+    "underground_ores",
+    "underground_decoration",
+    "fluid_springs",
+    "vegetal_decoration",
+    "top_layer_modification",
+];
+impl AddFeatures {
+    /// The modifier a file describes: `None` when its predicate is false
+    /// (a mod's configuration turns it off), an error when it is a kind
+    /// this game does not apply.
+    fn read(
+        doc: &serde_json::Value,
+        config: &horizon_world::worldgen::tectonic::WorldgenConfig,
+    ) -> std::result::Result<Option<Self>, String> {
+        if let Some(predicate) = doc.get("predicate") {
+            match (predicate["type"].as_str(), predicate["key"].as_str()) {
+                (Some("tectonic:config"), Some(key)) => {
+                    if config.constant(key) == 0.0 {
+                        return Ok(None);
+                    }
+                }
+                (kind, _) => return Err(format!("predicate {}", kind.unwrap_or("?"))),
+            }
+        }
+        let kind = doc["type"].as_str().unwrap_or("?");
+        // The build limits it sets are vanilla's unless the configuration changes them.
+        if kind == "tectonic:set_height_limits"
+            && config.constant("min_y") == -64.0
+            && config.constant("max_y") == 320.0
+        {
+            return Ok(None);
+        }
+        if kind != "lithostitched:add_features" {
+            return Err(format!("type {kind}"));
+        }
+        let list = |v: &serde_json::Value| -> Vec<String> {
+            match v {
+                serde_json::Value::String(s) => vec![s.clone()],
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        let step = doc["step"].as_str().unwrap_or_default();
+        let step = STEPS
+            .iter()
+            .position(|s| *s == step.trim_start_matches("minecraft:"))
+            .ok_or_else(|| format!("step {step}"))?;
+        Ok(Some(Self {
+            biomes: list(&doc["biomes"]),
+            features: list(&doc["features"]),
+            step,
+        }))
+    }
+}
+
+/// The biome tags (`id` → file text) of a content root, else of its base.
+fn read_biome_tags(root: &Path, base: &Path) -> BTreeMap<String, String> {
+    [root, base]
+        .iter()
+        .find_map(|dir| fs::read(dir.join(BIOME_TAGS)).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// The biomes a modifier names, tags resolved (nested tags too).
+fn modifier_biomes(names: &[String], tags: &BTreeMap<String, String>) -> BTreeSet<String> {
+    fn tag(
+        id: &str,
+        tags: &BTreeMap<String, String>,
+        out: &mut BTreeSet<String>,
+        seen: &mut BTreeSet<String>,
+    ) {
+        if !seen.insert(id.to_owned()) {
+            return;
+        }
+        let Some(doc) = tags
+            .get(id)
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+        else {
+            return;
+        };
+        for value in doc["values"].as_array().into_iter().flatten() {
+            let Some(v) = value.as_str().or_else(|| value["id"].as_str()) else {
+                continue;
+            };
+            match v.strip_prefix('#') {
+                Some(inner) => tag(inner, tags, out, seen),
+                None => {
+                    out.insert(v.to_owned());
+                }
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    for name in names {
+        match name.strip_prefix('#') {
+            Some(id) => tag(id, tags, &mut out, &mut BTreeSet::new()),
+            None => {
+                out.insert(name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Appends each modifier's features to its step of the biomes it names.
+fn apply_add_features(
+    biomes: &mut J,
+    tags: &BTreeMap<String, String>,
+    modifiers: &[AddFeatures],
+) -> Result<()> {
+    let J::Obj(entries) = biomes else {
+        return Ok(());
+    };
+    let named: Vec<BTreeSet<String>> = modifiers
+        .iter()
+        .map(|m| modifier_biomes(&m.biomes, tags))
+        .collect();
+    for (id, text) in entries.iter_mut() {
+        let wanted: Vec<&AddFeatures> = modifiers
+            .iter()
+            .zip(&named)
+            .filter(|(_, set)| set.contains(id.as_str()))
+            .map(|(m, _)| m)
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        let J::Str(json) = text else {
+            continue;
+        };
+        let mut doc: serde_json::Value = serde_json::from_str(json)?;
+        let Some(object) = doc.as_object_mut() else {
+            continue;
+        };
+        let steps = object
+            .entry("features")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        let Some(steps) = steps.as_array_mut() else {
+            continue;
+        };
+        while steps.len() < STEPS.len() {
+            steps.push(serde_json::Value::Array(Vec::new()));
+        }
+        for modifier in wanted {
+            if let Some(list) = steps[modifier.step].as_array_mut() {
+                list.extend(
+                    modifier
+                        .features
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String),
+                );
+            }
+        }
+        *json = serde_json::to_string(&doc)?;
+    }
+    Ok(())
+}
+
+/// A worldgen-override mod's replacements of vanilla's world generation.
+#[derive(Default)]
+struct TypeData {
+    /// Bundle entries under vanilla's namespace, by bundle.
+    worldgen: BTreeMap<&'static str, Vec<(String, String)>>,
+    /// The Overworld's dimension definition (type and generator).
+    dimensions: BTreeMap<String, J>,
+    /// Dimension types it replaces vanilla's with (build range).
+    dimension_types: BTreeMap<String, String>,
+    /// Its multi-noise parameter lists.
+    parameter_lists: BTreeMap<String, J>,
+    /// Features its Lithostitched modifiers add to biomes.
+    modifiers: Vec<AddFeatures>,
+    /// Its worldgen configuration (`worldgen_config.json`).
+    config: Option<String>,
+}
+impl TypeData {
+    fn is_empty(&self) -> bool {
+        self.worldgen.is_empty()
+            && self.modifiers.is_empty()
+            && self.config.is_none()
+            && self.dimensions.is_empty()
+            && self.dimension_types.is_empty()
+            && self.parameter_lists.is_empty()
+    }
+    /// The type's root: the content root `main` with these replacements.
+    fn write_root(
+        &self,
+        base: &Path,
+        main: &Path,
+        id: &str,
+        own_dimension_types: &BTreeMap<String, String>,
+        own_presets: &[String],
+    ) -> Result<()> {
+        let root = main.join(TYPES_DIR).join(id);
+        let overlay = Overlay::new(main, &root)?;
+        const BIOMES: &str = "worldgen/biomes.json";
+        let mut bundles: Vec<(&str, &[(String, String)])> = self
+            .worldgen
+            .iter()
+            .map(|(b, e)| (*b, e.as_slice()))
+            .collect();
+        if !self.modifiers.is_empty() && !self.worldgen.contains_key(BIOMES) {
+            bundles.push((BIOMES, &[]));
+        }
+        for (bundle, entries) in bundles {
+            let path = main.join(bundle);
+            if !path.exists() {
+                continue;
+            }
+            let mut doc = read_json(&path)?;
+            for (id, text) in entries {
+                doc.set(id, J::Str(text.clone()));
+            }
+            if bundle == BIOMES && !self.modifiers.is_empty() {
+                let tags = read_biome_tags(main, base);
+                apply_add_features(&mut doc, &tags, &self.modifiers)?;
+            }
+            overlay.write(bundle, &serde_json::to_vec(&doc)?)?;
+        }
+        if let Some(config) = &self.config {
+            overlay.write("worldgen/config.json", config.as_bytes())?;
+        }
+        if !self.dimension_types.is_empty() {
+            let mut all = own_dimension_types.clone();
+            all.extend(self.dimension_types.clone());
+            overlay.write("worldgen/dimension_types.json", &serde_json::to_vec(&all)?)?;
+        }
+        // A worldgen mod's multi-noise parameter list replaces the Overworld's
+        // biome distribution: the worldgen loader reads the quantized tables
+        // the biome source uses from `worldgen/biome_parameters/<name>.json`.
+        for (id, doc) in &self.parameter_lists {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            overlay.write(
+                &format!("worldgen/biome_parameters/{name}.json"),
+                &serde_json::to_vec(doc)?,
+            )?;
+        }
+        // A worldgen mod's dimension definition replaces the world preset's
+        // entry for it: the game reads dimensions from `worldgen/world_presets`,
+        // not from `dimension/` files (26.3 has none). Its type and generator
+        // carry over; the rest of the file is its loader's (conditions and the
+        // like).
+        if self.dimensions.is_empty() {
+            return Ok(());
+        }
+        let source = main.join("worldgen/world_presets.json");
+        let source = if source.exists() {
+            source
+        } else {
+            base.join("worldgen/world_presets.json")
+        };
+        if !source.exists() {
+            return Ok(());
+        }
+        let mut doc = read_json(&source)?;
+        let names: Vec<String> = match &doc {
+            J::Obj(o) => o.iter().map(|(k, _)| k.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let mut changed = false;
+        for name in names {
+            // A preset the mod declares keeps its own generator.
+            if own_presets.contains(&name) {
+                continue;
+            }
+            let Some(J::Str(text)) = doc.get(&name) else {
+                continue;
+            };
+            let mut preset: J = serde_json::from_str(text)?;
+            let mut overridden = false;
+            for (id, dimension) in &self.dimensions {
+                let Some(entry) = preset.at(&format!("dimensions/{id}")) else {
+                    continue;
+                };
+                for key in ["type", "generator"] {
+                    if let Some(value) = dimension.get(key) {
+                        entry.set(key, value.clone());
+                        overridden = true;
+                    }
+                }
+                // A dimension file may hold the biome list itself; the
+                // parameter list holds the same list, and the biome source
+                // reads the quantized tables, so it takes over.
+                if let Some(generator) = entry.get_mut("generator") {
+                    let inline = generator
+                        .get("biome_source")
+                        .is_some_and(|s| s.get("biomes").is_some());
+                    if inline && self.parameter_lists.contains_key(id) {
+                        let source = J::Obj(vec![
+                            ("type".into(), J::Str("minecraft:multi_noise".into())),
+                            ("preset".into(), J::Str(id.clone())),
+                        ]);
+                        generator.set("biome_source", source);
+                    }
+                }
+            }
+            if overridden {
+                doc.set(&name, J::Str(serde_json::to_string(&preset)?));
+                changed = true;
+            }
+        }
+        if changed {
+            overlay.write("worldgen/world_presets.json", &serde_json::to_vec(&doc)?)?;
+        }
+        Ok(())
+    }
 }
 
 /// The root to load: `base` itself with no content, else the mods' overlay

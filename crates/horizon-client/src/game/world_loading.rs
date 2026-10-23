@@ -73,6 +73,14 @@ impl WorldRequest {
             level.difficulty = horizon_client::title::DIFFICULTIES[o.difficulty()].into();
             level.allow_commands = Some(o.commands(creative));
             horizon_client::save::write_world_gen_settings(&save_root, level.seed, o.world_gen())?;
+        } else if created && let Some(id) = &options.world_type {
+            let kind = horizon_client::mod_content::world_type(id)
+                .ok_or_else(|| format!("no world type {id}: is its mod on?"))?;
+            let generation = horizon_client::save::WorldGen {
+                world_type: Some(kind.id.as_str()),
+                ..Default::default()
+            };
+            horizon_client::save::write_world_gen_settings(&save_root, level.seed, generation)?;
         }
         // Worlds made without the Create New World screen (--world, the
         // control socket) take its default: commands on for Creative only.
@@ -200,6 +208,9 @@ pub(super) fn make_streaming(
             )
         });
     let mut streaming = if let Some(inner) = flat {
+        if dim == Dim::Overworld {
+            horizon_client::chunk::set_height(horizon_client::chunk::DEFAULT_HEIGHT);
+        }
         Streaming::new(
             Arc::new(Persistent {
                 inner: Arc::new(inner),
@@ -211,6 +222,7 @@ pub(super) fn make_streaming(
             res.threads(),
         )
     } else if options.test_terrain && dim == Dim::Overworld {
+        horizon_client::chunk::set_height(horizon_client::chunk::DEFAULT_HEIGHT);
         let inner = Arc::new(TestTerrain::new(pack.assets.registry, res.biomes())?);
         Streaming::new(
             Arc::new(Persistent {
@@ -226,9 +238,34 @@ pub(super) fn make_streaming(
         // WorldOptions.generateStructures, from the world's settings.
         let structures =
             horizon_client::save::WorldGen::read(world_root).is_none_or(|w| w.structures);
-        let inner = Arc::new(VanillaTerrain::for_world(&options.resources.join("worldgen"), pack.assets.registry, res.biomes(), seed, dim.id(), structures).map_err(|e| {
+        // A mod's world type reads its own world generation; one whose mod
+        // is off is not loaded as another terrain.
+        let kind = match horizon_client::save::saved_world_type(world_root) {
+            Some(id) => Some(horizon_client::mod_content::world_type(&id).ok_or_else(|| {
+                format!(
+                    "This world uses the world type \"{id}\", which needs its mod: turn it on in Options > Mods."
+                )
+            })?),
+            None => None,
+        };
+        let (worldgen, preset) = match kind {
+            Some(t) => (
+                std::path::Path::new(&t.dir).join("worldgen"),
+                t.preset.as_str(),
+            ),
+            None => (options.resources.join("worldgen"), "minecraft:normal"),
+        };
+        let inner = Arc::new(VanillaTerrain::for_preset(&worldgen, pack.assets.registry, res.biomes(), seed, dim.id(), structures, preset).map_err(|e| {
                 format!("{e}\nPrepare the worldgen bundle with the launcher, or: horizon-prepare --prepare")
             })?);
+        if dim == Dim::Overworld {
+            // A mod's dimension type may make the world taller (worldgen_overrides).
+            horizon_client::chunk::set_height(
+                inner
+                    .level_height()
+                    .unwrap_or(horizon_client::chunk::DEFAULT_HEIGHT),
+            );
+        }
         locator = Some(inner.clone());
         Streaming::new(
             Arc::new(Persistent {
@@ -246,10 +283,6 @@ pub(super) fn make_streaming(
     streaming.smooth_lighting = settings.smooth_lighting;
     streaming.cutout_leaves = settings.cutout_leaves;
     streaming.cull_leaves = settings.horizon.cull_leaves;
-    horizon_client::ctm::ENABLED.store(
-        settings.extras.connected_textures,
-        std::sync::atomic::Ordering::Relaxed,
-    );
     streaming.biome_zoom = BiomeZoom::new(obfuscate_seed(seed));
     streaming.sky_light = dim != Dim::Nether;
     streaming.nether_shading = dim == Dim::Nether;

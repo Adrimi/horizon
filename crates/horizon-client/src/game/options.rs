@@ -273,7 +273,6 @@ impl Game<'_> {
         if rescale {
             self.ui.chat.rescale(&self.gui.atlas);
         }
-        self.ui.chat.set_heads(&self.gui.atlas, s.extras.chat_heads);
         let font = &mut self.gui.atlas.font;
         if font.uniform != s.force_unicode || font.japanese != s.japanese_glyphs {
             font.uniform = s.force_unicode;

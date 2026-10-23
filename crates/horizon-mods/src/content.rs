@@ -145,6 +145,11 @@ pub struct Content {
     pub items: Vec<Item>,
     /// The namespaces it owns: the mod id, then the manifest's `namespaces`.
     pub namespaces: Vec<String>,
+    /// The mod's name (the world type it adds is called by it).
+    pub name: String,
+    /// Whether the mod declared `worldgen_overrides`: its replacements of
+    /// vanilla's world generation are a world type, not global.
+    pub worldgen_overrides: bool,
 }
 
 /// Why two content mods cannot be on together: a namespace both own (one's
@@ -203,6 +208,8 @@ impl Content {
             blocks: Vec::new(),
             items: Vec::new(),
             namespaces: manifest.owned_namespaces().map(str::to_owned).collect(),
+            name: manifest.name.clone(),
+            worldgen_overrides: manifest.worldgen_overrides,
         };
         content.check(manifest)?;
         Ok(content)
@@ -272,7 +279,10 @@ impl Content {
             // (noise settings, density functions, biomes, the dimension's
             // biome distribution), and nothing else of vanilla's.
             let shared = matches!(namespace, "minecraft" | "c");
-            let worldgen = rest.starts_with("worldgen/") || rest.starts_with("dimension/");
+            let worldgen = rest.starts_with("worldgen/")
+                || rest.starts_with("dimension/")
+                || rest.starts_with("dimension_type/")
+                || rest.starts_with("wolf_variant/");
             let allowed = owned
                 || (top == "data"
                     && shared

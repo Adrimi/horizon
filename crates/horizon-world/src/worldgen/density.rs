@@ -60,6 +60,7 @@ fn axis(raw: &RawValue) -> Result<Axis, DecodeError> {
 /// distinct registry holders; returned entry values are their direct graphs.
 #[derive(Debug)]
 pub struct DensityRegistry {
+    config: tectonic::WorldgenConfig,
     graph: DensityGraph,
     values: BTreeMap<String, FunctionId>,
     noises: BTreeMap<String, NoiseId>,
@@ -72,7 +73,16 @@ impl DensityRegistry {
         noises: &BTreeMap<String, String>,
         densities: &BTreeMap<String, String>,
     ) -> Result<Self, DecodeError> {
+        Self::from_json_with_config(noises, densities, &tectonic::WorldgenConfig::default())
+    }
+    /// [`Self::from_json`] with a mod's values for `tectonic:config_*`.
+    pub fn from_json_with_config(
+        noises: &BTreeMap<String, String>,
+        densities: &BTreeMap<String, String>,
+        config: &tectonic::WorldgenConfig,
+    ) -> Result<Self, DecodeError> {
         let mut loader = Loader {
+            config: config.clone(),
             graph: DensityGraph::new(),
             noises: BTreeMap::new(),
             definitions: BTreeMap::new(),
@@ -100,6 +110,7 @@ impl DensityRegistry {
             loader.resolve(&name, 0)?;
         }
         Ok(Self {
+            config: loader.config,
             graph: loader.graph,
             values: loader.values,
             noises: loader.noises,
@@ -125,6 +136,7 @@ impl DensityRegistry {
     /// intact. Roots are not registered as additional named density entries.
     pub fn decode_functions(&mut self, json: &[&str]) -> Result<Vec<FunctionId>, DecodeError> {
         let mut loader = Loader {
+            config: self.config.clone(),
             graph: self.graph.clone(),
             noises: self.noises.clone(),
             definitions: BTreeMap::new(),
@@ -143,6 +155,7 @@ impl DensityRegistry {
     }
 }
 struct Loader {
+    config: tectonic::WorldgenConfig,
     graph: DensityGraph,
     noises: BTreeMap<String, NoiseId>,
     definitions: BTreeMap<String, Box<RawValue>>,
@@ -239,6 +252,12 @@ impl Loader {
             "minecraft:max" => Some(GraphBinary::Maximum),
             _ => None,
         };
+        // 1.18 names for caches (`flat_cache`, `cache_2d`): the input is
+        // evaluated exactly where it is asked, which is what packs that use
+        // them for columns (no Y in the input) expect.
+        if matches!(kind.as_str(), "minecraft:flat_cache" | "minecraft:cache_2d") {
+            return self.input(&object, "input", depth);
+        }
         let node = if let Some(kind) = unary {
             GraphNode::Unary {
                 kind,
@@ -260,6 +279,22 @@ impl Loader {
                 "minecraft:beardifier" => GraphNode::WorldField(WorldField::Beardifier),
                 "minecraft:end_outer_islands" => GraphNode::EndIslands,
                 "minecraft:cache" => GraphNode::Cache(self.input(&object, "input", depth)?),
+                // 1.18's gradient along Y: the clamped form of `gradient`.
+                "minecraft:y_clamped_gradient" => {
+                    let from = integer(required(&object, "from_y")?)?;
+                    let to = integer(required(&object, "to_y")?)?;
+                    if from == to {
+                        return Err(DecodeError::Field("gradient coordinates"));
+                    }
+                    GraphNode::Gradient {
+                        axis: Axis::Y,
+                        tiling: TilingMode::ClampToEdge,
+                        from,
+                        to,
+                        low: noise_value(required(&object, "from_value")?)?,
+                        high: noise_value(required(&object, "to_value")?)?,
+                    }
+                }
                 "minecraft:blend_density" => {
                     GraphNode::BlendDensity(self.input(&object, "input", depth)?)
                 }
@@ -304,7 +339,7 @@ impl Loader {
                         high: noise_value(required(&object, "to_value")?)?,
                     }
                 }
-                "minecraft:noise" => GraphNode::Noise {
+                "minecraft:noise" | "minecraft:shifted_noise" => GraphNode::Noise {
                     noise: self.noise(&object)?,
                     xz_scale: double(required(&object, "xz_scale")?)?,
                     y_scale: double(required(&object, "y_scale")?)?,
@@ -461,11 +496,13 @@ impl Loader {
                 // their numbers. They are read only when a mod brings them.
                 "tectonic:config_constant" => {
                     let key = string(required(&object, "key")?)?;
-                    GraphNode::Constant(tectonic::constant(&key))
+                    GraphNode::Constant(self.config.constant(&key))
                 }
                 "tectonic:config_noise" => {
                     let key = string(required(&object, "key")?)?;
-                    let state = tectonic::noise_state(&key)
+                    let state = self
+                        .config
+                        .noise_state(&key)
                         .ok_or(DecodeError::Field("tectonic noise scale"))?;
                     let noise = self.noise(&object)?;
                     let shift_x = self.optional_input(&object, "shift_x", 0.0, depth)?;
@@ -588,6 +625,34 @@ mod tests {
                 .to_bits(),
             0x3f80_0001
         );
+    }
+    #[test]
+    fn the_1_18_names_decode_to_their_26_3_equivalents() {
+        let densities = BTreeMap::from([
+            (
+                "minecraft:g".into(),
+                r#"{"type":"minecraft:y_clamped_gradient","from_y":0,"to_y":10,"from_value":0,"to_value":1}"#.into(),
+            ),
+            (
+                "minecraft:f".into(),
+                r#"{"type":"minecraft:flat_cache","argument":0.25,"input":{"type":"minecraft:cache_2d","argument":0.25,"input":0.25}}"#.into(),
+            ),
+        ]);
+        let registry = DensityRegistry::from_json(&BTreeMap::new(), &densities).unwrap();
+        let g = registry.value("minecraft:g").unwrap();
+        let f = registry.value("minecraft:f").unwrap();
+        let compiler = DensityCompiler::new(registry.into_graph());
+        let at = |id, y| {
+            compiler
+                .compile_raw(id)
+                .unwrap()
+                .sample_value(&mut SamplerContext::default(), [0, y, 0])
+                .unwrap()
+        };
+        assert_eq!(at(g, 5), 0.5);
+        assert_eq!(at(g, -9), 0.0);
+        assert_eq!(at(g, 99), 1.0);
+        assert_eq!(at(f, 3), 0.25);
     }
     #[test]
     fn forward_references_share_named_holders_and_reject_cycles_or_missing_values() {

@@ -31,7 +31,9 @@ pub const WOLF_VARIANTS: [(&str, &str); 9] = [
 ];
 /// The wolf variant a biome spawns (its high-priority `BiomeCheck`).
 pub fn wolf_variant_for(biome: &str, has_tag: &dyn Fn(&str) -> bool) -> u8 {
-    if has_tag("minecraft:is_savanna") {
+    if let Some(variant) = super::wolf_variants::variant_for(biome) {
+        variant
+    } else if has_tag("minecraft:is_savanna") {
         1
     } else if biome == "minecraft:grove" {
         2

@@ -3,7 +3,7 @@
 //! face it draws from the blocks around it, so no mod code runs per face.
 //! The rules and pictures live in [`DEFINITIONS`] so they outlive a reload of
 //! the resource packs, which builds the atlas again.
-use crate::{ctm::Resolved, sprites::Sprites};
+use crate::sprites::Sprites;
 use horizon_core::geometry::Direction;
 use horizon_mods::{RuleConnect, RuleMethod, TextureSet};
 use horizon_world::registry::{BlockRegistry, BlockStateId};
@@ -11,6 +11,32 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
+
+/// The world directions a face's texture runs along: right (the texture's
+/// `u` grows) and up (its `v` shrinks), as vanilla's cube faces map their
+/// UVs.
+fn axes(face: Direction) -> ([i32; 3], [i32; 3]) {
+    match face {
+        Direction::Up => ([1, 0, 0], [0, 0, -1]),
+        Direction::Down => ([1, 0, 0], [0, 0, 1]),
+        Direction::North => ([-1, 0, 0], [0, 1, 0]),
+        Direction::South => ([1, 0, 0], [0, 1, 0]),
+        Direction::West => ([0, 0, 1], [0, 1, 0]),
+        Direction::East => ([0, 0, -1], [0, 1, 0]),
+    }
+}
+
+/// What a face draws instead of its sprite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resolved {
+    /// The face keeps its own sprite.
+    Keep,
+    /// The face shows this layer of the atlas.
+    Layer(u16),
+    /// The face is four quarters, each showing its own layer (top-left,
+    /// top-right, bottom-left, bottom-right).
+    Quarters([u16; 4]),
+}
 
 /// What the running mods gave: set by the game, read when the atlas is built.
 pub static DEFINITIONS: RwLock<Option<Arc<TextureSet>>> = RwLock::new(None);
@@ -255,7 +281,7 @@ impl ModRules {
         pos: [i32; 3],
         at: &impl Fn([i32; 3]) -> u32,
     ) -> Option<Resolved> {
-        let (right, up) = crate::ctm::axes(face);
+        let (right, up) = axes(face);
         let near = |r: i32, u: i32| {
             let other = at([
                 right[0] * r + up[0] * u,

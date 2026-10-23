@@ -1,9 +1,11 @@
-//! The item and recipe browser extra (`docs/extras.md`), after JEI and EMI:
-//! every item in a panel beside the inventory, and for any item the recipes
-//! that make it and the ones that use it. Off by default; vanilla has no such
-//! screen. The recipes are the local data's (vanilla's and the content mods'):
-//! since 1.21.2 a server sends a client only the recipe book's displays of
-//! recipes it unlocked, not the recipes themselves.
+//! The recipes of the local data (vanilla's and the content mods'), in the
+//! shape the mods' API gives them (`recipes.list()`, API 0.1.5): every recipe
+//! and the items it makes and uses. Since 1.21.2 a server sends a client only
+//! the recipe book's displays of recipes it unlocked, not the recipes
+//! themselves, so the client builds this list itself.
+//!
+//! The panel that showed them is a mod now (`mods/recipe-browser`); this is
+//! the data behind it, shared by the game and the API.
 use crate::{
     crafting::{Ingredient, Recipe, Recipes},
     stations::{Smithing, StationRecipes},
@@ -262,40 +264,6 @@ impl Lookup {
     }
 }
 
-/// The panel's query: `@namespace` words keep the items of a namespace
-/// (a prefix, as JEI's), the rest is the creative search's term.
-pub fn split_query(query: &str) -> (Option<String>, String) {
-    let mut namespace = None;
-    let mut rest = Vec::new();
-    for word in query.split_whitespace() {
-        match word.strip_prefix('@') {
-            Some(ns) if !ns.is_empty() => namespace = Some(ns.to_lowercase()),
-            Some(_) => {}
-            None => rest.push(word),
-        }
-    }
-    (namespace, rest.join(" "))
-}
-/// Whether item `id` is in the namespace the query names.
-pub fn in_namespace(id: &str, namespace: Option<&str>) -> bool {
-    let Some(ns) = namespace else {
-        return true;
-    };
-    let item_ns = id.split_once(':').map_or("minecraft", |(n, _)| n);
-    item_ns.starts_with(ns)
-}
-/// The number of pages of `count` items, `per_page` a page (one at least).
-pub fn pages(count: usize, per_page: usize) -> usize {
-    count.div_ceil(per_page.max(1)).max(1)
-}
-/// The item a slot of several shows at `millis`: the next one each second.
-pub fn cycled(items: &[String], millis: u128) -> Option<&str> {
-    if items.is_empty() {
-        return None;
-    }
-    Some(&items[(millis / 1000) as usize % items.len()])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,32 +339,6 @@ mod tests {
         assert!(cells[3].is_empty());
         let (w, cells) = shapeless_cells(&vec![one; 5]);
         assert_eq!((w, cells.len()), (3, 6));
-    }
-
-    #[test]
-    fn the_query_takes_a_namespace() {
-        assert_eq!(split_query("stone"), (None, "stone".into()));
-        assert_eq!(
-            split_query("@Mine red dye"),
-            (Some("mine".into()), "red dye".into())
-        );
-        assert_eq!(split_query("@ log"), (None, "log".into()));
-        assert!(in_namespace("minecraft:stone", Some("mine")));
-        assert!(!in_namespace("t_and_t:lantern", Some("minecraft")));
-        assert!(in_namespace("stone", Some("minecraft")));
-        assert!(in_namespace("t_and_t:lantern", None));
-    }
-
-    #[test]
-    fn pages_and_cycling() {
-        assert_eq!(pages(0, 20), 1);
-        assert_eq!(pages(41, 20), 3);
-        assert_eq!(pages(5, 0), 5);
-        let tag = items(&["a", "b", "c"]);
-        assert_eq!(cycled(&tag, 0), Some("a"));
-        assert_eq!(cycled(&tag, 1_500), Some("b"));
-        assert_eq!(cycled(&tag, 3_200), Some("a"));
-        assert_eq!(cycled(&[], 0), None);
     }
 
     #[test]

@@ -16,7 +16,7 @@
 use crate::{
     Result,
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, SECTIONS, Section, block_strategy},
+    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, Section, block_strategy, section_count},
     streaming::ChunkGenerator,
 };
 use horizon_core::{
@@ -696,7 +696,7 @@ impl HeightmapChunk for HeightmapView<'_> {
         MIN_Y
     }
     fn height(&self) -> i32 {
-        SECTIONS as i32 * 16
+        section_count() as i32 * 16
     }
     fn highest_section_y(&self) -> i32 {
         let top = self
@@ -725,7 +725,7 @@ fn heightmaps(chunk: &Chunk, tables: &SaveTables) -> Tag {
     ];
     let mut maps: Vec<Heightmap> = kinds
         .iter()
-        .filter_map(|k| Heightmap::new(*k, MIN_Y, SECTIONS as i32 * 16).ok())
+        .filter_map(|k| Heightmap::new(*k, MIN_Y, section_count() as i32 * 16).ok())
         .collect();
     let view = HeightmapView {
         sections: &chunk.sections,
@@ -746,7 +746,7 @@ fn heightmaps(chunk: &Chunk, tables: &SaveTables) -> Tag {
 /// sendToClient: WORLD_SURFACE, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES),
 /// as (network id, packed longs) in Heightmap.Types order.
 pub fn client_heightmaps(chunk: &Chunk, tables: &SaveTables) -> Vec<(i32, Vec<i64>)> {
-    client_heightmaps_in(&chunk.sections, tables, MIN_Y, SECTIONS as i32 * 16)
+    client_heightmaps_in(&chunk.sections, tables, MIN_Y, section_count() as i32 * 16)
 }
 /// The client heightmaps of a column's sections, in a level from `min_y`,
 /// `height` blocks high.
@@ -975,7 +975,7 @@ pub fn encode_with(
             s.insert("References".into(), Tag::Compound(refs));
         }
         map.entry("PostProcessing".into())
-            .or_insert_with(|| Tag::List(vec![Tag::List(Vec::new()); SECTIONS]));
+            .or_insert_with(|| Tag::List(vec![Tag::List(Vec::new()); section_count()]));
     }
     if let Some(t) = tables {
         put(&mut root, "Heightmaps", heightmaps(chunk, t));
@@ -1062,7 +1062,7 @@ fn decode_column(
             continue;
         };
         let si = y as i32 - (MIN_Y >> 4);
-        if !(0..SECTIONS as i32).contains(&si) {
+        if !(0..section_count() as i32).contains(&si) {
             continue;
         }
         if let Some(states) = section.get("block_states")
@@ -1203,7 +1203,7 @@ pub fn encode_proto(
         ChunkStatus::Terrain
     };
     // ProtoChunk.postProcessing: one list per section, packed section offsets.
-    let mut marks = vec![Vec::new(); SECTIONS];
+    let mut marks = vec![Vec::new(); section_count()];
     for &[x, y, z] in &proto.column.postprocess {
         if let Some(list) = marks.get_mut(((y - MIN_Y) >> 4) as usize) {
             list.push(Tag::Short(
@@ -1282,13 +1282,13 @@ pub fn load_light(tag: &Tag, chunk: &mut Chunk, sky_light: bool) {
     let Some(Tag::List(sections)) = tag.get("sections") else {
         return;
     };
-    let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> = vec![(None, None); SECTIONS];
+    let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> = vec![(None, None); section_count()];
     for section in sections {
         let Some(y) = number(section.get("Y")) else {
             continue;
         };
         let si = y as i32 - (MIN_Y >> 4);
-        if !(0..SECTIONS as i32).contains(&si) {
+        if !(0..section_count() as i32).contains(&si) {
             continue;
         }
         let layer = |name: &str| match section.get(name) {
@@ -2033,7 +2033,15 @@ pub struct WorldGen {
     pub flat: bool,
     pub structures: bool,
     pub bonus_chest: bool,
+    /// The id of a mod's world type (`mod_content::WorldType`) for the
+    /// Overworld, kept as `horizon:world_type`.
+    pub world_type: Option<&'static str>,
 }
+/// The world type a world's settings name, even when its mod is off.
+pub fn saved_world_type(world: &Path) -> Option<String> {
+    text(world_gen_settings(world)?.get(WORLD_TYPE_KEY))
+}
+const WORLD_TYPE_KEY: &str = "horizon:world_type";
 impl WorldGen {
     /// A saved world's choices, from its `world_gen_settings`.
     pub fn read(world: &Path) -> Option<Self> {
@@ -2048,6 +2056,9 @@ impl WorldGen {
                 .is_some_and(|t| t.trim_start_matches("minecraft:") == "flat"),
             structures: flag("generate_structures", true),
             bonus_chest: flag("bonus_chest", false),
+            world_type: text(settings.get(WORLD_TYPE_KEY))
+                .and_then(|id| crate::mod_content::world_type(&id))
+                .map(|t| t.id.as_str()),
         })
     }
 }
@@ -2057,6 +2068,7 @@ impl Default for WorldGen {
             flat: false,
             structures: true,
             bonus_chest: false,
+            world_type: None,
         }
     }
 }
@@ -2129,51 +2141,51 @@ pub fn write_world_gen_settings_with(
             ("preset", string(p)),
         ])
     };
-    write_saved_data(
-        dir,
-        "world_gen_settings",
-        Tag::compound([
-            ("seed", Tag::Long(seed)),
-            (
-                "generate_structures",
-                Tag::Byte(i8::from(options.structures)),
-            ),
-            ("bonus_chest", Tag::Byte(i8::from(options.bonus_chest))),
-            (
-                "dimensions",
-                Tag::compound([
-                    (
-                        "minecraft:overworld",
-                        if options.flat {
-                            flat
-                        } else {
-                            dimension(
-                                "minecraft:overworld",
-                                "minecraft:overworld",
-                                preset("minecraft:overworld"),
-                            )
-                        },
-                    ),
-                    (
+    let mut settings = Tag::compound([
+        ("seed", Tag::Long(seed)),
+        (
+            "generate_structures",
+            Tag::Byte(i8::from(options.structures)),
+        ),
+        ("bonus_chest", Tag::Byte(i8::from(options.bonus_chest))),
+        (
+            "dimensions",
+            Tag::compound([
+                (
+                    "minecraft:overworld",
+                    if options.flat {
+                        flat
+                    } else {
+                        dimension(
+                            "minecraft:overworld",
+                            "minecraft:overworld",
+                            preset("minecraft:overworld"),
+                        )
+                    },
+                ),
+                (
+                    "minecraft:the_nether",
+                    dimension(
                         "minecraft:the_nether",
-                        dimension(
-                            "minecraft:the_nether",
-                            "minecraft:nether",
-                            preset("minecraft:nether"),
-                        ),
+                        "minecraft:nether",
+                        preset("minecraft:nether"),
                     ),
-                    (
+                ),
+                (
+                    "minecraft:the_end",
+                    dimension(
                         "minecraft:the_end",
-                        dimension(
-                            "minecraft:the_end",
-                            "minecraft:end",
-                            Tag::compound([("type", string("minecraft:the_end"))]),
-                        ),
+                        "minecraft:end",
+                        Tag::compound([("type", string("minecraft:the_end"))]),
                     ),
-                ]),
-            ),
-        ]),
-    )
+                ),
+            ]),
+        ),
+    ]);
+    if let (Some(id), Tag::Compound(entries)) = (options.world_type, &mut settings) {
+        entries.insert(WORLD_TYPE_KEY.into(), string(id));
+    }
+    write_saved_data(dir, "world_gen_settings", settings)
 }
 #[derive(Clone, Debug, Default)]
 pub struct Level {
@@ -3002,7 +3014,7 @@ fn lod_palette_index(
     (value < palette.len()).then_some(value)
 }
 fn lod_light_layers(sections: &[(i32, &Tag)], sky_light: bool) -> Box<[u8]> {
-    let mut layers = [(None, None); SECTIONS];
+    let mut layers = vec![(None, None); section_count()];
     for &(y, section) in sections {
         let layer = |name: &str| match section.get(name) {
             Some(Tag::ByteArray(data)) if data.len() == 2048 => Some(&data[..]),
@@ -3013,10 +3025,10 @@ fn lod_light_layers(sections: &[(i32, &Tag)], sky_light: bool) -> Box<[u8]> {
             layer("BlockLight"),
         );
     }
-    let mut light = vec![0u8; SECTIONS * 4096].into_boxed_slice();
+    let mut light = vec![0u8; section_count() * 4096].into_boxed_slice();
     let mut above = [if sky_light { 15u8 } else { 0 }; 256];
     let nibble = |data: &[u8], index: usize| (data[index / 2] >> ((index & 1) * 4)) & 15;
-    for si in (0..SECTIONS).rev() {
+    for si in (0..section_count()).rev() {
         let (sky, block) = layers[si];
         let section = &mut light[si * 4096..(si + 1) * 4096];
         for (index, value) in section.iter_mut().enumerate() {
@@ -3040,7 +3052,7 @@ fn lod_face_light(light: &[u8], x: usize, y: usize, z: usize) -> u16 {
         (z > 0, index.wrapping_sub(16)),
         (z < 15, index + 16),
         (y > 0, index.wrapping_sub(256)),
-        (y + 1 < SECTIONS * 16, index + 256),
+        (y + 1 < section_count() * 16, index + 256),
     ] {
         if valid {
             sky = sky.max(light[index] >> 4);
@@ -3062,7 +3074,7 @@ fn decode_lod_surfaces(
         .iter()
         .filter_map(|section| {
             let y = number(section.get("Y"))? as i32;
-            (MIN_Y >> 4..(MIN_Y >> 4) + SECTIONS as i32)
+            (MIN_Y >> 4..(MIN_Y >> 4) + section_count() as i32)
                 .contains(&y)
                 .then_some((y, section))
         })
@@ -3858,7 +3870,7 @@ mod tests {
         assert_eq!(at(&chunk, 0, 1), 0x52, "stored sky 5, block 2");
         // Section -3 has no layers; above it (-2..) sky defaults to 15.
         assert_eq!(at(&chunk, 1, 0), 0xF0);
-        assert_eq!(at(&chunk, SECTIONS - 1, 5), 0xF0);
+        assert_eq!(at(&chunk, section_count() - 1, 5), 0xF0);
         let mut dark = Chunk::empty(0, 0);
         load_light(&tag, &mut dark, false);
         assert_eq!(at(&dark, 1, 0), 0x00, "no skylight dimension");

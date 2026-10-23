@@ -10,6 +10,16 @@ struct Queries<'a, C> {
     top: Option<FeatureIdentity>,
 }
 impl<C: PlacementContext> PlacementContext for Queries<'_, C> {
+    fn sample_density(
+        &mut self,
+        function: &str,
+        position: [i32; 3],
+    ) -> Result<f32, PlacementQueryError> {
+        self.world.sample_density(function, position)
+    }
+    fn sample_noise(&mut self, noise: &str, point: [f64; 3]) -> Result<f32, PlacementQueryError> {
+        self.world.sample_noise(noise, point)
+    }
     fn block_survives(
         &mut self,
         state: crate::registry::BlockStateId,

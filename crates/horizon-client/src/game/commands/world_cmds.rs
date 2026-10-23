@@ -374,6 +374,38 @@ impl Game<'_> {
             Some(i) => (&spec[..i], &spec[i..]),
             None => (spec.as_str(), ""),
         };
+        // A mod's particle (`<mod id>:<name>`, API 0.1.19).
+        if self.command_particle_exists(name) {
+            let pos = self
+                .position_arg(ctx, "pos")
+                .unwrap_or_else(|| self.source_position());
+            let delta = self.position_arg(ctx, "delta").map_or([0.0; 3], |d| {
+                let s = self.source_position();
+                [d[0] - s[0], d[1] - s[1], d[2] - s[2]]
+            });
+            let count = match ctx.get("count") {
+                Some(Arg::Int(c)) => (*c).clamp(1, 256),
+                _ => 1,
+            };
+            for i in 0..count {
+                let p = if i == 0 {
+                    pos
+                } else {
+                    let r = self.particles.random();
+                    [
+                        pos[0] + r.next_gaussian() * delta[0],
+                        pos[1] + r.next_gaussian() * delta[1],
+                        pos[2] + r.next_gaussian() * delta[2],
+                    ]
+                };
+                self.spawn_command_particle(name, p, if count == 1 { delta } else { [0.0; 3] });
+            }
+            self.feedback(Text::translate(
+                "commands.particle.success",
+                &[Text::literal(name.to_owned())],
+            ));
+            return Ok(count);
+        }
         let ty = ParticleType::from_name(name).ok_or_else(|| err("particle.notFound", &[&name]))?;
         let opts = match horizon_client::command::snbt::parse_fully(options_text) {
             Ok(Tag::Compound(c)) if !options_text.is_empty() => Some(c),
@@ -1071,7 +1103,7 @@ impl Game<'_> {
         let respect = matches!(ctx.get("respectTeams"), Some(Arg::Bool(true)));
         let max_y = match ctx.get("maxHeight") {
             Some(Arg::Int(h)) => *h,
-            _ => horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT,
+            _ => horizon_client::chunk::MIN_Y + horizon_client::chunk::height(),
         };
         if max_y < horizon_client::chunk::MIN_Y {
             return Err(err(

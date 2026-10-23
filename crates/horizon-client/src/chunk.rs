@@ -6,8 +6,74 @@ use horizon_world::registry::BlockStateId;
 use std::sync::{Arc, OnceLock};
 
 pub const MIN_Y: i32 = -64;
-pub const HEIGHT: i32 = 384;
-pub const SECTIONS: usize = (HEIGHT / 16) as usize;
+/// The height every vanilla world has, and the default.
+pub const DEFAULT_HEIGHT: i32 = 384;
+/// The tallest world a mod's dimension type may ask for (256 sections).
+pub const MAX_HEIGHT: i32 = 4096;
+static WORLD_HEIGHT: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(DEFAULT_HEIGHT);
+
+/// The height of the loaded world's chunks in blocks, from `MIN_Y` up: 384
+/// unless a mod's dimension type (`worldgen_overrides`) makes it taller.
+#[inline]
+pub fn height() -> i32 {
+    WORLD_HEIGHT.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// How many 16-block sections a chunk column has.
+#[inline]
+pub fn section_count() -> usize {
+    (height() / 16) as usize
+}
+/// Sets the world height, rounded up to whole sections and kept in
+/// `16..=MAX_HEIGHT`. Call it when a world starts, before its first chunk.
+pub fn set_height(blocks: i32) {
+    let blocks = (blocks.clamp(16, MAX_HEIGHT) + 15) & !15;
+    WORLD_HEIGHT.store(blocks, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A bit per section of one chunk column (up to 256).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SectionMask([u64; 4]);
+impl SectionMask {
+    #[inline]
+    pub fn insert(&mut self, i: usize) {
+        self.0[i >> 6] |= 1 << (i & 63);
+    }
+    #[inline]
+    pub fn remove(&mut self, i: usize) {
+        self.0[i >> 6] &= !(1 << (i & 63));
+    }
+    #[inline]
+    pub fn contains(&self, i: usize) -> bool {
+        i < 256 && self.0[i >> 6] & 1 << (i & 63) != 0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0 == [0; 4]
+    }
+    pub fn len(&self) -> usize {
+        self.0.iter().map(|w| w.count_ones() as usize).sum()
+    }
+    /// The mask with exactly the sections `indexes` set.
+    pub fn of(indexes: &[usize]) -> Self {
+        let mut mask = Self::default();
+        for &i in indexes {
+            mask.insert(i);
+        }
+        mask
+    }
+    /// The mask of the first `n` sections.
+    pub fn first(n: usize) -> Self {
+        let mut mask = Self::default();
+        for i in 0..n.min(256) {
+            mask.insert(i);
+        }
+        mask
+    }
+    /// The section indexes set, ascending.
+    pub fn iter(self) -> impl Iterator<Item = usize> {
+        (0..256).filter(move |&i| self.contains(i))
+    }
+}
 
 /// Biomes are 4x4x4 containers over the biome table (67 entries: a 7-bit
 /// global palette).
@@ -151,7 +217,7 @@ impl Chunk {
         Self {
             x,
             z,
-            sections: (0..SECTIONS)
+            sections: (0..section_count())
                 .map(|_| Arc::new(Section::default()))
                 .collect(),
             surface: OnceLock::new(),
@@ -169,7 +235,7 @@ impl Chunk {
     #[inline]
     pub fn get(&self, x: i32, y: i32, z: i32) -> u32 {
         let s = (y - MIN_Y) >> 4;
-        if !(0..SECTIONS as i32).contains(&s) {
+        if !(0..section_count() as i32).contains(&s) {
             return 0;
         }
         self.sections[s as usize].get(index(x, y, z))
@@ -193,7 +259,7 @@ impl Chunk {
     }
     pub fn set(&mut self, x: i32, y: i32, z: i32, v: u32) -> u32 {
         let s = (y - MIN_Y) >> 4;
-        if !(0..SECTIONS as i32).contains(&s) {
+        if !(0..section_count() as i32).contains(&s) {
             return v;
         }
         let previous = Arc::make_mut(&mut self.sections[s as usize]).set(index(x, y, z), v);
@@ -249,7 +315,7 @@ impl Chunk {
         if s < 0 {
             return 0;
         }
-        if s >= SECTIONS as i32 {
+        if s >= section_count() as i32 {
             return 0xF0;
         }
         self.sections[s as usize].light(index(x, y, z))
@@ -262,7 +328,7 @@ impl Chunk {
     /// the quart y clamped to the column).
     #[inline]
     pub fn biome(&self, x: i32, y: i32, z: i32) -> u16 {
-        let qy = ((y - MIN_Y) >> 2).clamp(0, HEIGHT / 4 - 1);
+        let qy = ((y - MIN_Y) >> 2).clamp(0, height() / 4 - 1);
         self.sections[(qy >> 2) as usize]
             .biomes
             .get(((qy & 3) << 4 | ((z & 15) >> 2) << 2 | (x & 15) >> 2) as usize) as u16
@@ -280,6 +346,21 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_masks_hold_a_tall_column() {
+        let mut mask = SectionMask::default();
+        for i in [0, 63, 64, 130, 255] {
+            mask.insert(i);
+        }
+        assert_eq!(mask.iter().collect::<Vec<_>>(), [0, 63, 64, 130, 255]);
+        assert_eq!(mask.len(), 5);
+        assert!(!mask.contains(256) && !mask.contains(1));
+        mask.remove(64);
+        assert!(!mask.contains(64) && mask.contains(63));
+        assert_eq!(SectionMask::first(131).len(), 131);
+        assert_eq!(SectionMask::of(&[0, 1, 2]), SectionMask::first(3));
+    }
     #[test]
     fn highest_skips_only_sections_that_cannot_match() {
         let (air, cave_air, stone) = (0, 7, 1);
@@ -294,7 +375,7 @@ mod tests {
         }
         chunk.set(3, 150, 4, stone);
         let full = |c: &Chunk, matches: &dyn Fn(u32) -> bool| {
-            (MIN_Y..MIN_Y + HEIGHT)
+            (MIN_Y..MIN_Y + height())
                 .rev()
                 .find(|&y| matches(c.get(3, y, 4)))
         };
@@ -319,7 +400,7 @@ mod tests {
         let (air, cave_air, stone) = (0, 7, 1);
         let is_air = |v: u32| v == air || v == cave_air;
         let scan = |c: &Chunk, x: i32, z: i32| {
-            (MIN_Y..MIN_Y + HEIGHT)
+            (MIN_Y..MIN_Y + height())
                 .rev()
                 .find(|&y| !is_air(c.get(x, y, z)))
                 .map_or(MIN_Y, |y| y + 1)
@@ -353,7 +434,7 @@ mod tests {
         }
         // Out-of-range writes and unchanged states keep the map.
         let before = chunk.world_surface(3, 3, is_air);
-        chunk.set(3, MIN_Y + HEIGHT, 3, stone);
+        chunk.set(3, MIN_Y + height(), 3, stone);
         chunk.set(3, before - 1, 3, chunk.get(3, before - 1, 3));
         assert!(chunk.surface.get().is_some());
         assert_eq!(chunk.world_surface(3, 3, |_| unreachable!()), before);

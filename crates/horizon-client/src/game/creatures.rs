@@ -366,7 +366,11 @@ impl Game<'_> {
     }
     /// Highest motion-blocking (no leaves) block + 1 (Heightmap MOTION_BLOCKING_NO_LEAVES).
     pub(super) fn motion_top(&self, x: i32, z: i32) -> i32 {
-        let top = if self.dim == Dim::Nether { 127 } else { 319 };
+        let top = if self.dim == Dim::Nether {
+            127
+        } else {
+            horizon_client::chunk::MIN_Y + horizon_client::chunk::height() - 1
+        };
         for y in (horizon_client::chunk::MIN_Y..=top).rev() {
             let f = self.res.facts().get(self.world.block(x, y, z));
             if (f.full_collision || f.fluid != Fluid::None) && !f.name.ends_with("leaves") {
@@ -2795,7 +2799,7 @@ impl Game<'_> {
         Ok(true)
     }
     /// A beam target's centre (half its height), interpolated.
-    fn beam_target(&self, who: Option<Who>, alpha: f64) -> Option<glam::DVec3> {
+    pub(super) fn beam_target(&self, who: Option<Who>, alpha: f64) -> Option<glam::DVec3> {
         match who? {
             Who::Player => {
                 let p = self.player.as_ref()?;

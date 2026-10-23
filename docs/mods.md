@@ -100,6 +100,17 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `inventory` / `game` / `hud` (0.1.16) | `inventory-read`, `inventory-edit`, `game-read`, `hud` | `get-tools()`: the hotbar's tools (`damage-per-block`, enchantments); `get-slots()`: all 41 inventory slots; `move-item(source-slot, target-slot)`: moves or swaps two slots (0-35, 40) in a world this game runs; `get-input-state()`: sneaking and the attack button; `show-action-bar(text, color)`: a line over the hotbar |
 | `chat` (0.1.15) | `chat` | `get-messages()`: the chat messages received since the last tick, with their sender (name, UUID) when a player wrote them; the `chat` hook now fires for every message the chat shows, server ones included |
 | `particles` / `world` (0.1.19) | `particles`, `world-read` | `set-suppressed(types, scale)`, `get-game-sprite(name)`, `register-command-particle(name, options)`; `watch-random-tick-blocks(blocks)`, `removed-blocks()` |
+| `entity` / `light-events` (0.1.20) | `entity-read`, `light-events` | `entity.get-detail(id)` (fuse, glowing, in-water, squish, carried block); `nearby` also lists projectiles, item frames and primed TNT; `light-events.poll()` (beacon and guardian beams, fireflies, sonic booms) |
+| `slots` / `items` / `world` / `overlay` / `entity` (0.1.21) | `slot-decorate`, `items-read`, `world-read`, `world-edit`, `overlay`, `entity-read` | `slots`: `picture` and `square` marks, `upload-texture`, `set-screen-marks`, `set-hud-marks`; `items.get-name-color`; `world.get-light-level`, `world.run-command`; `overlay` `world-picture`; other players in `entity.nearby`, `entity.get-face` |
+| `particles` / `weather` / `world` / `audio` (0.1.22) | `particles`, `weather-read`, `world-read`, `audio` | `particles.spawn-rotated(options, rotation)`; `weather.set-default-weather(visible)`; `world.get-biome-fog(pos)`; `audio.play(sound, place, volume, pitch)`; `get-game-sprite` also gives the GUI atlas' `environment/*` and `particle/*` |
+| `input` / `overlay` / `game` / `world` (0.1.23) | `input`, `overlay`, `game-edit`, `world-edit` | `input.poll()` (mouse wheel and buttons while playing), `input.set-wheel-captured(bool)`; `overlay` `world-box` (3D box edges, optionally through blocks); `game.add-exhaustion(amount)`, `game.set-break-speed-modifier(m)`; `world.merge-drops-at(pos)` |
+| `world` / `game` (0.1.24) | `world-edit`, `game-read` | `world.fall-block(pos, v, drops, place)`, `world.set-block(pos, id, properties)`, `world.spawn-item(pos, id, count)`; `game.get-game-mode()`, `game.get-player-tags()` |
+| `weather` / `particles` / `world` / `game` / `audio` (0.1.25) | `weather-read`, `particles`, `world-read`, `game-read`, `audio` | `weather.set-default-splashing`; `particles.get-particles`, `rotation::crossed`; `world.set-weather-passthrough`; `game.get-cloud-height`; `audio.register(name, ogg)` |
+| `particles` / `audio` (0.1.26) | `particles`, `audio` | `particles.remove(sprite, x, y, z)`; `audio.register-file(name)` (plik `sounds/<name>.ogg` z `.hmod`, pakowany przez `cargo-horizon-mod build`) |
+| `tooltip` / `screen` / `exchange` (0.1.27) | `tooltip`, `screen`, `exchange` | `tooltip.set-lines`, `get-hovered-enchantments`; `screen.get-station`; `exchange.publish/withdraw/read/list-keys` |
+| `tooltip` (0.1.28) | `tooltip` | `get-hovered-stack` (z zawartością kontenera), `set-hovered-tooltip` (własny tooltip stosu, zastępuje linie gry); limity 256×256 px i 128 elementów |
+| `screen` images (0.1.31) | `screen` | `upload-texture` up to 512×512 (overlay images stay 256×256), `get-max-texture-side`, `set-texture-filter(id, nearest/linear)` for smooth scaling |
+| `world` details, `game` viewport (0.1.32) | `world-read`, `game-read` | `world.get-chunk-details` (top block, ambiguity, light per column), `game.get-viewport` (GUI scale and window size), `game.get-server-view-distance` |
 | `chat-decorate` (0.1.18) | `chat-decorate` | `set-decoration(id, decoration)`: like `set-picture` plus a gap, a place in the text (`text(n)`: before character n) and a style (offset, size, colour) for each rectangle; `players` (0.1.18, `players`): `get-players()` lists the player list (name, display name, UUID) |
 | `chat-decorate` (0.1.15) | `chat-decorate` | `set-picture(id, picture)`: a picture (a player's skin regions or a GUI sprite) at the start of a message's first line; the game indents the text; set it in the `chat` hook |
 | `resources` (0.1.14) | `resource-read` | `namespaces()`, `list-files(namespace, prefix)`, `read-file(namespace, path)`: read-only files of the enabled resource packs (`assets/<namespace>/...`); since 0.1.17 `file-origin(namespace, path)`: `vanilla` or the id of the pack the file comes from |
@@ -449,8 +460,39 @@ distribution comes from the mod's
 `data/minecraft/worldgen/multi_noise_biome_source_parameter_list/<name>.json`,
 which the game reads as the quantized table the biome source uses.
 
-World generation is a whole world: a world generated with such a mod on is
-generated with it on, and the mod's data is read for every new chunk. Vanilla's
+**World types.** Such a mod does not change every world. Its replacements of
+vanilla's world generation (the `minecraft:` entries above, the Overworld's
+dimension, its dimension type and the biome distribution) are kept out of the
+data every world reads, and the mod becomes a **world type**: Create World's
+*World Type* button cycles Default, Superflat and then each mod's type, one at
+a time, named by the mod's `name`. Default is plain vanilla whatever mods are
+on. The choice is saved in the world's `world_gen_settings` as
+`horizon:world_type` and holds for that world only (so does the mod's
+dimension type, e.g. a taller world); a world whose mod is off does not open
+and says which mod it needs. The mod's data in its own namespace (its biomes,
+features, structures) is always loaded.
+
+A mod may instead (or also) declare world types as data: a
+`data/<namespace>/worldgen/world_preset/<name>.json` in its own namespace is a
+world type `<namespace>:<name>` whose dimensions are read from that preset, as
+a vanilla preset's. A mod with `worldgen_overrides` and no preset of its own
+gets one type named after the mod (id: the mod's id) that applies its
+replacements to the Overworld.
+
+A world type's mod may also ship Lithostitched-style data: modifiers
+`data/<ns>/lithostitched/worldgen_modifier/*.json` of type
+`lithostitched:add_features` append placed features to a decoration step of the
+biomes they name (kept in the type's own root when the mod has
+`worldgen_overrides`); their `predicate` (`tectonic:config` + `key`) is read from
+the mod's configuration. Placed features may use `lithostitched:condition`
+(`lithostitched:sample_density`) and `lithostitched:noise_slope` placement
+modifiers. `data/<ns>/worldgen_config.json`
+(`{"constants": {...}, "noises": {"key": {"scale": .., "multiplier": .., "offset": ..}}}`)
+gives the values `tectonic:config_constant`, `config_noise` and `config_clamp`
+read, over the game's defaults.
+
+The command line takes `--world-type <id>` for a world made with `--world`.
+Vanilla's
 tags are never replaced (a mod adds to them), so a mod that meant to narrow
 `minecraft:is_forest` widens it instead.
 
