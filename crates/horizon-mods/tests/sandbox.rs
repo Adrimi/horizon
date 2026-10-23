@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -1250,4 +1250,68 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
     // The marks stay for the game to draw.
     assert_eq!(mods.slot_marks().len(), 2);
     assert_eq!(mods.slot_marks()[0].slot, 0);
+}
+
+#[test]
+fn the_food_hud_apis_read_the_player_keep_tooltips_and_debug_lines() {
+    use horizon_mods::{Food, Health, Snapshot, TooltipHovered, Ui};
+    use std::{collections::HashMap, sync::Arc};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let mut foods = HashMap::new();
+    foods.insert(
+        "minecraft:cooked_beef".to_owned(),
+        (
+            Food {
+                nutrition: 8,
+                saturation: 12.8,
+            },
+            false,
+        ),
+    );
+    foods.insert(
+        "minecraft:rotten_flesh".to_owned(),
+        (
+            Food {
+                nutrition: 4,
+                saturation: 0.8,
+            },
+            true,
+        ),
+    );
+    mods.set_snapshot(Snapshot {
+        health: Some(Health {
+            health: 17.0,
+            max_health: 20.0,
+            absorption: 2.0,
+        }),
+        effects: vec!["minecraft:regeneration".into()],
+        difficulty: Some("hard".into()),
+        foods: Some(Arc::new(foods)),
+        ..player()
+    });
+    mods.set_ui(Ui {
+        keys_down: vec!["key.keyboard.left.shift".into()],
+        tooltip: Some(TooltipHovered {
+            item: "minecraft:bread".into(),
+            x: 1.0,
+            y: 2.0,
+            width: 30.0,
+            height: 20.0,
+        }),
+        ..Ui::default()
+    });
+    assert!(mods.command("foodfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "food health Some((17.0, 20.0, 2.0)) effects [\"minecraft:regeneration\"] difficulty Some(\"hard\") beef Some((8, 12.8)) rotten true offhand false shift true hovered minecraft:bread"
+        )]
+    );
+    // The game draws what the mod added under that item's tooltip.
+    let content = mods.tooltip_content("minecraft:cooked_beef");
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0].0, "test_guest");
+    assert_eq!(content[0].1.elements.len(), 1);
+    assert!(mods.tooltip_content("minecraft:bread").is_empty());
+    assert_eq!(mods.debug_lines(), ["hunger: 20"]);
 }

@@ -120,6 +120,10 @@ pub enum Capability {
     EntityRead,
     /// The slot under the cursor (API 0.1.10).
     SlotsRead,
+    /// What the mod adds to the tooltips of items (API 0.1.11).
+    Tooltip,
+    /// The mod's lines in the debug screen (API 0.1.11).
+    Debug,
     /// Marks the game draws on its slots (API 0.1.10): no interface of its
     /// own, `slots.set-marks` does nothing without it.
     SlotDecorate,
@@ -131,7 +135,7 @@ pub enum Capability {
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 24] = [
+    pub const ALL: [Capability; 26] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -155,6 +159,8 @@ impl Capability {
         Capability::EntityEdit,
         Capability::SlotsRead,
         Capability::SlotDecorate,
+        Capability::Tooltip,
+        Capability::Debug,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -183,6 +189,8 @@ impl Capability {
             Capability::EntityEdit => "entity",
             Capability::SlotsRead => "slots",
             Capability::SlotDecorate => "slots",
+            Capability::Tooltip => "tooltip",
+            Capability::Debug => "debug",
             Capability::Registries => "registries",
         }
     }
@@ -212,6 +220,8 @@ impl Capability {
             Capability::EntityEdit => "remove entities and change experience orbs",
             Capability::SlotsRead => "see which slot your cursor is over",
             Capability::SlotDecorate => "draw marks on your slots",
+            Capability::Tooltip => "add to the tooltips of items",
+            Capability::Debug => "add lines to the debug screen",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -270,6 +280,8 @@ impl fmt::Display for Capability {
             Capability::EntityEdit => "entity-edit",
             Capability::SlotsRead => "slots-read",
             Capability::SlotDecorate => "slot-decorate",
+            Capability::Tooltip => "tooltip",
+            Capability::Debug => "debug",
             Capability::Registries => "registries",
         };
         f.write_str(name)

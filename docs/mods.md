@@ -102,6 +102,9 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `entity` (0.1.8) | `entity-read`, `entity-edit` | `nearby(type-id, radius)`: mobs, items on the ground and experience orbs around the player (id, type, kind, name, position, yaw, height, health, xp, on-fire, hostile, held items), nearest first; `remove(id)`, `set-xp(id, xp)` with `entity-edit`; `get-face(uuid)` (none for now) |
 | `target` (0.1.9) | `target` | `get-entity-armor()`, `get-entity-absorption()` (0 for mobs), `get-block-face()` (`north`..`down`) |
 | `inventory` (0.1.10) | `inventory-read` | `get-inventory()`: the 36 slots, the armour, the off hand and the stack on the cursor, each with its components as opaque text; `get-crafting()`: the open inventory's grid and its result; `game.get-session()`: the world's number and the ms since it loaded |
+| `game` / `inventory` / `keys` (0.1.11) | `game-read`, `inventory-read`, `keys` | `get-health()`, `get-effects()`, `get-difficulty()`; `get-food-of(id)`, `get-harmful-food(id)`, `get-offhand()`; `is-down(key)` |
+| `tooltip` (0.1.11) | `tooltip` | `get-hovered()`: the item whose tooltip the game drew; `set-content(item, content)`: room and `screen` elements added under that item's tooltip |
+| `debug` (0.1.11) | `debug` | `set-lines(lines)`: the mod's group in the debug screen (F3) |
 | `slots` (0.1.10) | `slots-read`, `slot-decorate` | `get-hovered-slot()`; `set-marks(marks)`: frames, dots and fills the game draws on its slots (hotbar HUD, inventory and containers, creative hotbar row) |
 | `world.get-container` (0.1.9) | `world-read` | the slots of the chest, barrel, furnace, crafter... the player looks at or breaks |
 | `hud.get-bars()` (0.1.7) | `hud` | the containers of the hunger icons and hearts as the game drew them (after the shaking) |

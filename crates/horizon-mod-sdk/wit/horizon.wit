@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.10;
+package horizon:mods@0.1.11;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -67,6 +67,22 @@ interface game {
     }
     /// The world the player is in; none outside a world (API 0.1.10).
     get-session: func() -> option<session>;
+    /// The player's health (API 0.1.11).
+    record health {
+        health: f32,
+        /// The most health the player can have.
+        max-health: f32,
+        /// The absorption (the golden hearts).
+        absorption: f32,
+    }
+    /// The player's health; none outside a world (API 0.1.11).
+    get-health: func() -> option<health>;
+    /// The ids of the effects on the player (`minecraft:poison`,
+    /// `minecraft:regeneration`, ...); empty when there is none (API 0.1.11).
+    get-effects: func() -> list<string>;
+    /// The world's difficulty: `peaceful`, `easy`, `normal` or `hard`; none
+    /// outside a world (API 0.1.11).
+    get-difficulty: func() -> option<string>;
 }
 
 /// Capability `chat`: messages only the local player sees.
@@ -253,6 +269,15 @@ interface inventory {
     /// happens) without the capability, for an unknown id, a count of 0,
     /// when the player is not in creative, or in a world another game runs.
     give: func(id: string, count: u32) -> bool;
+    /// What eating the item with that id gives (`minecraft:cooked_beef`, ...);
+    /// none when it is not food (API 0.1.11).
+    get-food-of: func(id: string) -> option<food>;
+    /// Whether eating the item can hurt: one of its effects is Hunger
+    /// (rotten flesh, a pufferfish, raw chicken); the game draws such food
+    /// with the "hunger" icons (API 0.1.11).
+    get-harmful-food: func(id: string) -> bool;
+    /// The stack in the off hand; none when it is empty (API 0.1.11).
+    get-offhand: func() -> option<stack>;
 }
 
 /// Capability `hotbar`: changing the selected slot, as the number keys do
@@ -283,6 +308,10 @@ interface keys {
     get: func(action: string) -> option<string>;
     /// The key events since the last call; empty when nothing happened.
     poll: func() -> list<key-event>;
+    /// Whether the key is held down now (`key.keyboard.left.shift`, ...): the
+    /// names are the game's, as in `bind` and `options.txt`. Cheap enough
+    /// to ask every frame (API 0.1.11).
+    is-down: func(key: string) -> bool;
 }
 
 /// Capability `storage`: a per-mod folder of small key/value files, quota'd
@@ -1137,6 +1166,47 @@ interface slots {
     get-hovered-slot: func() -> option<u32>;
 }
 
+/// Capability `tooltip`: what the mod adds to the tooltip the game draws for
+/// an item (API 0.1.11).
+interface tooltip {
+    use screen.{element};
+    /// The item whose tooltip the game drew in the last frame (inventory,
+    /// containers, the creative inventory), with the tooltip's frame.
+    record hovered {
+        /// `minecraft:cooked_beef`, ...
+        item: string,
+        /// The frame in GUI pixels.
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    }
+    /// What the mod adds under the tooltip's text: the room it takes and
+    /// what is drawn in it. The elements' positions are from the top left
+    /// of that room; `picture` elements use the images of
+    /// `overlay.upload-texture`.
+    record content {
+        width: f32,
+        height: f32,
+        elements: list<element>,
+    }
+    /// The item the game drew a tooltip for in the last frame; none when
+    /// the cursor was over none.
+    get-hovered: func() -> option<hovered>;
+    /// What to add to the tooltip of the item (all stacks of that item id);
+    /// none removes it. It stays until the mod changes it, and goes with
+    /// the mod. Up to 32 items, 64 elements each, and 128 by 128 pixels.
+    set-content: func(item: string, content: option<content>);
+}
+
+/// Capability `debug`: lines the mod adds to the debug screen (F3) (API
+/// 0.1.11).
+interface debug {
+    /// The mod's lines, in a group of their own; an empty list removes the
+    /// group. At most 16 lines of 256 characters.
+    set-lines: func(lines: list<string>);
+}
+
 /// What the game calls. Only the hooks `init` asks for are ever called.
 interface events {
     record registration {
@@ -1179,6 +1249,8 @@ world horizon-mod {
     import overlay;
     import %entity;
     import slots;
+    import tooltip;
+    import debug;
     import %world;
     export events;
 }

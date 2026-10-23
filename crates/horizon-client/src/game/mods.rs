@@ -71,6 +71,12 @@ pub(super) struct ModsState {
     /// (`game.get-session`, API 0.1.10).
     session: u64,
     session_started: Option<Instant>,
+    /// The frame of the last tooltip box the game drew, and the item it was
+    /// for (`tooltip`, API 0.1.11).
+    pub(super) tooltip_frame: std::cell::Cell<[f32; 4]>,
+    tooltip_hovered: std::cell::Cell<Option<(String, [f32; 4])>>,
+    /// What eating each food gives and whether it can hurt, built once.
+    foods: std::sync::OnceLock<Arc<HashMap<String, (Food, bool)>>>,
     /// The atlas slot of each mod's overlay image, by (mod, image).
     overlay_slots: HashMap<(String, u32), usize>,
     /// The version uploaded to each overlay slot.
@@ -383,6 +389,41 @@ impl Game<'_> {
         if mods.uses(Capability::RecipesRead) {
             snapshot.recipes = self.mod_recipes();
         }
+        if mods.uses(Capability::GameRead)
+            && let Some(p) = self.player.as_ref()
+        {
+            snapshot.health = Some(horizon_mods::Health {
+                health: p.health.health(),
+                max_health: 20.0,
+                absorption: p.health.absorption(),
+            });
+            snapshot.effects = self
+                .potions
+                .effects
+                .list
+                .iter()
+                .map(|e| {
+                    if e.id.contains(':') {
+                        e.id.to_string()
+                    } else {
+                        format!("minecraft:{}", e.id)
+                    }
+                })
+                .collect();
+            snapshot.difficulty = Some(
+                match self.ui.difficulty {
+                    0 => "peaceful",
+                    1 => "easy",
+                    3 => "hard",
+                    _ => "normal",
+                }
+                .to_owned(),
+            );
+        }
+        if inventory && self.player.is_some() {
+            snapshot.foods = Some(self.mod_foods());
+            snapshot.offhand = self.offhand.as_ref().map(|s| self.mod_stack(s, None));
+        }
         if mods.uses(Capability::GameRead) && self.player.is_some() {
             snapshot.session = Some(horizon_mods::Session {
                 id: self.mods.session,
@@ -544,6 +585,11 @@ impl Game<'_> {
             return;
         }
         let mut snapshot = self.mod_snapshot();
+        // The maximum health is an attribute the snapshot, which only reads,
+        // cannot compute.
+        if let (Some(h), Some(p)) = (snapshot.health.as_mut(), self.player.as_mut()) {
+            h.max_health = p.attribute("minecraft:max_health").unwrap_or(20.0) as f32;
+        }
         snapshot.broken = std::mem::take(&mut self.mods.broken);
         let landed: Vec<horizon_mods::Landing> = std::mem::take(&mut self.particles.mod_landings)
             .into_iter()
@@ -1047,6 +1093,21 @@ impl Game<'_> {
             }),
             bars: self.mods.bars.clone(),
             hovered_slot: self.mod_hovered_slot(&batch),
+            keys_down: self
+                .physical_keys
+                .iter()
+                .filter_map(|k| horizon_client::keybinds::key_name(*k))
+                .map(str::to_owned)
+                .collect(),
+            tooltip: self.mods.tooltip_hovered.take().map(|(item, f)| {
+                horizon_mods::TooltipHovered {
+                    item,
+                    x: f[0],
+                    y: f[1],
+                    width: f[2],
+                    height: f[3],
+                }
+            }),
             seed: (self.remote.is_none() && self.player.is_some())
                 .then_some(self.level.seed as u64),
             fov: self.mods.projection.map(|p| p.fov),
@@ -2052,4 +2113,92 @@ impl Game<'_> {
             }
         }
     }
+}
+
+/// Food data and the tooltips of items for mods (API 0.1.11).
+impl Game<'_> {
+    /// What eating each food gives, and whether it can hurt (a Hunger effect).
+    fn mod_foods(&self) -> Arc<HashMap<String, (Food, bool)>> {
+        use horizon_client::items::ConsumeEffect;
+        let built = self.mods.foods.get_or_init(|| {
+            let items = self.res.items();
+            let mut foods = HashMap::new();
+            for stack in self.creative_screen.search_items() {
+                let id = stack.item.to_string();
+                let Some(info) = items.get(&stack.item) else {
+                    continue;
+                };
+                let Some((nutrition, saturation)) = info.food else {
+                    continue;
+                };
+                let harmful = info.consumable.as_ref().is_some_and(|c| {
+                    c.effects.iter().any(|e| {
+                        matches!(e, ConsumeEffect::ApplyEffects { effects, .. }
+                            if effects.iter().any(|f| f.id.trim_start_matches("minecraft:") == "hunger"))
+                    })
+                });
+                foods.insert(id, (Food { nutrition, saturation }, harmful));
+            }
+            Arc::new(foods)
+        });
+        Arc::clone(built)
+    }
+    /// Draws the tooltip of a stack with what mods add to it; false when no
+    /// mod adds anything (the game draws the tooltip itself).
+    pub(super) fn draw_mod_tooltip(
+        &mut self,
+        batch: &mut HudBatch,
+        stack: &horizon_client::items::ItemStack,
+    ) -> bool {
+        if !self.mods.mods.uses(Capability::Tooltip) {
+            return false;
+        }
+        let item = stack.item.to_string();
+        let contents: Vec<(String, horizon_mods::TooltipContent)> = self
+            .mods
+            .mods
+            .tooltip_content(&item)
+            .into_iter()
+            .map(|(id, c)| (id.to_owned(), c.clone()))
+            .collect();
+        let (width, height) = contents.iter().fold((0.0f32, 0.0f32), |(w, h), (_, c)| {
+            (w.max(c.width), h + c.height)
+        });
+        let lines = self.stack_tooltip(stack);
+        let (x, y) = self.cursor;
+        if !contents.is_empty() {
+            let Some((gx, mut gy)) = self.draw_tooltip_box(batch, &lines, x, y, (width, height))
+            else {
+                return true;
+            };
+            for (mod_id, c) in &contents {
+                let moved: Vec<ScreenElement> = c
+                    .elements
+                    .iter()
+                    .filter_map(|e| translated(e, gx, gy))
+                    .collect();
+                self.draw_mod_elements_of(batch, Some(mod_id), &moved);
+                gy += c.height;
+            }
+        } else {
+            self.draw_tooltip_lines(batch, &lines, x, y);
+        }
+        self.mods
+            .tooltip_hovered
+            .set(Some((item, self.mods.tooltip_frame.get())));
+        true
+    }
+}
+/// An element moved by (dx, dy); none for the kinds that have their own place.
+fn translated(e: &ScreenElement, dx: f32, dy: f32) -> Option<ScreenElement> {
+    let mut e = e.clone();
+    match &mut e {
+        ScreenElement::Fill(f) => (f.x += dx, f.y += dy),
+        ScreenElement::Label(l) => (l.x += dx, l.y += dy),
+        ScreenElement::Sprite(s) => (s.x += dx, s.y += dy),
+        ScreenElement::Picture(p) => (p.x += dx, p.y += dy),
+        ScreenElement::Item(i) => (i.x += dx, i.y += dy),
+        ScreenElement::Tooltip(_) | ScreenElement::Tip(_) => return None,
+    };
+    Some(e)
 }

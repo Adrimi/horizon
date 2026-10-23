@@ -439,6 +439,10 @@ impl Game<'_> {
                 ));
             }
         }
+        let mod_lines = self.mods.mods.debug_lines();
+        if !mod_lines.is_empty() {
+            d.group("mods", mod_lines);
+        }
         let (left, right) = d.columns(&self.debug_chart_lines());
         let atlas = &self.gui.atlas;
         let mut draws = debug_overlay::draw(&atlas.font, [&left, &right], scale, width);

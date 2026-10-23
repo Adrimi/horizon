@@ -2114,7 +2114,7 @@ impl Game<'_> {
     }
     /// `draw_tooltip_lines` with room for an `extra` (width, height) image
     /// below the text; returns where that image goes.
-    fn draw_tooltip_box(
+    pub(super) fn draw_tooltip_box(
         &self,
         batch: &mut HudBatch,
         lines: &[(String, u32)],
@@ -2148,6 +2148,7 @@ impl Game<'_> {
         if y + h + 3.0 > batch.height {
             y = batch.height - h - 3.0;
         }
+        self.mods.tooltip_frame.set([x - 4.0, y - 4.0, w + 8.0, h + 8.0]);
         y = y.max(4.0);
         batch.fill(atlas, x - 3.0, y - 4.0, w + 6.0, 1.0, rgba(16, 0, 16, 240));
         batch.fill(
@@ -2195,6 +2196,9 @@ impl Game<'_> {
     /// shows its slots as a 9x3 grid of items instead of the item list.
     pub(super) fn draw_stack_tooltip(&mut self, batch: &mut HudBatch, stack: &ItemStack) {
         let (x, y) = self.cursor;
+        if self.draw_mod_tooltip(batch, stack) {
+            return;
+        }
         let slots = horizon_client::shulker_preview::grid(stack)
             .filter(|_| self.settings.extras.shulker_preview);
         let Some(slots) = slots else {

@@ -20,8 +20,8 @@ mod bindings {
 pub use bindings::horizon::mods::{
     atmosphere::Haze,
     entity::{Entity as WorldEntity, EntityKind, Face},
-    game::Session,
     game::{Clock, FoodStats, Player},
+    game::{Health, Session},
     hud::{BarIcon, Bars},
     hud::{Corner, Line},
     inventory::{Crafting, Food, ItemStack as InventoryStack, PlayerInventory, Stack},
@@ -40,6 +40,7 @@ pub use bindings::horizon::mods::{
     },
     slots::{Mark, MarkShape},
     target::{Block, Entity},
+    tooltip::{Content as TooltipContent, Hovered as TooltipHovered},
     weather::State as WeatherState,
     world::{Biome, BlockBroken, BlockPos, ChunkSurface, ContainerStack, WorldBlock},
 };
@@ -47,8 +48,9 @@ use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
     horizon::mods::{
-        atmosphere, chat, entity, game, hotbar, hud, inventory, items, keys, log as mod_log,
-        overlay, particles, recipes, screen, settings, slots, storage, target, weather, world,
+        atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys, log as mod_log,
+        overlay, particles, recipes, screen, settings, slots, storage, target, tooltip, weather,
+        world,
     },
 };
 
@@ -84,6 +86,8 @@ pub const SCREEN_SHAPES: usize = 4096;
 /// How many elements `paint` takes per call, and how many keys a panel names.
 pub const SCREEN_ELEMENTS: usize = 4096;
 const SLOT_MARKS: usize = 256;
+const TOOLTIP_ITEMS: usize = 32;
+const TOOLTIP_ELEMENTS: usize = 64;
 /// How many images and world elements a mod's overlay holds.
 pub const OVERLAY_TEXTURES: usize = 7;
 const OVERLAY_WORLD_ELEMENTS: usize = 512;
@@ -136,6 +140,14 @@ pub struct Snapshot {
     pub entity_absorption: Option<f32>,
     pub block_face: Option<String>,
     pub container: Option<([i32; 3], Vec<Option<ContainerStack>>)>,
+    /// What the player is (`game-read`, `inventory-read`; API 0.1.11): health,
+    /// effect ids, the difficulty, the off hand, what eating each food gives
+    /// and whether it can hurt.
+    pub health: Option<Health>,
+    pub effects: Vec<String>,
+    pub difficulty: Option<String>,
+    pub offhand: Option<Stack>,
+    pub foods: Option<Arc<HashMap<String, (Food, bool)>>>,
     /// The whole inventory, the crafting grid and the world's session
     /// (`inventory-read`, `game-read`; API 0.1.10).
     pub inventory: Option<PlayerInventory>,
@@ -228,6 +240,10 @@ pub struct Ui {
     pub size: Option<ScreenSize>,
     /// The slot under the cursor in the open screen with slots (`slots`).
     pub hovered_slot: Option<u32>,
+    /// The keys held down, by name (`keys.is-down`), and the item whose
+    /// tooltip was drawn last (`tooltip`).
+    pub keys_down: Vec<String>,
+    pub tooltip: Option<TooltipHovered>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -249,6 +265,8 @@ impl Default for Ui {
             fov: None,
             size: None,
             hovered_slot: None,
+            keys_down: Vec::new(),
+            tooltip: None,
         }
     }
 }
@@ -514,6 +532,9 @@ struct State {
     haze: Option<Haze>,
     /// The marks the mod has the game draw on its slots (`slots`).
     slot_marks: Vec<Mark>,
+    /// What the mod adds to item tooltips, and its debug lines.
+    tooltips: Vec<(String, TooltipContent)>,
+    debug_lines: Vec<String>,
     /// The manifest declares `slot-decorate`.
     can_decorate: bool,
     /// What the mod painted in the HUD's layers, at points of the world, and
@@ -718,6 +739,8 @@ impl Mods {
             landings: Vec::new(),
             haze: None,
             slot_marks: Vec::new(),
+            tooltips: Vec::new(),
+            debug_lines: Vec::new(),
             can_decorate: m.capabilities.contains(&crate::Capability::SlotDecorate),
             overlay_layers: [Vec::new(), Vec::new()],
             overlay_world: Vec::new(),
@@ -874,6 +897,29 @@ impl Mods {
                 (!d.overlay_textures.is_empty())
                     .then_some((d.id.as_str(), d.overlay_textures.as_slice()))
             })
+            .collect()
+    }
+    /// What the running mods add to the tooltip of the item (API 0.1.11),
+    /// with the id of the mod, whose images the elements use.
+    pub fn tooltip_content(&self, item: &str) -> Vec<(&str, &TooltipContent)> {
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let d = e.run.as_ref()?.store.data();
+                let (_, c) = d.tooltips.iter().find(|(i, _)| i == item)?;
+                Some((d.id.as_str(), c))
+            })
+            .collect()
+    }
+    /// The debug lines of the running mods, by mod name (API 0.1.11).
+    pub fn debug_lines(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter_map(|e| {
+                let d = e.run.as_ref()?.store.data();
+                (!d.debug_lines.is_empty()).then(|| d.debug_lines.clone())
+            })
+            .flatten()
             .collect()
     }
     /// The marks running mods have the game draw on its slots (API 0.1.10).
@@ -1273,6 +1319,15 @@ impl game::Host for State {
     fn get_session(&mut self) -> Option<Session> {
         self.snapshot.session
     }
+    fn get_health(&mut self) -> Option<Health> {
+        self.snapshot.health
+    }
+    fn get_effects(&mut self) -> Vec<String> {
+        self.snapshot.effects.clone()
+    }
+    fn get_difficulty(&mut self) -> Option<String> {
+        self.snapshot.difficulty.clone()
+    }
 }
 impl chat::Host for State {
     fn show(&mut self, text: String) {
@@ -1319,6 +1374,19 @@ impl target::Host for State {
 impl inventory::Host for State {
     fn get_hotbar(&mut self) -> Vec<Option<Stack>> {
         self.snapshot.hotbar.clone()
+    }
+    fn get_food_of(&mut self, id: String) -> Option<Food> {
+        self.snapshot.foods.as_ref()?.get(&id).map(|(f, _)| *f)
+    }
+    fn get_harmful_food(&mut self, id: String) -> bool {
+        self.snapshot
+            .foods
+            .as_ref()
+            .and_then(|f| f.get(&id))
+            .is_some_and(|(_, harmful)| *harmful)
+    }
+    fn get_offhand(&mut self) -> Option<Stack> {
+        self.snapshot.offhand.clone()
     }
     fn get_inventory(&mut self) -> Option<PlayerInventory> {
         self.snapshot.inventory.clone()
@@ -1448,6 +1516,32 @@ impl slots::Host for State {
         self.ui.hovered_slot
     }
 }
+impl tooltip::Host for State {
+    fn get_hovered(&mut self) -> Option<TooltipHovered> {
+        self.ui.tooltip.clone()
+    }
+    fn set_content(&mut self, item: String, content: Option<TooltipContent>) {
+        self.tooltips.retain(|(i, _)| *i != item);
+        let Some(mut content) = content else {
+            return;
+        };
+        if self.tooltips.len() >= TOOLTIP_ITEMS || item.len() > 128 {
+            return;
+        }
+        content.width = content.width.clamp(0.0, 128.0);
+        content.height = content.height.clamp(0.0, 128.0);
+        content.elements = clean_elements(content.elements)
+            .into_iter()
+            .take(TOOLTIP_ELEMENTS)
+            .collect();
+        self.tooltips.push((item, content));
+    }
+}
+impl debug::Host for State {
+    fn set_lines(&mut self, lines: Vec<String>) {
+        self.debug_lines = lines.into_iter().take(16).map(clip).collect();
+    }
+}
 impl weather::Host for State {
     fn get_weather(&mut self) -> Option<WeatherState> {
         self.snapshot.weather
@@ -1563,6 +1657,9 @@ impl keys::Host for State {
             .iter()
             .find(|b| b.action == action)
             .map(|b| b.key.clone())
+    }
+    fn is_down(&mut self, key: String) -> bool {
+        self.ui.keys_down.contains(&key)
     }
     fn poll(&mut self) -> Vec<KeyEvent> {
         std::mem::take(&mut self.key_events)

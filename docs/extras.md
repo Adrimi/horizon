@@ -228,30 +228,6 @@ and the container screen tests are unchanged).
   server accepts it; a unit test replays the planned clicks through the menu
   engine on random chests.
 
-### Item and recipe browser (`recipeBrowser`, default off)
-- Beside the inventory, the crafting table and container screens (chests,
-  barrels...; not the stations with screens of their own): a searchable grid of
-  every item in the creative search tab's order, in pages, with a page number,
-  arrows and the wheel. `@namespace` in the search keeps a namespace (a prefix,
-  as JEI's); a right click on the search box clears it.
-- R over an item (in the panel, an inventory slot or a recipe) shows the
-  recipes that make it: crafting (shaped and shapeless), smelting, blasting,
-  smoking, campfire cooking, stonecutting, smithing (transforms and trims). U
-  shows the recipes that use it. The frame draws the station, the ingredients
-  with arrows and the result; Left/Right (or its arrows) step through the
-  recipes, a click on an ingredient follows it, Escape/Backspace goes back.
-- A plain click in the panel shows an item's recipes, a right click its uses.
-  In creative mode a click gives the stack to the inventory instead (a right
-  click one item); the stack goes straight to the inventory, not to the cursor,
-  because the click's end would drop what the cursor holds.
-- The panel has a dark background, as JEI's, and the recipes' frame is dark
-  too, with the station's icon, the ingredients and the result.
-- The recipes are the local data's (vanilla's and content mods'), built once
-  when first needed from `Recipes` and `StationRecipes`; a 26.3 server sends a
-  client only the recipe book's displays, not the recipes. Special (code)
-  crafting recipes are not shown. Code: `item_browser.rs` (the lookup, the
-  query and the pages) and `game/item_browser.rs` (panel, frame, keys, clicks).
-
 ### Item highlighter (`itemHighlighter`, default off)
 - A slot that holds a newly gained item is marked: a soft golden frame around
   the slot and a dot in its top right corner, in the hotbar and in the

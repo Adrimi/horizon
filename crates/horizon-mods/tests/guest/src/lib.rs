@@ -6,8 +6,8 @@
 //! `tick` and `frame` do nothing, to measure the cost of
 //! a call.
 use horizon_mod_sdk::{
-    Mod, Registration, atmosphere, chat, entity, game, hotbar, hud, inventory, items, keys,
-    overlay, particles, recipes, screen, settings, slots, storage, target, weather, world,
+    Mod, Registration, atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys,
+    overlay, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
 };
 
 struct Guest {
@@ -51,6 +51,7 @@ impl Mod for Guest {
             "entityfx",
             "lookfx",
             "slotfx",
+            "foodfx",
             "save",
             "load",
             "save_key",
@@ -520,6 +521,36 @@ impl Mod for Guest {
                 Ok(Some(format!(
                     "slots {summary:?} crafting {crafting:?} session {session:?} hovered {:?}",
                     slots::get_hovered_slot()
+                )))
+            }
+            "foodfx" => {
+                let health = game::get_health().map(|h| (h.health, h.max_health, h.absorption));
+                let food = inventory::get_food_of("minecraft:cooked_beef")
+                    .map(|f| (f.nutrition, f.saturation));
+                tooltip::set_content(
+                    "minecraft:cooked_beef",
+                    Some(&tooltip::Content {
+                        width: 60.0,
+                        height: 10.0,
+                        elements: vec![screen::Element::Label(screen::LabelElement {
+                            x: 0.0,
+                            y: 0.0,
+                            text: "8 hunger".into(),
+                            color: 0xFFFF_FFFF,
+                            shadow: true,
+                            scale: 1.0,
+                        })],
+                    }),
+                );
+                debug::set_lines(&["hunger: 20".to_string()]);
+                Ok(Some(format!(
+                    "food health {health:?} effects {:?} difficulty {:?} beef {food:?} rotten {} offhand {} shift {} hovered {}",
+                    game::get_effects(),
+                    game::get_difficulty(),
+                    inventory::get_harmful_food("minecraft:rotten_flesh"),
+                    inventory::get_offhand().is_some(),
+                    keys::is_down("key.keyboard.left.shift"),
+                    tooltip::get_hovered().map_or("none".into(), |h| h.item),
                 )))
             }
             "giveitem" => {
