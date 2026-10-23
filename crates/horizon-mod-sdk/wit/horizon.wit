@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.14;
+package horizon:mods@0.1.15;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -89,6 +89,70 @@ interface game {
 interface chat {
     /// Shown in chat after the mod's name, like a system message.
     show: func(text: string);
+    /// The player who wrote a chat message (API 0.1.15).
+    record sender {
+        /// Their name; empty when the game does not know it (they are not
+        /// in the player list).
+        name: string,
+        /// Their UUID as 32 hexadecimal characters, no hyphens.
+        uuid: string,
+    }
+    /// A chat message the player received (API 0.1.15).
+    record message {
+        /// The message's number in this session: grows, never repeats.
+        id: u64,
+        /// Its text, without formatting, as the `chat` hook gets it.
+        text: string,
+        /// Who wrote it; none for a system message, `/say` and a message
+        /// whose sender the server hid.
+        sender: option<sender>,
+    }
+    /// The messages received since the last tick, oldest first, the same
+    /// for every mod. The game adds a message to this list *before* it calls
+    /// the `chat` hook, so a mod that reads it in the hook finds that
+    /// message last (API 0.1.15).
+    get-messages: func() -> list<message>;
+}
+
+/// Capability `chat-decorate`: a picture before a chat message and the room
+/// the game leaves for it (API 0.1.15). The mod says once which picture a
+/// message gets; the game draws it and indents the text, so no mod code
+/// runs when the chat is drawn.
+interface chat-decorate {
+    /// Where a picture comes from.
+    variant source {
+        /// The skin of the player who wrote the message (64 by 64): the
+        /// one the player list has downloaded, else the default skin for
+        /// their UUID.
+        sender-skin,
+        /// The skin of the player with this UUID (32 hexadecimal
+        /// characters), 64 by 64.
+        player-skin(string),
+        /// A sprite of the game's GUI atlas by name (`hud/heart/full`).
+        sprite(string),
+    }
+    /// A rectangle of the source, in pixels.
+    record region {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    }
+    record picture {
+        source: source,
+        /// The rectangles to draw, one over the other in the same place
+        /// (a face and its hat); empty draws the sprite whole. At most 8.
+        regions: list<region>,
+        /// The picture's size on screen, in GUI pixels (1 to 64).
+        width: u32,
+        height: u32,
+    }
+    /// The picture before the message with this id, or none for no picture.
+    /// Set it in the `chat` hook, before the game adds the message to the
+    /// chat; the picture then starts the message's first line and the text
+    /// of all its lines is indented by `width + 2` pixels. The first mod to
+    /// give a picture for a message wins.
+    set-picture: func(id: u64, picture: option<picture>);
 }
 
 /// Capability `hud`: one panel of text lines per mod, drawn by the game
@@ -1387,6 +1451,7 @@ world horizon-mod {
     import tooltip;
     import debug;
     import lighting;
+    import chat-decorate;
     import resources;
     import texture-rules;
     import %world;

@@ -7,7 +7,7 @@ use crate::{
         Dispatcher, ParseResults, Registries, Suggestion, SuggestionsBuilder, merge_suggestions,
     },
     hud::{HudAtlas, HudBatch},
-    hud_layout::{self, GuiDraw, PoseOp},
+    hud_layout::{self, Blend, GuiDraw, PoseOp},
     screen_draw::{self as d, Draw, Measure, TextField},
     text::{self, ClickEvent, Style, Text},
 };
@@ -64,6 +64,27 @@ impl ChatOptions {
         (9.0 * (self.line_spacing + 1.0)) as i32
     }
 }
+/// Where a chat picture comes from (`chat-decorate`, API 0.1.15).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PictureSource {
+    /// The skin of the message's sender.
+    Sender,
+    /// The skin of a player by UUID.
+    Skin(u128),
+    /// A sprite of the GUI atlas.
+    Sprite(String),
+}
+/// A picture a mod put before a message: drawn at the start of its first
+/// line, with every line of the message indented by `width + 2`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picture {
+    pub source: PictureSource,
+    /// Rectangles of the source (x, y, w, h), drawn one over another; none
+    /// draws a sprite whole.
+    pub regions: Vec<[i32; 4]>,
+    pub width: i32,
+    pub height: i32,
+}
 #[derive(Clone, Debug)]
 struct Message {
     added: u64,
@@ -71,6 +92,8 @@ struct Message {
     indicator: Option<u32>,
     /// The player who sent it (the chat heads extra).
     sender: Option<u128>,
+    /// A picture a mod set for it.
+    picture: Option<std::sync::Arc<Picture>>,
 }
 /// A wrapped line (`GuiMessage.Line`).
 #[derive(Clone, Debug)]
@@ -80,6 +103,9 @@ struct Line {
     indicator: Option<u32>,
     /// The sender whose head starts the line (a message's first line).
     head: Option<u128>,
+    /// A mod's picture, on the first line, and the message's sender for it.
+    picture: Option<std::sync::Arc<Picture>>,
+    sender: Option<u128>,
     /// Where the text starts: [`HEAD_WIDTH`] for every line of a message
     /// with a head, 0 otherwise.
     indent: i32,
@@ -145,6 +171,20 @@ impl Chat {
         ticks: u64,
         focused: bool,
     ) {
+        self.add_decorated(atlas, content, indicator, sender, None, ticks, focused);
+    }
+    /// [`Chat::add_from`] with a `picture` a mod gave the message.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_decorated(
+        &mut self,
+        atlas: &HudAtlas,
+        content: Text,
+        indicator: Option<u32>,
+        sender: Option<u128>,
+        picture: Option<Picture>,
+        ticks: u64,
+        focused: bool,
+    ) {
         // ChatComponent.logChatMessage: every message is in the log.
         crate::logging::write_only(log::Level::Info, &format!("[CHAT] {}", content.plain()));
         if self.log {
@@ -155,6 +195,7 @@ impl Chat {
             content,
             indicator,
             sender,
+            picture: picture.map(std::sync::Arc::new),
         };
         self.add_lines(&atlas.font, &message, focused);
         self.messages.insert(0, message);
@@ -162,8 +203,13 @@ impl Chat {
         self.received += 1;
     }
     fn add_lines(&mut self, font: &crate::font::Font, message: &Message, focused: bool) {
-        let head = message.sender.filter(|_| self.heads);
-        let indent = if head.is_some() { HEAD_WIDTH } else { 0 };
+        let picture = message.picture.clone();
+        let head = message.sender.filter(|_| self.heads && picture.is_none());
+        let indent = match (&picture, head) {
+            (Some(p), _) => p.width + 2,
+            (None, Some(_)) => HEAD_WIDTH,
+            (None, None) => 0,
+        };
         let width = self.max_width() - indent;
         let wrapped = font.wrap_components(&message.content, width);
         for (i, line) in wrapped.into_iter().enumerate() {
@@ -178,11 +224,61 @@ impl Chat {
                     content: line,
                     indicator: message.indicator,
                     head: head.filter(|_| i == 0),
+                    picture: picture.clone().filter(|_| i == 0),
+                    sender: message.sender,
                     indent,
                 },
             );
         }
         self.lines.truncate(100);
+    }
+    /// A mod's picture at the start of a line whose text is at `y`.
+    fn draw_picture(
+        &self,
+        out: &mut Vec<GuiDraw>,
+        picture: &Picture,
+        sender: Option<u128>,
+        y: i32,
+        color: u32,
+    ) {
+        let skin = match &picture.source {
+            PictureSource::Sprite(name) => {
+                out.push(GuiDraw::Sprite {
+                    sprite: name.clone().into(),
+                    x: 0,
+                    y,
+                    w: picture.width,
+                    h: picture.height,
+                    region: None,
+                    color,
+                    blend: Blend::Textured,
+                });
+                return;
+            }
+            PictureSource::Sender => sender,
+            PictureSource::Skin(uuid) => Some(*uuid),
+        };
+        let Some(uuid) = skin else {
+            return;
+        };
+        let skin = self
+            .head_skins
+            .get(&uuid)
+            .map_or_else(|| crate::tab_list::default_skin(uuid), String::as_str);
+        for [u, v, w, h] in &picture.regions {
+            out.push(GuiDraw::Blit {
+                texture: std::borrow::Cow::Owned(skin.to_owned()),
+                blend: Blend::Textured,
+                x: 0,
+                y,
+                w: picture.width,
+                h: picture.height,
+                uv: [*u as f32, *v as f32],
+                src: [*w, *h],
+                tex: [64, 64],
+                color,
+            });
+        }
     }
     /// Re-wrap after a width or scale change (ChatComponent.rescaleChat).
     pub fn rescale(&mut self, atlas: &HudAtlas) {
@@ -295,6 +391,15 @@ impl Chat {
                         8,
                         true,
                         false,
+                        color,
+                    );
+                }
+                if let Some(picture) = &line.picture {
+                    self.draw_picture(
+                        &mut out,
+                        picture,
+                        line.sender,
+                        bottom - bottom_to_text,
                         color,
                     );
                 }

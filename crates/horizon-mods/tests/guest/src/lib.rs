@@ -7,7 +7,7 @@
 //! a call.
 use horizon_mod_sdk::{
     Mod, Registration, atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys,
-    lighting, overlay, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
+    lighting, chat_decorate, overlay, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
 };
 
 struct Guest {
@@ -19,6 +19,8 @@ struct Guest {
     /// The random ticks heard so far, and the last block's description.
     heard: u32,
     last: String,
+    /// What the last chat hook read from `chat.get-messages`.
+    said: String,
 }
 
 impl Mod for Guest {
@@ -58,6 +60,7 @@ impl Mod for Guest {
             "ticks",
             "lightfx",
             "texfx",
+            "said",
             "resfx",
             "save",
             "load",
@@ -67,6 +70,7 @@ impl Mod for Guest {
         .into_iter()
         .fold(Registration::new(), Registration::command)
         .on_tick()
+        .on_chat()
         .on_frame();
         Ok((
             Guest {
@@ -75,9 +79,38 @@ impl Mod for Guest {
                 panel: 0,
                 heard: 0,
                 last: String::new(),
+                said: String::new(),
             },
             hooks,
         ))
+    }
+    fn chat(&mut self, text: &str) {
+        // A picture before the messages that say `pic`, from their sender.
+        let messages = chat::get_messages();
+        self.said = messages
+            .iter()
+            .map(|m| format!("{}:{}:{}", m.id, m.text, m.sender.as_ref().map_or("-", |s| &s.name)))
+            .collect::<Vec<_>>()
+            .join("|");
+        if text.contains("pic")
+            && let Some(m) = messages.last()
+            && m.sender.is_some()
+        {
+            chat_decorate::set_picture(
+                m.id,
+                Some(&chat_decorate::Picture {
+                    source: chat_decorate::Source::SenderSkin,
+                    regions: vec![chat_decorate::Region {
+                        x: 8,
+                        y: 8,
+                        width: 8,
+                        height: 8,
+                    }],
+                    width: 8,
+                    height: 8,
+                }),
+            );
+        }
     }
     fn tick(&mut self, _tick: u64) {
         self.ticks += 1;
@@ -212,6 +245,7 @@ impl Mod for Guest {
                     files.len()
                 )))
             }
+            "said" => Ok(Some(self.said.clone())),
             "texfx" => {
                 // Stone shows a red and a blue tile by turns along its faces;
                 // `off` removes them.

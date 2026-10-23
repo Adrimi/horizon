@@ -454,17 +454,17 @@ impl Game<'_> {
             return;
         }
         let focused = self.screen == Screen::Chat;
-        let heard = self.mods.mods.is_running().then(|| text.plain());
-        self.ui.chat.add(
+        let picture = self.mods_chat_message(&text.plain(), None);
+        self.ui.chat.add_decorated(
             &self.gui.atlas,
             text,
             Some(SYSTEM_INDICATOR),
+            None,
+            picture,
             self.ticks,
             focused,
         );
-        if let Some(line) = heard {
-            self.mods_chat(&line);
-        }
+        self.show_mod_output();
     }
     /// Keys while the chat screen is open.
     pub(super) fn chat_key(&mut self, event: &KeyEvent) {
@@ -583,7 +583,6 @@ impl Game<'_> {
                 &[Text::literal(PLAYER_NAME), Text::literal(message)],
             );
             let focused = self.screen == Screen::Chat;
-            let heard = self.mods.mods.is_running().then(|| line.plain());
             // The integrated server's player, with the skin the player list shows.
             let me = self.level.player_uuid.map(|u| {
                 u.iter()
@@ -595,12 +594,17 @@ impl Game<'_> {
                     .head_skins
                     .insert(me, "entity/player/wide/steve".into());
             }
-            self.ui
-                .chat
-                .add_from(&self.gui.atlas, line, None, me, self.ticks, focused);
-            if let Some(line) = heard {
-                self.mods_chat(&line);
-            }
+            let picture = self.mods_chat_message(&line.plain(), me);
+            self.ui.chat.add_decorated(
+                &self.gui.atlas,
+                line,
+                None,
+                me,
+                picture,
+                self.ticks,
+                focused,
+            );
+            self.show_mod_output();
             self.lan_host_chat(message);
         }
     }

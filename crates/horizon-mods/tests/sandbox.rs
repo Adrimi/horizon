@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules", "chat-decorate"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -1250,6 +1250,46 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
     // The marks stay for the game to draw.
     assert_eq!(mods.slot_marks().len(), 2);
     assert_eq!(mods.slot_marks()[0].slot, 0);
+}
+
+#[test]
+fn the_chat_api_lists_messages_and_takes_a_picture() {
+    use horizon_mods::{ChatMessage, ChatSender, ChatSource};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let from_steve = ChatMessage {
+        id: 4,
+        text: "<Steve> pic please".into(),
+        sender: Some(ChatSender {
+            name: "Steve".into(),
+            uuid: "0".repeat(32),
+        }),
+    };
+    // The mod sets a picture in the hook, for the message it is told of.
+    let picture = mods.chat_message(from_steve).expect("a picture");
+    assert!(matches!(picture.source, ChatSource::SenderSkin));
+    assert_eq!((picture.width, picture.height), (8, 8));
+    assert!(mods.command("said"));
+    assert_eq!(mods.drain(), [feedback("4:<Steve> pic please:Steve")]);
+    // A system message gets none, and the list in the hook ends with it.
+    let system = ChatMessage {
+        id: 5,
+        text: "pic from the server".into(),
+        sender: None,
+    };
+    assert!(mods.chat_message(system).is_none());
+    assert!(mods.command("said"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "4:<Steve> pic please:Steve|5:pic from the server:-"
+        )]
+    );
+    // The messages reach the next tick, then are gone.
+    mods.set_snapshot(player());
+    assert_eq!(mods.snapshot_chat_len(), 2);
+    mods.tick(1);
+    mods.set_snapshot(player());
+    assert_eq!(mods.snapshot_chat_len(), 0);
 }
 
 #[test]

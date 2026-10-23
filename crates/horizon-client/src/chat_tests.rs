@@ -30,6 +30,8 @@ fn add(chat: &mut Chat, font: &Font, content: Text) {
                 content,
                 indicator: None,
                 head: None,
+                picture: None,
+                sender: None,
                 indent: 0,
             },
         );
@@ -295,6 +297,7 @@ fn add_from(chat: &mut Chat, font: &Font, content: Text, sender: Option<u128>) {
         content,
         indicator: None,
         sender,
+        picture: None,
     };
     chat.add_lines(font, &message, false);
     chat.messages.insert(0, message);
@@ -311,6 +314,37 @@ fn heads_and_texts(chat: &Chat) -> (Vec<String>, Vec<(i32, String)>) {
         }
     }
     (heads, texts)
+}
+
+#[test]
+fn a_mods_picture_starts_the_first_line_and_indents_every_line() {
+    use super::{Picture, PictureSource};
+    let font = font();
+    let mut chat = Chat::default();
+    chat.head_skins.insert(7, "skins/abc".into());
+    let long = "word ".repeat(80);
+    let message = Message {
+        added: 0,
+        content: Text::literal(long.clone()),
+        indicator: None,
+        sender: Some(7),
+        picture: Some(std::sync::Arc::new(Picture {
+            source: PictureSource::Sender,
+            regions: vec![[8, 8, 8, 8], [40, 8, 8, 8]],
+            width: 8,
+            height: 8,
+        })),
+    };
+    chat.add_lines(&font, &message, false);
+    let (heads, texts) = heads_and_texts(&chat);
+    // A face and a hat, once, before the first line.
+    assert_eq!(heads, ["skins/abc", "skins/abc"]);
+    assert!(texts.len() > 1);
+    assert!(texts.iter().all(|(x, _)| *x == 10));
+    // Without the picture the text starts at 0.
+    let mut bare = Chat::default();
+    add_from(&mut bare, &font, Text::literal(long), Some(7));
+    assert!(heads_and_texts(&bare).1.iter().all(|(x, _)| *x == 0));
 }
 
 #[test]

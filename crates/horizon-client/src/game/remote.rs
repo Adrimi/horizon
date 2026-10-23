@@ -520,14 +520,17 @@ impl Game<'_> {
         {
             self.refresh_chat_heads(uuid);
         }
-        self.ui.chat.add_from(
+        let picture = self.mods_chat_message(&text, sender);
+        self.ui.chat.add_decorated(
             &self.gui.atlas,
             horizon_client::text::Text::literal(text.clone()),
             None,
             sender,
+            picture,
             self.ticks,
             self.screen == Screen::Chat,
         );
+        self.show_mod_output();
         if let Some(r) = self.remote.as_mut() {
             r.chat.push((text, Instant::now()));
             r.chat_received += 1;
@@ -2266,7 +2269,7 @@ impl Game<'_> {
     }
     /// The chat heads extra: the skins of the listed players (downloaded
     /// ones once ready), and `sender`'s default skin when unlisted.
-    fn refresh_chat_heads(&mut self, sender: u128) {
+    pub(super) fn refresh_chat_heads(&mut self, sender: u128) {
         if let Some((players, _, _)) = self.remote_tab_players() {
             for p in players {
                 self.ui.chat.head_skins.insert(p.uuid, p.skin);

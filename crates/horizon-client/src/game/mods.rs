@@ -45,6 +45,8 @@ pub(super) struct ModsState {
     /// The mods' texture rules as last handed to the mesher
     /// (`Mods::texture_version`, API 0.1.14); 0 for none.
     texture_version: u64,
+    /// The number the next chat message gets (`chat.get-messages`).
+    chat_id: u64,
     /// Every item tag by item, built once from the resources for
     /// `inventory.item-tags`/`get-tags` (API 0.1.3) and shared through the
     /// snapshot. Built on first use: the world resources holding the tags
@@ -937,13 +939,59 @@ impl Game<'_> {
         self.show_mod_output();
         true
     }
-    /// A chat line the player received.
-    pub(super) fn mods_chat(&mut self, line: &str) {
-        self.mods.mods.chat(line);
-        self.show_mod_output();
+    /// Tells the mods of a chat message before it joins the chat (API
+    /// 0.1.15) and returns the picture a mod gave it.
+    pub(super) fn mods_chat_message(
+        &mut self,
+        text: &str,
+        sender: Option<u128>,
+    ) -> Option<horizon_client::chat::Picture> {
+        use horizon_client::chat::{Picture, PictureSource};
+        use horizon_mods::{ChatMessage, ChatSender, ChatSource};
+        if !self.mods.mods.is_running() {
+            return None;
+        }
+        let id = self.mods.chat_id;
+        self.mods.chat_id += 1;
+        if let Some(uuid) = sender
+            && self.mods.mods.uses(Capability::ChatDecorate)
+        {
+            self.refresh_chat_heads(uuid);
+        }
+        let name = sender
+            .and_then(|uuid| {
+                let (players, _, _) = self.remote_tab_players()?;
+                players.into_iter().find(|p| p.uuid == uuid).map(|p| p.name)
+            })
+            .unwrap_or_default();
+        let message = ChatMessage {
+            id,
+            text: text.to_owned(),
+            sender: sender.map(|uuid| ChatSender {
+                name,
+                uuid: format!("{uuid:032x}"),
+            }),
+        };
+        let picture = self.mods.mods.chat_message(message)?;
+        Some(Picture {
+            source: match picture.source {
+                ChatSource::SenderSkin => PictureSource::Sender,
+                ChatSource::PlayerSkin(uuid) => {
+                    PictureSource::Skin(u128::from_str_radix(&uuid, 16).unwrap_or_default())
+                }
+                ChatSource::Sprite(name) => PictureSource::Sprite(name),
+            },
+            regions: picture
+                .regions
+                .iter()
+                .map(|r| [r.x as i32, r.y as i32, r.width as i32, r.height as i32])
+                .collect(),
+            width: picture.width as i32,
+            height: picture.height as i32,
+        })
     }
     /// Chat lines, command feedback and stopped mods, into the chat.
-    fn show_mod_output(&mut self) {
+    pub(super) fn show_mod_output(&mut self) {
         for output in self.mods.mods.drain() {
             let line = match output {
                 Output::Chat { name, text } => {

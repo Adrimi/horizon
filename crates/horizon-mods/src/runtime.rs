@@ -19,6 +19,8 @@ mod bindings {
 }
 pub use bindings::horizon::mods::{
     atmosphere::Haze,
+    chat::{Message as ChatMessage, Sender as ChatSender},
+    chat_decorate::{Picture as ChatPicture, Region as ChatRegion, Source as ChatSource},
     entity::{Entity as WorldEntity, EntityKind, Face},
     game::{Clock, FoodStats, Player},
     game::{Health, Session},
@@ -51,9 +53,9 @@ use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
     horizon::mods::{
-        atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys, lighting,
-        log as mod_log, overlay, particles, recipes, resources, screen, settings, slots, storage,
-        target, texture_rules, tooltip, weather, world,
+        atmosphere, chat, chat_decorate, debug, entity, game, hotbar, hud, inventory, items, keys,
+        lighting, log as mod_log, overlay, particles, recipes, resources, screen, settings, slots,
+        storage, target, texture_rules, tooltip, weather, world,
     },
 };
 
@@ -128,6 +130,9 @@ pub struct Snapshot {
     pub hotbar_food: Vec<Option<Food>>,
     /// Blocks broken since the previous tick (`world-read`, API 0.1.2).
     pub broken: Vec<BlockBroken>,
+    /// Chat messages received since the last tick (`chat`, API 0.1.15);
+    /// filled by `Mods`.
+    pub chat: Vec<ChatMessage>,
     /// The light each block gives off, by id, for the blocks that give
     /// any (`lighting`, API 0.1.13).
     pub emissions: Option<Arc<HashMap<String, u8>>>,
@@ -541,6 +546,9 @@ struct State {
     haze: Option<Haze>,
     /// The tags `world.watch-random-ticks` listens to.
     watched_ticks: Vec<String>,
+    /// The pictures the mod set for chat messages, by message id (API
+    /// 0.1.15).
+    chat_pictures: Vec<(u64, ChatPicture)>,
     /// The resource folder `resources` reads (shared with `Mods`).
     resource_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// The pictures and rules the mod gave for faces (API 0.1.14), and how
@@ -591,6 +599,8 @@ pub struct Mods {
     screen_size: (f32, f32),
     /// The game's screens, for `current-screen` and the like (API 0.1.5).
     ui: Arc<Ui>,
+    /// Chat messages told to the mods since the last tick (API 0.1.15).
+    chat_pending: Vec<ChatMessage>,
     /// The merged resource packs' folder, for `resources` (API 0.1.14).
     resource_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
 }
@@ -782,6 +792,7 @@ impl Mods {
             landings: Vec::new(),
             haze: None,
             watched_ticks: Vec::new(),
+            chat_pictures: Vec::new(),
             resource_root,
             texture_sprites: Vec::new(),
             texture_rules: Vec::new(),
@@ -844,7 +855,8 @@ impl Mods {
         })
     }
     /// What mods read until the next snapshot.
-    pub fn set_snapshot(&mut self, snapshot: Snapshot) {
+    pub fn set_snapshot(&mut self, mut snapshot: Snapshot) {
+        snapshot.chat = self.chat_pending.clone();
         self.snapshot = Arc::new(snapshot);
     }
     /// The world `world` reads during the next hook calls; the game lends
@@ -1273,6 +1285,8 @@ impl Mods {
             |h| h.tick,
             |m, s| m.horizon_mods_events().call_tick(s, tick),
         );
+        // The messages were told to the mods for this tick.
+        self.chat_pending.clear();
     }
     /// A rendered frame, `seconds` after the last.
     pub fn frame(&mut self, seconds: f32) {
@@ -1281,6 +1295,36 @@ impl Mods {
             |h| h.frame,
             |m, s| m.horizon_mods_events().call_frame(s, seconds),
         );
+    }
+    /// How many chat messages the snapshot the mods read holds (tests).
+    pub fn snapshot_chat_len(&self) -> usize {
+        self.snapshot.chat.len()
+    }
+    /// Tells the mods of a chat message before it joins the chat: it is on
+    /// `chat.get-messages` (last) for the `chat` hook and the next tick.
+    /// Returns the picture a mod gave it (`chat-decorate`, API 0.1.15).
+    pub fn chat_message(&mut self, message: ChatMessage) -> Option<ChatPicture> {
+        let id = message.id;
+        let text = message.text.clone();
+        self.chat_pending.push(message.clone());
+        if self.chat_pending.len() > 64 {
+            self.chat_pending.remove(0);
+        }
+        Arc::make_mut(&mut self.snapshot).chat.push(message);
+        self.chat(&text);
+        let mut found = None;
+        for entry in &mut self.entries {
+            let Some(run) = entry.run.as_mut() else {
+                continue;
+            };
+            let data = run.store.data_mut();
+            for (picture_id, picture) in std::mem::take(&mut data.chat_pictures) {
+                if picture_id == id && found.is_none() {
+                    found = Some(picture);
+                }
+            }
+        }
+        found
     }
     /// A chat line the player received, as plain text.
     pub fn chat(&mut self, text: &str) {
@@ -1443,6 +1487,9 @@ impl game::Host for State {
     }
 }
 impl chat::Host for State {
+    fn get_messages(&mut self) -> Vec<ChatMessage> {
+        self.snapshot.chat.clone()
+    }
     fn show(&mut self, text: String) {
         let shown = self
             .out
@@ -1804,6 +1851,21 @@ impl texture_rules::Host for State {
             self.texture_sprites.clear();
             self.texture_version += 1;
         }
+    }
+}
+impl chat_decorate::Host for State {
+    fn set_picture(&mut self, id: u64, picture: Option<ChatPicture>) {
+        self.chat_pictures.retain(|(i, _)| *i != id);
+        let Some(mut picture) = picture else {
+            return;
+        };
+        picture.width = picture.width.clamp(1, 64);
+        picture.height = picture.height.clamp(1, 64);
+        picture.regions.truncate(8);
+        if self.chat_pictures.len() >= 16 {
+            self.chat_pictures.remove(0);
+        }
+        self.chat_pictures.push((id, picture));
     }
 }
 impl lighting::Host for State {
