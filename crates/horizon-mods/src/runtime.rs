@@ -1786,6 +1786,33 @@ fn walk_files(dir: &Path, base: &Path, prefix: &str, out: &mut Vec<String>) {
         }
     }
 }
+/// The pack of each overridden file of the overlay at `root`
+/// (`.horizon-origins`, `path<TAB>pack id`), read once per root.
+fn pack_origins(root: &Path) -> Arc<HashMap<String, String>> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(PathBuf, std::time::SystemTime, Arc<HashMap<String, String>>)>> =
+        Mutex::new(None);
+    let file = root.join(".horizon-origins");
+    let modified = std::fs::metadata(&file)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((r, m, map)) = cache.as_ref()
+        && r == root
+        && *m == modified
+    {
+        return map.clone();
+    }
+    let map: HashMap<String, String> = std::fs::read_to_string(&file)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(p, id)| (p.to_owned(), id.to_owned()))
+        .collect();
+    let map = Arc::new(map);
+    *cache = Some((root.to_path_buf(), modified, map.clone()));
+    map
+}
 impl State {
     fn pack_root(&self) -> Option<PathBuf> {
         self.resource_root
@@ -1825,6 +1852,21 @@ impl resources::Host for State {
         walk_files(&base, &base, &prefix, &mut found);
         found.sort();
         found
+    }
+    fn file_origin(&mut self, namespace: String, path: String) -> Option<String> {
+        let root = self.pack_root()?;
+        let file = pack_path(&root, &namespace, &path)?;
+        if !file.is_file() {
+            return None;
+        }
+        let name = format!("assets/{namespace}/{path}");
+        let origins = pack_origins(&root);
+        Some(
+            origins
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| "vanilla".to_owned()),
+        )
     }
     fn read_file(&mut self, namespace: String, path: String) -> Option<Vec<u8>> {
         let root = self.pack_root()?;

@@ -240,8 +240,9 @@ impl Mod for Guest {
                 let first = files.first().cloned().unwrap_or_default();
                 let size = resources::read_file("minecraft", &first).map(|b| b.len());
                 let escape = resources::read_file("minecraft", "../x").is_some();
+                let origin = resources::file_origin("minecraft", &first);
                 Ok(Some(format!(
-                    "{} namespaces, {} files, first {first} {size:?}, escape {escape}",
+                    "{} namespaces, {} files, first {first} {size:?}, escape {escape}, origin {origin:?}",
                     spaces.join(","),
                     files.len()
                 )))

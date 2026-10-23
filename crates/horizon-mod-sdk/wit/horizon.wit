@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.16;
+package horizon:mods@0.1.17;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -1347,6 +1347,10 @@ interface resources {
     list-files: func(namespace: string, prefix: string) -> list<string>;
     /// A file's bytes (up to 32 MiB); none when there is no such file.
     read-file: func(namespace: string, path: string) -> option<list<u8>>;
+    /// The pack the file comes from, as the game merged them: `vanilla`
+    /// for the game's own file, the pack's id (`file/my_pack`) for a file a
+    /// pack gave or replaced; none when there is no such file (API 0.1.17).
+    file-origin: func(namespace: string, path: string) -> option<string>;
 }
 
 /// Capability `texture-rules`: what the faces of blocks show (API 0.1.14).

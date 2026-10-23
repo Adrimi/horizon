@@ -1363,18 +1363,25 @@ fn the_resource_and_texture_apis_read_packs_and_keep_rules() {
         b"x=1",
     )
     .unwrap();
+    std::fs::write(
+        root.join(".horizon-origins"),
+        "assets/minecraft/optifine/ctm/a.properties\tfile/my_pack\n",
+    )
+    .unwrap();
     // Without a folder the packs have nothing.
     assert!(mods.command("resfx"));
     assert_eq!(
         mods.drain(),
-        [feedback(" namespaces, 0 files, first  None, escape false")]
+        [feedback(
+            " namespaces, 0 files, first  None, escape false, origin None"
+        )]
     );
     mods.set_resource_root(Some(root.clone()));
     assert!(mods.command("resfx optifine/"));
     assert_eq!(
         mods.drain(),
         [feedback(
-            "minecraft,other namespaces, 1 files, first optifine/ctm/a.properties Some(3), escape false"
+            "minecraft,other namespaces, 1 files, first optifine/ctm/a.properties Some(3), escape false, origin Some(\"file/my_pack\")"
         )]
     );
     // The rules and pictures are kept for the game until cleared.

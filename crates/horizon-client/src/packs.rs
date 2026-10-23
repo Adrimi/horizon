@@ -549,8 +549,20 @@ fn build_overlay_uncached(
         &filters,
         &zips,
         dependencies,
-    )
+    )?;
+    // Which pack each overridden file came from, for the mods'
+    // `resources.file-origin` (a file not listed is vanilla's).
+    let mut origins = String::new();
+    for (name, (owner, _)) in &files {
+        if let Some(pack) = packs.get(*owner) {
+            origins.push_str(&format!("{name}\t{}\n", pack.id));
+        }
+    }
+    fs::write(out.join(ORIGINS_FILE), origins)
 }
+/// The file in a resource overlay that lists the pack of each overridden
+/// file (`path<TAB>pack id`).
+pub const ORIGINS_FILE: &str = ".horizon-origins";
 /// Files vanilla loads from every pack in turn (`getResourceStack`) rather
 /// than from the top pack only.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -984,6 +996,11 @@ mod tests {
             br#"{"a":"vanilla","b":"pack"}"#
         );
         assert_eq!(fs::read(out.join("facts.json")).unwrap(), b"[]");
+        // The overlay says which pack gave each file it overrides; vanilla's
+        // are not listed.
+        let origins = fs::read_to_string(out.join(ORIGINS_FILE)).unwrap();
+        assert!(origins.contains("assets/minecraft/textures/block/stone.png\tfile/Mine\n"));
+        assert!(!origins.contains("dirt.png"));
         let _ = fs::remove_dir_all(base);
     }
     #[test]
