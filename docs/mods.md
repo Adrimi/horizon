@@ -87,7 +87,7 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `hotbar` (0.1.1) | `hotbar` | `select(slot)`: selects slot 0 to 8 as the number keys do, before the next tick (a server hears of it as from the keys); the last call in a tick wins, other values are ignored |
 | `world` (0.1.2) | `world-read`, `world-edit` | `get-block(pos)`: the block at a position, with its state properties and every block tag it is in; `broken-blocks()`: the blocks broken since the last tick, with the tool and whether the player was sneaking; `break-block(pos, drops)`, `break-block-with-held(pos)`: breaking a block, with or without the loot rolled with the held item; `damage-held(amount)`: wearing the item in the hand. Since 0.1.4: `get-chunk-surface(cx, cz)`: the map surface of a loaded chunk (256 columns: map colour, height, water depth, biome), `get-biome-names()` and `get-map-colors()`: the biome names and the map colours, by index |
 | `keys` (0.1.4) | `keys` | `bind(action, default-key)`: the mod's own key, shown in Controls > Key Binds; `get(action)`: the key in use; `poll()`: the key events since the last call |
-| `storage` (0.1.4) | `storage` | `read(name)`, `write(name, data)`, `remove(name)`, `files()`: the mod's own files, in a folder of its own beside the settings, with a 32 MiB quota |
+| `storage` (upstream; 0.1.5 extended) | `storage` | `get(key)`, `set(key, value)`, `delete(key)`: a per-mod folder of small files (keys `[a-z0-9_.-]{1,64}`), default 64 keys and 4 MiB, at most 1 MiB written per call; the manifest may ask for more (`storage_quota_mib` up to 256, `storage_max_keys` up to 4096); `list-keys()`: the mod's keys. The folder is `.horizon-mod-data/<id>` beside the mod, readable already in `init`. API 0.1.4's `read`/`write`/`remove`/`files` stay as deprecated aliases of the same calls; what a mod saved in 0.1.4's `horizon-mod-data/<id>` is moved to the new folder once. |
 | `screen` (0.1.4) | `screen` | `open(title)`: a screen the mod draws and handles itself, with the mouse free; `draw(id, shapes)`: rectangles, text and images; `get-input(id)`: the keys, the mouse and the wheel, and the `closed` event; `upload-texture(width, height, rgba)`: the mod's own picture (8 of 256x256 at most) |
 
 The target and the hotbar are read into the snapshot only while a running
@@ -241,6 +241,10 @@ allocation, next to a healthy mod).
    (`mod.<id>:true`).
 3. A mod that failed to load or stopped shows why, in red, on its row.
 
+Two turned-on mods never share an `id` while running (it is also capability
+`storage`'s directory): the one `find` lists first starts, the other stays
+off with the reason on its row.
+
 Benchmarks (`--benchmark`) never load mods.
 
 ## Making a mod
@@ -257,8 +261,8 @@ cargo horizon-mod build             # again after an edit: the running game relo
 `run` starts `horizon-client` (on `PATH`, or `--game PATH`, or
 `HORIZON_CLIENT`) with `--dev-mod target/horizon-mod/<id>.hmod`. A dev mod is
 always on, and the game checks its file once a second: rebuild and it restarts
-with "Mods reloaded" in chat. Its state starts over (persisted state comes with
-`storage`).
+with "Mods reloaded" in chat. Its in-memory state starts over; whatever it
+saved with capability `storage` survives the reload.
 
 ### Template layout
 
@@ -356,6 +360,17 @@ its row. The game reads this content into its block and item tables
 (`horizon_client::mod_content`, docs/modpacks.md). A tag entry naming an id
 nobody registers (a block a port left out, another mod's item) is dropped,
 so the rest of the tag still loads; vanilla would drop the whole tag.
+
+Tags merge as a data pack's do. Every mod's file for one tag (vanilla's
+`data/minecraft/tags/`, the convention `data/c/tags/`, or another mod's) adds
+its values after vanilla's and the mods' before it, in load order. A file with
+`"replace": true` first drops what came before it, vanilla's entries and the
+earlier mods', and the mods after it still add theirs, as a higher data pack
+does. Since the result depends on load order, the game says so in the log:
+"mod towns replaces data/minecraft/tags/worldgen/biome/has_structure/village_plains.json:
+vanilla's entries and those of adds are left out, ...". Tags are the only
+`minecraft` files a mod may hold: its other content stays in its own
+namespaces.
 
 A mod adds to structure sets and template pools that are not its own
 (vanilla's villages, another mod's houses) with a set or pool file in its own
@@ -494,8 +509,9 @@ none.
 
 1. Design (this page) and the Java research.
 2. SDK, example mod, runtime, `cargo horizon-mod`, the game's Mods page: API 0.1.
-3. `keys`, `target`, `inventory-read`, `storage`, `ui`: enough for the first
-   native ports (zoom presets, AppleSkin-style food HUD, Jade-style tooltips).
+3. `storage` (done), `keys`, `target`, `inventory-read`, `ui`: enough for the
+   first native ports (zoom presets, AppleSkin-style food HUD, Jade-style
+   tooltips).
 4. Launcher Mods tab, the index, signatures; the Mods page shows cost and
    update state.
 5. `recipes`, `world-read`, `render`: recipe viewer and schematics ports.

@@ -199,18 +199,27 @@ interface keys {
     poll: func() -> list<key-event>;
 }
 
-/// Capability `storage`: the mod's own files (API 0.1.4). They live in a
-/// folder of the mod's own, beside the game's settings, and survive a
-/// restart. The mod has no other way to keep anything.
+/// Capability `storage`: a per-mod folder of small key/value files, quota'd
+/// (docs/mods.md). Keys are `[a-z0-9_.-]{1,64}`, one path segment. The folder
+/// is `.horizon-mod-data/<id>` in the folder the mod is loaded from; a mod
+/// that needs more than the default 4 MiB / 64 keys asks for it in its
+/// manifest (`storage_quota_mib`, `storage_max_keys`). It is there in `init`.
 interface storage {
-    /// The bytes of the file `name`; none when there is none.
+    /// None if `key` has never been `set`, or the key is not well-formed.
+    get: func(key: string) -> option<list<u8>>;
+    /// Errs on a malformed key or over quota (bytes for the whole mod).
+    set: func(key: string, value: list<u8>) -> result<_, string>;
+    /// No error if `key` was already absent.
+    delete: func(key: string);
+    /// The mod's keys, sorted (API 0.1.5).
+    list-keys: func() -> list<string>;
+    /// Deprecated, API 0.1.4's name of `get`.
     read: func(name: string) -> option<list<u8>>;
-    /// Writes the file `name`, replacing it. The mod's folder has a quota
-    /// (32 MiB); writing past it fails and changes nothing.
+    /// Deprecated, API 0.1.4's name of `set`.
     write: func(name: string, data: list<u8>) -> result<_, string>;
-    /// Removes the file `name`; true when it was there.
+    /// Deprecated, API 0.1.4's name of `delete`; true when it was there.
     remove: func(name: string) -> bool;
-    /// The mod's file names, sorted.
+    /// Deprecated, API 0.1.4's name of `list-keys`.
     files: func() -> list<string>;
 }
 

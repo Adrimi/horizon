@@ -53,10 +53,20 @@ const FUEL_EVENT: u64 = 100_000_000;
 const CHAT_PER_CALL: usize = 8;
 const HUD_LINES: usize = 16;
 const LINE_CHARS: usize = 256;
-/// The mod's storage folder: how much its files may take in all.
-pub const STORAGE_QUOTA: u64 = 32 << 20;
-/// The longest name of a file in the mod's storage folder.
-const STORAGE_NAME: usize = 64;
+/// Total bytes a mod's `storage` may hold on disk, across all its keys.
+const STORAGE_QUOTA: u64 = 4 << 20;
+/// Distinct keys a mod's `storage` may hold: `STORAGE_QUOTA` alone doesn't
+/// bound a flood of zero- or near-zero-byte files (each still a file name,
+/// a directory entry and an inode).
+const STORAGE_MAX_KEYS: usize = 64;
+/// Bytes `storage::set` may write across one hook call: fuel bounds a
+/// mod's CPU time per call, not the time a synchronous disk write takes, so
+/// a cheap-in-fuel loop replacing one key with large payloads needs its own
+/// cap, separate from the on-disk quota it would otherwise stay under.
+const STORAGE_WRITE_BUDGET: u64 = 1 << 20;
+/// A mod's data, beside its `horizon-mods` folder (`find`'s `path.parent()`
+/// never has a manifest there, so `find` never mistakes it for a mod).
+const STORAGE_DIR: &str = ".horizon-mod-data";
 /// A mod's screen: how many shapes it may draw, how many images it may
 /// upload and how big they are.
 pub const SCREEN_SHAPES: usize = 4096;
@@ -346,6 +356,18 @@ struct State {
     worn: u32,
     out: Vec<Output>,
     panel: Option<Panel>,
+    /// Capability `storage`'s folder; made on first `set`.
+    data_dir: PathBuf,
+    /// Bytes `storage::set` may still write before this hook call ends
+    /// (reset per call in [`Mods::call`]): fuel bounds a mod's CPU time but
+    /// not disk I/O time, so a loop of small-fuel, large-payload `set`s
+    /// needs its own budget.
+    storage_budget: u64,
+    /// What one hook call may write in all, and the mod's quota and key
+    /// limit (the manifest may raise the last two).
+    storage_write_budget: u64,
+    storage_quota: u64,
+    storage_max_keys: usize,
     limits: StoreLimits,
     /// The mod's screen (`screen`).
     screen: Option<Screen>,
@@ -363,8 +385,6 @@ struct State {
     binds: Vec<KeyBind>,
     /// The key events since the last `poll` (`keys`).
     key_events: Vec<KeyEvent>,
-    /// The mod's own folder (`storage`).
-    storage: Option<PathBuf>,
     /// The screen's size in GUI pixels, given by the game.
     screen_size: ScreenSize,
 }
@@ -378,8 +398,9 @@ pub struct Mods {
     snapshot: Arc<Snapshot>,
     world: Option<Arc<dyn WorldAccess>>,
     out: Vec<Output>,
-    /// Where the mods' own files live (`storage`), beside the game's
-    /// settings; each mod has a folder of its own in it.
+    /// Where API 0.1.4's `storage` kept the mods' files, beside the game's
+    /// settings: a mod's folder there moves to its `data_dir` once
+    /// (`set_storage`).
     storage: Option<PathBuf>,
     /// The screen's size in GUI pixels (`screen`).
     screen_size: (f32, f32),
@@ -433,13 +454,14 @@ impl Mods {
                         // Content is read before the world loads; a mod whose
                         // content is refused stays off, with the reason.
                         let content = crate::Content::read(path, &package.manifest);
-                        entry.status = match content.and_then(|_| mods.start(&package, &reserved)) {
-                            Ok(run) => {
-                                entry.run = run;
-                                Status::Running
-                            }
-                            Err(e) => Status::Failed(e),
-                        };
+                        entry.status =
+                            match content.and_then(|_| mods.start(path, &package, &reserved)) {
+                                Ok(run) => {
+                                    entry.run = run;
+                                    Status::Running
+                                }
+                                Err(e) => Status::Failed(e),
+                            };
                     }
                 }
             }
@@ -466,8 +488,11 @@ impl Mods {
 
     /// Starts a mod's code; `Ok(None)` for a content-only mod, which has
     /// nothing to run (the game reads its content before the world loads).
+    /// `path` is the mod's own `.hmod` or folder, for capability `storage`'s
+    /// per-mod directory.
     fn start(
         &mut self,
+        path: &Path,
         package: &Package,
         reserved: &dyn Fn(&str) -> bool,
     ) -> Result<Option<Running>, String> {
@@ -478,6 +503,15 @@ impl Mods {
         if m.side == Side::Server {
             return Err("server mods do not run yet".into());
         }
+        // Two running mods with the same id would share one `data_dir`
+        // (capability `storage`): the first loaded keeps the id.
+        if self
+            .entries
+            .iter()
+            .any(|e| e.run.is_some() && e.manifest.as_ref().is_some_and(|other| other.id == m.id))
+        {
+            return Err(format!("another running mod already uses id {}", m.id));
+        }
         let taken: Vec<String> = self
             .entries
             .iter()
@@ -486,7 +520,6 @@ impl Mods {
             .collect();
         let snapshot = self.snapshot.clone();
         let ui = self.ui.clone();
-        let storage = self.storage.clone();
         let (engine, linker) = self.engine()?;
         let component =
             Component::new(engine, wasm).map_err(|e| format!("not a component: {e}"))?;
@@ -496,6 +529,19 @@ impl Mods {
             .map(|(name, _)| name.to_string())
             .collect();
         m.check_imports(imports.iter().map(String::as_str))?;
+        let data_dir = path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(STORAGE_DIR)
+            .join(&m.id);
+        let quota = m
+            .storage_quota_mib
+            .map_or(STORAGE_QUOTA, |mib| u64::from(mib) << 20);
+        let max_keys = m
+            .storage_max_keys
+            .map_or(STORAGE_MAX_KEYS, |keys| keys as usize);
+        // A mod with a bigger quota writes bigger things in one call.
+        let write_budget = STORAGE_WRITE_BUDGET.max(quota / 32);
         let state = State {
             name: m.name.clone(),
             id: m.id.clone(),
@@ -506,6 +552,11 @@ impl Mods {
             worn: 0,
             out: Vec::new(),
             panel: None,
+            data_dir,
+            storage_budget: write_budget,
+            storage_write_budget: write_budget,
+            storage_quota: quota,
+            storage_max_keys: max_keys,
             limits: StoreLimitsBuilder::new()
                 .memory_size(MEMORY)
                 .instances(16)
@@ -518,7 +569,6 @@ impl Mods {
             next_screen: 1,
             binds: Vec::new(),
             key_events: Vec::new(),
-            storage: storage.map(|root| root.join(&m.id)),
             screen_size: ScreenSize {
                 width: 0.0,
                 height: 0.0,
@@ -574,16 +624,33 @@ impl Mods {
     pub fn set_world(&mut self, world: Option<Arc<dyn WorldAccess>>) {
         self.world = world;
     }
-    /// Where the mods' own files live (`storage`): each mod gets a folder
-    /// of its own in it. The game sets it beside its settings.
+    /// Where API 0.1.4's `storage` kept the mods' files (`<root>/<id>/`).
+    /// A running mod whose own `data_dir` does not exist yet gets that
+    /// folder moved there, so what a mod saved before the merge with
+    /// upstream's `storage` is still its own. The game sets it beside its
+    /// settings.
     pub fn set_storage(&mut self, root: Option<PathBuf>) {
         self.storage = root.clone();
-        for entry in &mut self.entries {
-            let Some(run) = entry.run.as_mut() else {
+        let Some(root) = root else { return };
+        for entry in &self.entries {
+            let Some(run) = entry.run.as_ref() else {
                 continue;
             };
-            let id = run.store.data().id.clone();
-            run.store.data_mut().storage = root.as_ref().map(|r| r.join(&id));
+            let data = run.store.data();
+            let legacy = root.join(&data.id);
+            if data.data_dir.exists() || !legacy.is_dir() {
+                continue;
+            }
+            if let Some(parent) = data.data_dir.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::rename(&legacy, &data.data_dir) {
+                log::warn!(
+                    "Horizon: mod {} storage not moved from {}: {e}",
+                    data.id,
+                    legacy.display()
+                );
+            }
         }
     }
     /// The screen's size in GUI pixels (`screen`), given by the game.
@@ -773,6 +840,7 @@ impl Mods {
             height: self.screen_size.1,
         };
         data.ui = self.ui.clone();
+        data.storage_budget = data.storage_write_budget;
         let started = Instant::now();
         let result = run
             .store
@@ -889,9 +957,10 @@ impl Mods {
             any = true;
             self.entries[i].modified = now;
             self.entries[i].run = None;
-            let started = Package::read(&self.entries[i].path).and_then(|p| {
+            let path = self.entries[i].path.clone();
+            let started = Package::read(&path).and_then(|p| {
                 self.entries[i].manifest = Some(p.manifest.clone());
-                self.start(&p, &reserved)
+                self.start(&path, &p, &reserved)
             });
             let entry = &mut self.entries[i];
             let id = entry.manifest.as_ref().map_or("?", |m| m.id.as_str());
@@ -939,41 +1008,6 @@ fn clip(text: String) -> String {
         None => text,
     }
 }
-/// A file name in the mod's own folder: letters, digits, `_`, `-` and `.`,
-/// at most 64 characters, and no path in it.
-fn valid_storage_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= STORAGE_NAME
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
-}
-/// How much the files in a folder take in all.
-fn folder_size(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .sum()
-}
-impl State {
-    /// The file `name` in the mod's own folder.
-    fn storage_file(&self, name: &str) -> Result<PathBuf, String> {
-        let dir = self
-            .storage
-            .as_ref()
-            .ok_or("the mod has no folder of its own")?;
-        if !valid_storage_name(name) {
-            return Err(format!("{name:?} is not a file name a mod may use"));
-        }
-        Ok(dir.join(name))
-    }
-}
-
 impl mod_log::Host for State {
     fn write(&mut self, level: mod_log::Level, message: String) {
         let level = match level {
@@ -1114,51 +1148,6 @@ impl keys::Host for State {
     }
     fn poll(&mut self) -> Vec<KeyEvent> {
         std::mem::take(&mut self.key_events)
-    }
-}
-impl storage::Host for State {
-    fn read(&mut self, name: String) -> Option<Vec<u8>> {
-        let path = self.storage_file(&name).ok()?;
-        std::fs::read(path).ok()
-    }
-    fn write(&mut self, name: String, data: Vec<u8>) -> Result<(), String> {
-        let path = self.storage_file(&name)?;
-        let dir = path.parent().expect("a file in the mod's folder");
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        // The file's own size does not count twice.
-        let old = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let used = folder_size(dir).saturating_sub(old);
-        if used + data.len() as u64 > STORAGE_QUOTA {
-            return Err(format!(
-                "the mod's folder holds {} MiB, the quota is {} MiB",
-                STORAGE_QUOTA >> 20,
-                STORAGE_QUOTA >> 20
-            ));
-        }
-        std::fs::write(&path, data).map_err(|e| format!("{}: {e}", path.display()))
-    }
-    fn remove(&mut self, name: String) -> bool {
-        let Ok(path) = self.storage_file(&name) else {
-            return false;
-        };
-        std::fs::remove_file(path).is_ok()
-    }
-    fn files(&mut self) -> Vec<String> {
-        let Some(dir) = self.storage.as_ref() else {
-            return Vec::new();
-        };
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut names: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                valid_storage_name(&name).then_some(name)
-            })
-            .collect();
-        names.sort();
-        names
     }
 }
 impl State {
@@ -1451,4 +1440,100 @@ impl hud::Host for State {
     fn clear(&mut self) {
         self.panel = None;
     }
+}
+impl State {
+    fn storage_get(&mut self, key: &str) -> Option<Vec<u8>> {
+        storage_key_ok(key)
+            .then(|| std::fs::read(self.data_dir.join(key)).ok())
+            .flatten()
+    }
+    fn storage_set(&mut self, key: &str, value: &[u8]) -> Result<(), String> {
+        if !storage_key_ok(key) {
+            return Err(format!("{key:?} is not [a-z0-9_.-]{{1,64}}"));
+        }
+        let len = value.len() as u64;
+        if len > self.storage_budget {
+            return Err("too much storage traffic in one call".into());
+        }
+        // Everything already on disk but the file this call replaces.
+        let existing: Vec<std::fs::DirEntry> = std::fs::read_dir(&self.data_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy() != key)
+            .collect();
+        if existing.len() >= self.storage_max_keys {
+            return Err(format!("would hold over {} keys", self.storage_max_keys));
+        }
+        let used: u64 = existing
+            .iter()
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        if used + len > self.storage_quota {
+            return Err(format!(
+                "would use over {} MiB of storage",
+                self.storage_quota >> 20
+            ));
+        }
+        std::fs::create_dir_all(&self.data_dir).map_err(|e| e.to_string())?;
+        std::fs::write(self.data_dir.join(key), value).map_err(|e| e.to_string())?;
+        self.storage_budget -= len;
+        Ok(())
+    }
+    fn storage_delete(&mut self, key: &str) -> bool {
+        storage_key_ok(key) && std::fs::remove_file(self.data_dir.join(key)).is_ok()
+    }
+    fn storage_keys(&mut self) -> Vec<String> {
+        let mut keys: Vec<String> = std::fs::read_dir(&self.data_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.metadata().is_ok_and(|m| m.is_file()))
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                storage_key_ok(&name).then_some(name)
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+}
+impl storage::Host for State {
+    fn get(&mut self, key: String) -> Option<Vec<u8>> {
+        self.storage_get(&key)
+    }
+    fn set(&mut self, key: String, value: Vec<u8>) -> Result<(), String> {
+        self.storage_set(&key, &value)
+    }
+    fn delete(&mut self, key: String) {
+        self.storage_delete(&key);
+    }
+    fn list_keys(&mut self) -> Vec<String> {
+        self.storage_keys()
+    }
+    // API 0.1.4's names, kept so mods built on it still link: the same
+    // files, the same limits.
+    fn read(&mut self, name: String) -> Option<Vec<u8>> {
+        self.storage_get(&name)
+    }
+    fn write(&mut self, name: String, data: Vec<u8>) -> Result<(), String> {
+        self.storage_set(&name, &data)
+    }
+    fn remove(&mut self, name: String) -> bool {
+        self.storage_delete(&name)
+    }
+    fn files(&mut self) -> Vec<String> {
+        self.storage_keys()
+    }
+}
+
+/// A storage key: one path segment of `[a-z0-9_.-]{1,64}`, not `.` or `..`.
+/// No `/`, so a key can never leave the mod's own directory.
+fn storage_key_ok(key: &str) -> bool {
+    let chars_ok = (1..=64).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
+    chars_ok && key != "." && key != ".."
 }

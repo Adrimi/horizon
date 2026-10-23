@@ -51,6 +51,15 @@ pub struct Manifest {
     /// names it on the Mods page (docs/mods.md).
     #[serde(default)]
     pub worldgen_overrides: bool,
+    /// What the mod's `storage` may hold, in MiB, when the default (4) is
+    /// too little (a map keeping its regions): 1 to 256. Needs capability
+    /// `storage`; the player sees the bigger quota on the Mods page.
+    #[serde(default)]
+    pub storage_quota_mib: Option<u32>,
+    /// How many keys the mod's `storage` may hold when the default (64) is
+    /// too few: 1 to 4096.
+    #[serde(default)]
+    pub storage_max_keys: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
@@ -151,7 +160,7 @@ impl Capability {
             Capability::WorldRead => "see the blocks around you and the ones that break",
             Capability::WorldEdit => "break blocks and wear the item in your hand",
             Capability::Keys => "add keys you can press",
-            Capability::Storage => "keep files of its own",
+            Capability::Storage => "save its own settings to disk",
             Capability::Screen => "draw a screen of its own",
             Capability::ItemsRead => "see the items of the game",
             Capability::RecipesRead => "see the recipes of the game",
@@ -231,6 +240,19 @@ impl Manifest {
             return Err(format!(
                 "{MANIFEST}: capability registries needs api = \"0.2\""
             ));
+        }
+        if (m.storage_quota_mib.is_some() || m.storage_max_keys.is_some())
+            && !m.capabilities.contains(&Capability::Storage)
+        {
+            return Err(format!(
+                "{MANIFEST}: storage limits are for capability storage"
+            ));
+        }
+        if m.storage_quota_mib.is_some_and(|q| !(1..=256).contains(&q)) {
+            return Err(format!("{MANIFEST}: storage_quota_mib is 1 to 256"));
+        }
+        if m.storage_max_keys.is_some_and(|k| !(1..=4096).contains(&k)) {
+            return Err(format!("{MANIFEST}: storage_max_keys is 1 to 4096"));
         }
         if !m.namespaces.is_empty() && !m.capabilities.contains(&Capability::Registries) {
             return Err(format!(
@@ -425,6 +447,14 @@ capabilities = ["game-read", "hud"]
         );
         assert!(m.check_imports(["wasi:filesystem/types@0.2.0"]).is_err());
         assert!(m.check_imports(["horizon:mods/game@0.2.0"]).is_err());
+        let storage = m.check_imports(["horizon:mods/storage@0.1.0"]);
+        assert_eq!(
+            storage,
+            Err("uses capability storage, missing from horizon-mod.toml".into())
+        );
+        let with_storage = EXAMPLE.replace("\"hud\"", "\"hud\", \"storage\"");
+        let m = Manifest::parse(&with_storage).unwrap();
+        assert_eq!(m.check_imports(["horizon:mods/storage@0.1.0"]), Ok(()));
     }
 
     #[test]

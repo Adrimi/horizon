@@ -346,21 +346,60 @@ fn installed_in(versions: &Path) -> Vec<String> {
     tags
 }
 
-fn download(url: &str, size: u64, to: &Path, progress: &impl Fn(f32)) -> Result<(), String> {
+/// A small release file (its checksums or their signature), whole; None when it has none.
+fn fetch_small(url: &str) -> Result<Option<Vec<u8>>, String> {
+    let response = match get(url) {
+        Ok(response) => response,
+        Err(e) if e.ends_with("answered 404") => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(1 << 20)
+        .read_to_end(&mut body)
+        .map_err(|e| format!("Download interrupted: {e}"))?;
+    Ok(Some(body))
+}
+
+/// The SHA-256 the release's signed checksums give for `asset`, or why it must not be installed.
+fn signed_digest(tag: &str, asset: &str) -> Result<String, String> {
+    crate::signed::digest(
+        tag,
+        asset,
+        &horizon_release_sign::trusted_keys(),
+        fetch_small,
+    )
+}
+
+/// Downloads `url` into `to`; the file is kept only if its SHA-256 is `sha256`, the signed one.
+fn download(
+    url: &str,
+    size: u64,
+    sha256: &str,
+    to: &Path,
+    progress: &impl Fn(f32),
+) -> Result<(), String> {
     let mut reader = get(url)?.into_reader();
     let mut file = fs::File::create(to).map_err(|e| e.to_string())?;
+    let mut hash = horizon_release_sign::Sha256::default();
     let (mut done, mut buf) = (0u64, vec![0u8; 1 << 16]);
     loop {
         let n = reader
             .read(&mut buf)
             .map_err(|e| format!("Download interrupted: {e}"))?;
         if n == 0 {
-            return Ok(());
+            break;
         }
+        hash.update(&buf[..n]);
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         done += n as u64;
         progress((done as f32 / size.max(1) as f32).min(1.0) * 0.9);
     }
+    let name = url.rsplit('/').next().unwrap_or(url);
+    horizon_release_sign::check(name, sha256, &hash.hex()).inspect_err(|_| {
+        let _ = fs::remove_file(to);
+    })
 }
 
 fn unpack(archive: &Path, url: &str, to: &Path) -> Result<(), String> {
@@ -376,19 +415,26 @@ fn unpack(archive: &Path, url: &str, to: &Path) -> Result<(), String> {
     }
 }
 
-/// Downloads and unpacks one release; `progress` gets the fraction done.
-pub fn install(tag: &str, url: &str, size: u64, progress: impl Fn(f32)) -> Result<(), String> {
+/// Downloads one release, checks it against its signed checksums and unpacks it; `progress` gets
+/// the fraction done.
+pub fn install(release: &Release, progress: impl Fn(f32)) -> Result<(), String> {
+    let tag = release.tag.as_str();
     if !is_game_tag(tag) {
         return Err(format!("{tag} is not a Horizon release."));
     }
+    let (url, size) = release
+        .asset
+        .clone()
+        .ok_or_else(|| format!("{tag} has no build for this platform."))?;
+    let sha256 = signed_digest(tag, ASSET.unwrap_or_default())?;
     let root = versions_dir();
     let partial = root.join(format!(".{tag}.partial"));
     let _ = fs::remove_dir_all(&partial);
     fs::create_dir_all(&partial).map_err(|e| e.to_string())?;
     let archive = partial.join("download");
-    download(url, size, &archive, &progress)?;
+    download(&url, size, &sha256, &archive, &progress)?;
     let unpacked = partial.join("unpacked");
-    unpack(&archive, url, &unpacked)?;
+    unpack(&archive, &url, &unpacked)?;
     progress(0.97);
     // The archives hold one top folder (horizon-linux-x86_64/...); the version folder is its contents.
     let entries: Vec<_> = fs::read_dir(&unpacked)
@@ -433,7 +479,7 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
 fn game_version_at(dir: &Path) -> String {
     read_json(&dir.join("research-lock.json"))
         .and_then(|v| v["minecraft"]["version"].as_str().map(String::from))
-        .unwrap_or_else(|| "26.3".into())
+        .unwrap_or_else(|| horizon_core::VANILLA_VERSION.into())
 }
 
 pub fn resources(tag: &str) -> PathBuf {
@@ -1538,12 +1584,11 @@ pub fn install_tag(tag: &str, as_update: bool, progress: impl Fn(f32)) -> Result
             .find(|r| r.tag == tag)
             .ok_or_else(|| format!("No Horizon release is tagged {tag}."))?
     };
-    let (url, size) = release
-        .asset
-        .clone()
-        .ok_or_else(|| format!("{} has no build for this platform.", release.tag))?;
+    if release.asset.is_none() {
+        return Err(format!("{} has no build for this platform.", release.tag));
+    }
     let before = installed();
-    install(&release.tag, &url, size, progress)?;
+    install(release, progress)?;
     let mut settings = Settings::load();
     if !as_update || select_after_update(settings.selected.as_deref(), &before) {
         settings.selected = Some(release.tag.clone());
@@ -1644,9 +1689,22 @@ fn find_app(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Whether the bundle's signature (Developer ID or ad hoc) is whole: every file it seals is there
+/// and unchanged.
+#[cfg(target_os = "macos")]
+fn signature_holds(app: &Path) -> bool {
+    Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(app)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Puts the bundle `new` in place of `app`: copied beside it first (`ditto` keeps its links,
-/// modes and signature), then the old one is moved aside and the new one renamed in, so `app` is
-/// never half written. The running launcher keeps its open files and works on.
+/// modes and signature) and checked, then the old one is moved aside and the new one renamed in,
+/// so `app` is never half written, and checked again where it lands (the old one comes back if it
+/// doesn't hold). The running launcher keeps its open files and works on.
 #[cfg(target_os = "macos")]
 fn replace_bundle(new: &Path, app: &Path) -> Result<(), String> {
     let dir = app.parent().ok_or("The app has no folder.")?;
@@ -1666,6 +1724,12 @@ fn replace_bundle(new: &Path, app: &Path) -> Result<(), String> {
             app.display()
         ));
     }
+    if !signature_holds(&staged) {
+        let _ = fs::remove_dir_all(&staged);
+        return Err(
+            "The downloaded app's signature doesn't hold; the launcher stays as it is.".into(),
+        );
+    }
     fs::rename(app, &old).map_err(|e| {
         let _ = fs::remove_dir_all(&staged);
         format!("Could not move {} aside: {e}", app.display())
@@ -1675,6 +1739,16 @@ fn replace_bundle(new: &Path, app: &Path) -> Result<(), String> {
         let _ = fs::remove_dir_all(&staged);
         return Err(format!(
             "Could not put the new app at {}: {e}",
+            app.display()
+        ));
+    }
+    if !signature_holds(app) {
+        let failed = dir.join(format!(".{name}.failed-{}", std::process::id()));
+        if fs::rename(app, &failed).is_ok() && fs::rename(&old, app).is_ok() {
+            let _ = fs::remove_dir_all(&failed);
+        }
+        return Err(format!(
+            "The new app's signature doesn't hold at {}; the launcher stays as it was.",
             app.display()
         ));
     }
@@ -1702,11 +1776,12 @@ pub fn self_update(release: &Release, progress: impl Fn(f32)) -> Result<(), Stri
         progress(1.0);
         return Ok(());
     }
+    let sha256 = signed_digest(&release.tag, LAUNCHER_ASSET.unwrap_or_default())?;
     let work = data_dir().join(".launcher-update");
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let archive = work.join("download");
-    download(&url, size, &archive, &progress)?;
+    download(&url, size, &sha256, &archive, &progress)?;
     let unpacked = work.join("unpacked");
     unpack(&archive, &url, &unpacked)?;
     // A launcher inside Horizon.app replaces the whole bundle (its Info.plist, icon and
@@ -2586,6 +2661,15 @@ mod tests {
             ["Horizon.app"],
             "nothing staged or moved aside is left"
         );
+
+        // A bundle changed after it was signed is refused, and the installed one stays.
+        let tampered = make(&work.join("tampered"), "3.0.0");
+        fs::write(tampered.join("Contents/Resources/version"), "3.0.1").unwrap();
+        assert!(replace_bundle(&tampered, &installed).is_err());
+        let version = fs::read_to_string(installed.join("Contents/Resources/version")).unwrap();
+        assert_eq!(version, "2.0.0");
+        let left = fs::read_dir(work.join("Applications")).unwrap().count();
+        assert_eq!(left, 1, "nothing staged is left");
         let _ = fs::remove_dir_all(&work);
     }
 

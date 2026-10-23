@@ -46,6 +46,10 @@ impl Mod for Guest {
             "screen",
             "browser",
             "giveitem",
+            "save",
+            "load",
+            "save_key",
+            "load_key",
         ]
         .into_iter()
         .fold(Registration::new(), Registration::command)
@@ -389,6 +393,28 @@ impl Mod for Guest {
                     screen::get_item_at(20.0, 20.0),
                     kinds.join(","),
                 )))
+            }
+            "save" => {
+                storage::set("note", args.as_bytes())?;
+                Ok(Some("saved".into()))
+            }
+            "load" => {
+                let text =
+                    storage::get("note").map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                chat::show(text.as_deref().unwrap_or("(empty)"));
+                Ok(None)
+            }
+            "load_key" => Ok(Some(
+                storage::get(args.trim()).map_or("(none)".into(), |b| {
+                    String::from_utf8_lossy(&b).into_owned()
+                }),
+            )),
+            "save_key" => {
+                let (key, text) = args
+                    .split_once(' ')
+                    .ok_or("Usage: /save_key <key> <text>")?;
+                storage::set(key, text.as_bytes())?;
+                Ok(Some("saved".into()))
             }
             _ => {
                 chat::show(&format!("hello {args} after {} ticks", self.ticks));

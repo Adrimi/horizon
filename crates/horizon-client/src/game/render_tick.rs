@@ -3,7 +3,10 @@
 use super::{Dim, Game};
 use horizon_client::fog::{FogData, FogInputs, FogType, fog_type, update_rain_fog};
 use horizon_client::{
-    animate_tick::{AnimateContext, animate_tick, campfire_particles, falling_leaves_multiplier},
+    animate_tick::{
+        AnimateContext, animate_tick, campfire_particles, falling_leaves_multiplier,
+        marker_particle_target,
+    },
     biome::Biomes,
     blocks::{BlockFacts, Fluid},
     chunk::{HEIGHT, MIN_Y},
@@ -308,6 +311,15 @@ impl Game<'_> {
         } else {
             (0.0, 0.0)
         };
+        let marker = marker_particle_target(self.mode, self.stack_in(self.selected));
+        let marker_options = |state| {
+            let (sprite, tint) = Self::block_particle_sprite(&self.pack, self.res.facts(), state)?;
+            Some(ParticleOptions::block(
+                ParticleType::BlockMarker,
+                sprite,
+                tint,
+            ))
+        };
         let world = &self.world;
         let facts = self.res.facts();
         let biomes = self.res.biomes();
@@ -329,6 +341,7 @@ impl Game<'_> {
                 self.settings.extras.falling_leaves_amount,
                 self.settings.particles,
             ),
+            marker: marker.map(|name| (name, &marker_options as &dyn Fn(_) -> _)),
         };
         if let Some(e) = eye {
             let block = [

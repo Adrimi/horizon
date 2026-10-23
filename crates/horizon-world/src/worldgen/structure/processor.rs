@@ -313,6 +313,9 @@ pub enum Processor {
     /// `horizon:close_off_fluid_sources` (Repurposed Structures' and Moog's):
     /// fluid sources beside open blocks are walled off.
     CloseOffFluidSources(Box<pillars::CloseOffFluidSources>),
+    /// `horizon:close_off_air_sources` (Repurposed Structures'): air and
+    /// other liquids beside the template's fluids are walled off.
+    CloseOffAirSources(Box<pillars::CloseOffAirSources>),
     /// `horizon:yung_pillar` (YUNG's pillars: Better Fortresses, Better
     /// Jungle Temples).
     YungPillar(Box<pillars::YungPillar>),
@@ -341,6 +344,9 @@ pub enum Processor {
     YungCarve(Box<yung::Carve>),
     /// `horizon:yung_leg` (Better Dungeons' legs).
     YungLeg(Box<yung::Leg>),
+    /// `horizon:waterlog_in_world_water` (Repurposed Structures'): blocks
+    /// are waterlogged where the world holds water, dry where it does not.
+    WaterlogInWorldWater,
 }
 #[derive(Clone, Debug, Default)]
 pub struct ProcessorList(pub Vec<Processor>);
@@ -823,6 +829,9 @@ impl Processor {
             "horizon:close_off_fluid_sources" => Self::CloseOffFluidSources(Box::new(
                 pillars::CloseOffFluidSources::decode(value, resources, bindings)?,
             )),
+            "horizon:close_off_air_sources" => Self::CloseOffAirSources(Box::new(
+                pillars::CloseOffAirSources::decode(value, resources, bindings)?,
+            )),
             "horizon:yung_pillar" => Self::YungPillar(Box::new(pillars::YungPillar::decode(
                 value, bindings, state,
             )?)),
@@ -833,6 +842,7 @@ impl Processor {
                 Self::FloodAir(Box::new(sea_level::FloodAir::decode(resources.registry)?))
             }
             "horizon:waterlog" => Self::Waterlog,
+            "horizon:waterlog_in_world_water" => Self::WaterlogInWorldWater,
             "horizon:keep_world_block" => {
                 Self::KeepWorldBlock(Box::new(sea_level::KeepWorldBlock::decode(value)?))
             }
@@ -1222,6 +1232,7 @@ fn process_block<W: PlacementContext>(
             return p.process(world, resources, position, relative, info, settings);
         }
         Processor::CloseOffFluidSources(p) => return p.process(world, info, settings),
+        Processor::CloseOffAirSources(p) => return p.process(world, info, settings),
         Processor::YungPillar(p) => return p.process(world, resources, info, settings),
         Processor::StairPillar(p) => return p.process(world, resources, info, settings),
         Processor::FloodAir(p) => return p.process(world, info),
@@ -1251,6 +1262,14 @@ fn process_block<W: PlacementContext>(
         }
         Processor::YungLeg(p) => {
             return p.process(world, resources, info, settings);
+        }
+        Processor::WaterlogInWorldWater => {
+            return sea_level::WaterlogInWorldWater::process(
+                world,
+                resources.registry,
+                info,
+                settings,
+            );
         }
         Processor::Pick(pick) => match name(info.state) == pick.block {
             true => {

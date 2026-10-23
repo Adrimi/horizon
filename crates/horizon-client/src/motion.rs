@@ -1269,9 +1269,7 @@ impl MotionWorld<'_, '_, '_> {
                 amount: 1,
             }));
         self.player
-            .health
-            .food
-            .add_exhaustion(if self.player.sprinting { 0.2 } else { 0.05 });
+            .cause_food_exhaustion(if self.player.sprinting { 0.2 } else { 0.05 });
         Ok(())
     }
     /// LivingEntity.travelFallFlying with updateFallFlyingMovement.
@@ -1423,7 +1421,7 @@ impl MovementStatisticsWorld for MotionWorld<'_, '_, '_> {
         Ok(())
     }
     fn exhaust(&mut self, amount: f32) -> Result<()> {
-        self.player.health.food.add_exhaustion(amount);
+        self.player.cause_food_exhaustion(amount);
         Ok(())
     }
 }
@@ -2022,7 +2020,9 @@ mod tests {
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
             });
         if !root.join("movement-properties.nbt").exists() {
             eprintln!("skipped sword sweep regression: prepared resources unavailable");
@@ -2056,7 +2056,9 @@ mod tests {
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
             });
         if !root.join("movement-properties.nbt").exists() {
             return;
@@ -2128,7 +2130,9 @@ mod tests {
 
     #[test]
     fn spectator_scroll_speed_controls_horizontal_and_vertical_flight() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
@@ -2169,7 +2173,9 @@ mod tests {
 
     #[test]
     fn resident_spectator_flight_ignores_solid_and_climbable_blocks() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
@@ -2228,11 +2234,82 @@ mod tests {
     }
 
     #[test]
+    fn creative_and_spectator_preserve_hunger_when_switching_from_survival() {
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
+            });
+        if !root.join("movement-properties.nbt").exists() {
+            eprintln!("skipped hunger regression: prepared resources unavailable");
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        // Both abilities are set by creative/spectator mode changes for the
+        // resident player and for LAN/dedicated guests.
+        for spectator in [false, true] {
+            for food in [0, 1, 20] {
+                let mut player = PlayerMotion::new(&resources, Vec3::ZERO).unwrap();
+                player.health.food.food = food;
+                player.health.food.saturation = 0.0;
+                player.health.food.exhaustion = 0.0;
+                player.health.food.timer = 79;
+                player.invulnerable = true;
+                player.spectator = spectator;
+                for _ in 0..160 {
+                    player.cause_food_exhaustion(0.2);
+                    player
+                        .food_tick(&resources.health, Default::default())
+                        .unwrap();
+                }
+                assert_eq!(player.health.food.food, food);
+                assert_eq!(player.health.food.saturation, 0.0);
+                assert_eq!(player.health.food.exhaustion, 0.0);
+                assert_eq!(player.health.health(), 20.0);
+                assert!(!player.health.dead_or_dying());
+                assert!(player.events.is_empty());
+
+                // Pending exhaustion from survival is still processed, but an
+                // empty food bar cannot hurt the now-invulnerable player.
+                player.health.food.exhaustion = 5.0;
+                player.health.food.timer = 79;
+                player
+                    .food_tick(&resources.health, Default::default())
+                    .unwrap();
+                assert_eq!(player.health.food.food, (food - 1).max(0));
+                assert_eq!(player.health.food.exhaustion, 1.0);
+                assert_eq!(player.health.health(), 20.0);
+                assert!(player.events.is_empty());
+
+                // Returning to survival resumes exhaustion and starvation.
+                player.health.food.food = food;
+                player.health.food.exhaustion = 0.0;
+                player.invulnerable = false;
+                player.spectator = false;
+                player.cause_food_exhaustion(0.2);
+                assert_eq!(player.health.food.exhaustion, 0.2);
+                player.health.food.exhaustion = 5.0;
+                player.health.food.timer = 79;
+                player
+                    .food_tick(&resources.health, Default::default())
+                    .unwrap();
+                assert_eq!(player.health.food.food, (food - 1).max(0));
+                assert_eq!(player.health.health(), if food <= 1 { 19.0 } else { 20.0 });
+            }
+        }
+    }
+
+    #[test]
     fn player_fire_damage_queues_hurt_sound_only_for_fresh_hits() {
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
             });
         if !root.join("movement-properties.nbt").exists() {
             eprintln!("skipped damage regression: prepared resources unavailable");
@@ -2409,7 +2486,9 @@ mod tests {
     /// per `nextStep` metre while walking.
     #[test]
     fn resident_water_landing_cancels_a_preset_fall() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
@@ -2454,7 +2533,9 @@ mod tests {
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
             });
         if !root.join("movement-properties.nbt").exists() {
             eprintln!("skipping resident water/lava test: prepared resources unavailable");
@@ -2711,7 +2792,9 @@ mod tests {
 
     #[test]
     fn resident_swimming_uses_previous_eyes_and_requires_water_at_the_feet() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
@@ -2784,7 +2867,9 @@ mod tests {
 
     #[test]
     fn resident_fire_precedes_first_tick_lava_and_water_extinguishing() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
@@ -2836,7 +2921,9 @@ mod tests {
 
     #[test]
     fn resident_bubble_columns_and_nautilus_preserve_their_air_rules() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
@@ -2906,7 +2993,9 @@ mod tests {
 
     #[test]
     fn resident_mixed_fluids_use_lava_height_for_ground_jumps() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
@@ -2955,7 +3044,9 @@ mod tests {
 
     #[test]
     fn footsteps_follow_the_walked_distance_not_the_tick() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
         if !root.join("movement-properties.nbt").exists() {
             return;
         }
