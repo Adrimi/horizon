@@ -54,7 +54,10 @@ pub use bindings::horizon::mods::{
     },
     tooltip::{Content as TooltipContent, Hovered as TooltipHovered},
     weather::State as WeatherState,
-    world::{Biome, BlockBroken, BlockPos, ChunkSurface, ContainerStack, RandomTick, WorldBlock},
+    world::{
+        Biome, BlockBroken, BlockPos, BlockRemoved, ChunkSurface, ContainerStack, RandomTick,
+        WorldBlock,
+    },
 };
 use bindings::{
     HorizonMod,
@@ -137,6 +140,8 @@ pub struct Snapshot {
     pub hotbar_food: Vec<Option<Food>>,
     /// Blocks broken since the previous tick (`world-read`, API 0.1.2).
     pub broken: Vec<BlockBroken>,
+    /// Blocks that went since the previous tick (`world`, API 0.1.19).
+    pub removed: Vec<BlockRemoved>,
     /// The hotbar's tools, the inventory's slots and the player's keys
     /// (API 0.1.16).
     pub tools: Vec<Option<InventoryTool>>,
@@ -568,6 +573,13 @@ struct State {
     haze: Option<Haze>,
     /// The tags `world.watch-random-ticks` listens to.
     watched_ticks: Vec<String>,
+    /// The blocks (ids, with states) `watch-random-tick-blocks` listens to.
+    watched_blocks: Vec<String>,
+    /// The game's particles the mod silences, and the ones it made
+    /// commands of (API 0.1.19).
+    suppressed: Vec<(String, f32)>,
+    command_particles: Vec<(String, ParticleOptions)>,
+    sprite_source: Arc<std::sync::Mutex<Option<SpriteSource>>>,
     /// The pictures the mod set for chat messages, by message id (API
     /// 0.1.15).
     chat_pictures: Vec<(u64, ChatDecoration)>,
@@ -627,6 +639,27 @@ pub struct Mods {
     chat_pending: Vec<ChatMessage>,
     /// The merged resource packs' folder, for `resources` (API 0.1.14).
     resource_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
+    /// Gives the pixels of a sprite of the game's atlas (API 0.1.19).
+    sprite_source: Arc<std::sync::Mutex<Option<SpriteSource>>>,
+}
+
+/// A sprite of the game's atlas by name: its width, height and RGBA pixels.
+pub type SpriteSource = Arc<dyn Fn(&str) -> Option<(u32, u32, Vec<u8>)> + Send + Sync>;
+
+/// Whether a block (`id` with its `properties`) is one of the `specs`
+/// (`minecraft:bamboo[leaves=large]`).
+fn block_is_watched(specs: &[String], id: &str, properties: &[(String, String)]) -> bool {
+    specs.iter().any(|spec| {
+        let (name, states) = match spec.split_once('[') {
+            Some((name, rest)) => (name, rest.trim_end_matches(']')),
+            None => (spec.as_str(), ""),
+        };
+        name == id
+            && states.split(',').filter(|s| !s.is_empty()).all(|s| {
+                s.split_once('=')
+                    .is_some_and(|(k, v)| properties.iter().any(|(pk, pv)| pk == k && pv == v))
+            })
+    })
 }
 
 /// A mod's pictures and rules for the faces of blocks (API 0.1.14).
@@ -762,6 +795,7 @@ impl Mods {
         let snapshot = self.snapshot.clone();
         let ui = self.ui.clone();
         let resource_root = self.resource_root.clone();
+        let sprite_source = self.sprite_source.clone();
         let (engine, linker) = self.engine()?;
         let component =
             Component::new(engine, wasm).map_err(|e| format!("not a component: {e}"))?;
@@ -817,6 +851,10 @@ impl Mods {
             landings: Vec::new(),
             haze: None,
             watched_ticks: Vec::new(),
+            watched_blocks: Vec::new(),
+            suppressed: Vec::new(),
+            command_particles: Vec::new(),
+            sprite_source,
             chat_pictures: Vec::new(),
             resource_root,
             texture_sprites: Vec::new(),
@@ -1066,6 +1104,47 @@ impl Mods {
             }
         }
         set
+    }
+    /// The function that gives the pixels of a sprite of the game's atlas to
+    /// `particles.get-game-sprite` (API 0.1.19).
+    pub fn set_sprite_source(&mut self, source: Option<SpriteSource>) {
+        *self.sprite_source.lock().unwrap_or_else(|e| e.into_inner()) = source;
+    }
+    /// What the running mods silence in the game's particles: id and the
+    /// smallest multiplier (API 0.1.19).
+    pub fn suppressed(&self) -> Vec<(String, f32)> {
+        let mut out: Vec<(String, f32)> = Vec::new();
+        for run in self.entries.iter().filter_map(|e| e.run.as_ref()) {
+            for (id, scale) in &run.store.data().suppressed {
+                match out.iter_mut().find(|(i, _)| i == id) {
+                    Some(old) => old.1 = old.1.min(*scale),
+                    None => out.push((id.clone(), *scale)),
+                }
+            }
+        }
+        out
+    }
+    /// The particles the running mods made commands of: `<mod id>:<name>`
+    /// and the template (API 0.1.19).
+    pub fn command_particles(&self) -> Vec<(String, ParticleOptions)> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.run.as_ref())
+            .flat_map(|r| r.store.data().command_particles.iter().cloned())
+            .collect()
+    }
+    /// The blocks the running mods watch by id for random ticks (API
+    /// 0.1.19).
+    pub fn watched_tick_blocks(&self) -> Vec<String> {
+        let mut blocks: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| e.run.as_ref())
+            .flat_map(|r| r.store.data().watched_blocks.iter().cloned())
+            .collect();
+        blocks.sort();
+        blocks.dedup();
+        blocks
     }
     /// The tags the running mods watch for random ticks, none when no mod
     /// does (API 0.1.12).
@@ -2093,6 +2172,67 @@ impl particles::Host for State {
     fn landed(&mut self) -> Vec<Landing> {
         std::mem::take(&mut self.landings)
     }
+    fn get_game_sprite(&mut self, name: String) -> Option<particles::GameImage> {
+        let source = self
+            .sprite_source
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let (width, height, pixels) = source(&name)?;
+        // The pixels of a picture that is too big for a particle are cut to
+        // its top left corner.
+        let side = PARTICLE_SPRITE_SIDE;
+        if width <= side && height <= side {
+            return Some(particles::GameImage {
+                width,
+                height,
+                pixels,
+            });
+        }
+        let (w, h) = (width.min(side), height.min(side));
+        let mut cut = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let from = ((y * width) * 4) as usize;
+            cut.extend_from_slice(&pixels[from..from + (w * 4) as usize]);
+        }
+        Some(particles::GameImage {
+            width: w,
+            height: h,
+            pixels: cut,
+        })
+    }
+    fn set_suppressed(&mut self, types: Vec<String>, scale: f32) {
+        let scale = if scale.is_finite() {
+            scale.clamp(0.0, 16.0)
+        } else {
+            1.0
+        };
+        self.suppressed = types.into_iter().take(16).map(|t| (t, scale)).collect();
+    }
+    fn register_command_particle(
+        &mut self,
+        name: String,
+        options: ParticleOptions,
+    ) -> Result<(), String> {
+        if name.is_empty()
+            || name.len() > 32
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_".contains(&b))
+        {
+            return Err("a particle's name is [a-z0-9_]{1,32}".into());
+        }
+        if !self.owned_sprites.contains(&options.sprite) {
+            return Err("define the picture before registering the particle".into());
+        }
+        let id = format!("{}:{name}", self.id);
+        self.command_particles.retain(|(n, _)| *n != id);
+        if self.command_particles.len() >= 16 {
+            return Err("a mod has at most 16 command particles".into());
+        }
+        self.command_particles.push((id, options));
+        Ok(())
+    }
 }
 impl atmosphere::Host for State {
     fn set_haze(&mut self, haze: Option<Haze>) {
@@ -2376,15 +2516,24 @@ impl world::Host for State {
         self.snapshot.broken.clone()
     }
     fn random_ticked_blocks(&mut self) -> Vec<RandomTick> {
-        if self.watched_ticks.is_empty() {
+        if self.watched_ticks.is_empty() && self.watched_blocks.is_empty() {
             return Vec::new();
         }
         self.snapshot
             .ticked
             .iter()
-            .filter(|t| t.block.tags.iter().any(|g| self.watched_ticks.contains(g)))
+            .filter(|t| {
+                t.block.tags.iter().any(|g| self.watched_ticks.contains(g))
+                    || block_is_watched(&self.watched_blocks, &t.block.id, &t.block.properties)
+            })
             .cloned()
             .collect()
+    }
+    fn watch_random_tick_blocks(&mut self, blocks: Vec<String>) {
+        self.watched_blocks = blocks.into_iter().take(256).collect();
+    }
+    fn removed_blocks(&mut self) -> Vec<BlockRemoved> {
+        self.snapshot.removed.clone()
     }
     fn watch_random_ticks(&mut self, tags: Vec<String>) {
         self.watched_ticks = tags.into_iter().take(16).collect();

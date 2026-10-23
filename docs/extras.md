@@ -15,7 +15,6 @@ again restores vanilla's behaviour completely.
 | HUD drawing (FPS, keystrokes, minimap frame) | `crates/horizon-client/src/extras_hud.rs` |
 | Minimap colours, tiles and image | `crates/horizon-client/src/minimap.rs` |
 | Dynamic lights: source levels and packing | `crates/horizon-client/src/dynamic_lights.rs` (unit tested); sources in `game/dynamic_lights.rs`, shaders in `terrain.wgsl` and `entity.wgsl` |
-| Connected textures: rules, the 47-tile table and tile choice | `crates/horizon-client/src/ctm.rs` (unit tested); mesher hook in `mesher.rs` |
 | Particle rain: the weather of a column, the density and the storm's haze | `crates/horizon-client/src/rain.rs` (unit tested) |
 | Weather particles: textures, fall, splash and ripples | `crates/horizon-client/src/particles.rs` (unit tested) |
 | Reconnect policy and backoff | `crates/horizon-client/src/reconnect.rs` |
@@ -112,27 +111,6 @@ Horizon category in Controls, and adding one would put a non-vanilla mapping int
   budget of 0.3 ms a frame; composing the 128x128 image is a few thousand
   lookups, done only when the view moved or a tile changed, and uploaded into a
   dedicated atlas slot. With the minimap off nothing runs.
-
-### Connected textures (`connectedTextures`, default off)
-- Reads OptiFine-format CTM from the enabled resource packs:
-  `assets/<namespace>/optifine/ctm/**/*.properties`, with `tiles` ranges and
-  names, `matchBlocks` (block and property filters) or `matchTiles`, `faces`,
-  `connect=block|tile|state`, `width`/`height` and `weights`. A file without a
-  match takes it from its name (`block_glass` names a block, `glass` a tile).
-- Methods: `ctm` (the real 47-tile template, with the inner corners of sides
-  that meet but whose diagonal does not), `ctm_compact` (5 tiles, drawn as four
-  quarters of a face), `horizontal`, `vertical`, `top`, `random` and `repeat`.
-- A face connects only across its own plane: left, down, right, up and the four
-  diagonals of that face, so a wall of glass joins seamlessly while its outer
-  border keeps the frame, exactly as OptiFine's and Continuity's tables do.
-- Tiles are loaded from beside the properties file, `~/` or
-  `assets/<namespace>/textures/`, and packed into the block atlas with the
-  pack's other sprites; changing the pack or the option remeshes the world.
-- With no CTM pack, or with the option off, sections mesh exactly as vanilla's
-  (the mesher returns before any lookups), so the default stays byte-identical.
-- Not implemented: `innerSeams`, `orient`, `ctm.N`, `randomLoops`, `symmetry`
-  and the biome/height/size/health conditions; unsupported keys are ignored or
-  the file is skipped with a log line, never fatal.
 
 ### Particle rain (`particleRain`, default off; `particleRainAmount` 1, 2, 4 or 8)
 - The weather becomes particles on top of vanilla's rain columns: drops of

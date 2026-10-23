@@ -1007,7 +1007,18 @@ fn the_weather_particles_and_haze_apis() {
         ..player()
     });
     assert!(mods.command("weatherfx"));
-    let out = mods.drain();
+    // The picture numbers are shared by every test of the process.
+    let out: Vec<_> = mods
+        .drain()
+        .into_iter()
+        .map(|o| match o {
+            Output::Feedback { text, error } => Output::Feedback {
+                text: text.replace("sprite 1", "sprite 0"),
+                error,
+            },
+            other => other,
+        })
+        .collect();
     assert_eq!(
         out,
         [feedback(
@@ -1250,6 +1261,64 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
     // The marks stay for the game to draw.
     assert_eq!(mods.slot_marks().len(), 2);
     assert_eq!(mods.slot_marks()[0].slot, 0);
+}
+
+#[test]
+fn the_leaf_apis_silence_particles_watch_blocks_and_give_game_sprites() {
+    use horizon_mods::{BlockRemoved, RandomTick, Snapshot};
+    use std::sync::Arc;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_sprite_source(Some(Arc::new(|name: &str| {
+        (name == "minecraft:block/oak_leaves").then(|| (2, 2, vec![255; 16]))
+    })));
+    let block = FakeWorld.block(&BlockPos { x: 0, y: 64, z: 0 }).unwrap();
+    let mut wool = block.clone();
+    wool.id = "minecraft:pink_wool".into();
+    wool.properties = Vec::new();
+    wool.tags = Vec::new();
+    mods.set_snapshot(Snapshot {
+        ticked: vec![
+            RandomTick {
+                pos: block.pos,
+                block: block.clone(),
+            },
+            RandomTick {
+                pos: wool.pos,
+                block: wool.clone(),
+            },
+        ],
+        removed: vec![BlockRemoved {
+            pos: block.pos,
+            block,
+            by_world: true,
+        }],
+        ..player()
+    });
+    assert!(mods.command("leaffx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "removed 1 sprite Some((2, 2, 16)) registered Some(Ok(()))"
+        )]
+    );
+    assert_eq!(
+        mods.suppressed(),
+        [("minecraft:tinted_leaves".to_owned(), 0.0)]
+    );
+    assert_eq!(mods.watched_tick_blocks(), ["minecraft:pink_wool"]);
+    // The command particle is named after the mod.
+    let named = mods.command_particles();
+    assert_eq!(named.len(), 1);
+    assert!(named[0].0.ends_with(":leafy"));
+    // Only the watched block of the ticked ones is heard.
+    assert!(mods.command("ticks"));
+    assert_eq!(mods.drain(), [feedback("0 heard, last ")]);
+    mods.tick(1);
+    assert!(mods.command("ticks"));
+    assert_eq!(
+        mods.drain(),
+        [feedback("1 heard, last minecraft:pink_wool at 0 64 0")]
+    );
 }
 
 #[test]

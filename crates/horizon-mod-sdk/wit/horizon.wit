@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.18;
+package horizon:mods@0.1.19;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -852,6 +852,25 @@ interface %world {
     /// earlier tags; an empty list stops the listening. Works in `init`
     /// too (API 0.1.12).
     watch-random-ticks: func(tags: list<string>);
+    /// Watches blocks by id as well (API 0.1.19): `minecraft:pink_wool`, or
+    /// with the state's properties it must have
+    /// (`minecraft:bamboo[leaves=large]`). `random-ticked-blocks` reports
+    /// these and the blocks of the watched tags. Calling it again replaces
+    /// the earlier list; an empty list stops it.
+    watch-random-tick-blocks: func(blocks: list<string>);
+    /// A block that is gone (API 0.1.19).
+    record block-removed {
+        pos: block-pos,
+        /// The block as it was before it went.
+        block: world-block,
+        /// The world took it (a leaf decayed, a block died), not the
+        /// player's hand or a mod: what the player or a mod broke is in
+        /// `broken-blocks` and comes here with `by-world` false.
+        by-world: bool,
+    }
+    /// The blocks that went since the previous tick, oldest first (the
+    /// blocks that became air; at most 256 a tick) (API 0.1.19).
+    removed-blocks: func() -> list<block-removed>;
     /// The blocks broken since the previous tick, oldest first: the
     /// player's and those mods broke. The same list for every mod, read
     /// during `tick`.
@@ -1121,6 +1140,33 @@ interface particles {
     spawn: func(options: options) -> bool;
     /// The mod's own particles that landed since the last call, oldest first.
     landed: func() -> list<landing>;
+    /// A picture of the game's block, item or GUI atlas (API 0.1.19).
+    record game-image {
+        width: u32,
+        height: u32,
+        /// RGBA, four bytes a pixel, row by row from the top left, as
+        /// `define-sprite` takes it.
+        pixels: list<u8>,
+    }
+    /// The picture of a sprite of the game's block atlas
+    /// (`minecraft:block/oak_leaves`), as the enabled resource packs give
+    /// it, or none when there is no such sprite. A mod draws its particles
+    /// with it by giving the pixels to `define-sprite` (API 0.1.19).
+    get-game-sprite: func(name: string) -> option<game-image>;
+    /// The particles of the game that the mod silences or scales (API
+    /// 0.1.19): their ids (`minecraft:tinted_leaves`, `minecraft:cherry_leaves`,
+    /// `minecraft:pale_oak_leaves`) and a multiplier of the chance with
+    /// which the game's blocks spawn them (0: none). The list replaces the
+    /// mod's earlier one; with several mods the smallest multiplier wins;
+    /// it ends with the mod. Only particles the game spawns from blocks
+    /// by chance (falling leaves) can be scaled.
+    set-suppressed: func(types: list<string>, scale: f32);
+    /// Makes `/particle <mod id>:<name>` spawn this particle (API 0.1.19):
+    /// `options` are the template (its position is where the command puts
+    /// it, its velocity the command's delta), and the picture must have
+    /// been defined before. An error for a bad name; the same name
+    /// replaces the old one.
+    register-command-particle: func(name: string, options: options) -> result<_, string>;
 }
 
 /// Capability `atmosphere`: the mod's own weather in the fog (API 0.1.6).

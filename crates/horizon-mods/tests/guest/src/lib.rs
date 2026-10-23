@@ -62,6 +62,7 @@ impl Mod for Guest {
             "texfx",
             "said",
             "playersfx",
+            "leaffx",
             "toolfx",
             "resfx",
             "save",
@@ -280,6 +281,60 @@ impl Mod for Guest {
                 )))
             }
             "said" => Ok(Some(self.said.clone())),
+            "leaffx" => {
+                // Silencing, watching blocks by id, removed blocks, a game
+                // sprite and a command particle.
+                particles::set_suppressed(&["minecraft:tinted_leaves".into()], 0.0);
+                world::watch_random_tick_blocks(&["minecraft:pink_wool".into()]);
+                let removed = world::removed_blocks().len();
+                let sprite = particles::get_game_sprite("minecraft:block/oak_leaves");
+                let size = sprite.as_ref().map(|s| (s.width, s.height, s.pixels.len()));
+                let picture = sprite
+                    .map(|s| {
+                        particles::define_sprite(&particles::Sprite {
+                            name: "game_leaf".into(),
+                            width: s.width,
+                            height: s.height,
+                            pixels: s.pixels,
+                        })
+                    })
+                    .transpose()?;
+                let registered = picture.map(|sprite| {
+                    particles::register_command_particle(
+                        "leafy",
+                        particles::Options {
+                            sprite,
+                            x: 0.0,
+                            y: 0.0,
+                            z: 0.0,
+                            vx: 0.0,
+                            vy: 0.0,
+                            vz: 0.0,
+                            color: particles::Color {
+                                r: 1.0,
+                                g: 1.0,
+                                b: 1.0,
+                                a: 1.0,
+                            },
+                            size: 0.2,
+                            lifetime: 100,
+                            gravity: 0.02,
+                            wind_x: 0.0,
+                            wind_z: 0.0,
+                            collide: false,
+                            size_curve: particles::SizeCurve::Constant,
+                            fade: particles::Fade::None,
+                            flat: false,
+                            linger: 0,
+                            sway: 0.0,
+                            sway_period: 1,
+                            spin: 0.0,
+                            tumble: 0.0,
+                        },
+                    )
+                });
+                Ok(Some(format!("removed {removed} sprite {size:?} registered {registered:?}")))
+            }
             "playersfx" => Ok(Some(
                 players::get_players()
                     .iter()
