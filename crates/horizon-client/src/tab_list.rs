@@ -97,6 +97,19 @@ fn sprite(name: &'static str, x: i32, y: i32, w: i32, h: i32) -> GuiDraw {
 /// `PlayerFaceExtractor.extractRenderState`: the skin's face, then its hat
 /// layer, upside down for Dinnerbone and Grumm.
 fn face(out: &mut Vec<GuiDraw>, skin: &str, x: i32, y: i32, size: i32, hat: bool, flip: bool) {
+    face_tinted(out, skin, x, y, size, hat, flip, WHITE);
+}
+/// [`face`] drawn with `color` (the chat's fading alpha).
+pub fn face_tinted(
+    out: &mut Vec<GuiDraw>,
+    skin: &str,
+    x: i32,
+    y: i32,
+    size: i32,
+    hat: bool,
+    flip: bool,
+    color: u32,
+) {
     let (v, height) = if flip { (16.0, -8) } else { (8.0, 8) };
     for u in [8.0, 40.0].into_iter().take(if hat { 2 } else { 1 }) {
         out.push(GuiDraw::Blit {
@@ -109,7 +122,7 @@ fn face(out: &mut Vec<GuiDraw>, skin: &str, x: i32, y: i32, size: i32, hat: bool
             uv: [u, v],
             src: [8, height],
             tex: [64, 64],
-            color: WHITE,
+            color,
         });
     }
 }

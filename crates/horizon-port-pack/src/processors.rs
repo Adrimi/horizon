@@ -590,9 +590,292 @@ fn as_data(kind: &str, p: &Value, data: &ProcessorData) -> Option<Vec<Value>> {
             true,
         )],
         _ if ns == "betteroceanmonuments" => ocean_monument(kind)?,
-        _ if ns == "betterdungeons" || ns == "betterdeserttemples" => vec![yung_spawner(kind, p)?],
+        _ if ns == "betterdungeons" || ns == "betterdeserttemples" => {
+            // The spawners first, then YUNG's other processors.
+            match yung_spawner(kind, p) {
+                Some(spawner) => vec![spawner],
+                None => yung_processor(kind, p)?,
+            }
+        }
+        _ if kind.starts_with("betterwitchhuts:")
+            || kind.starts_with("betterjungletemples:")
+            || kind.starts_with("betterstrongholds:")
+            || kind.starts_with("betterfortresses:")
+            || kind.starts_with("betterendisland:") =>
+        {
+            yung_processor(kind, p)?
+        }
         _ => return None,
     })
+}
+
+/// YUNG's own processors, as the game's types (`horizon:yung_*`,
+/// `horizon_world::worldgen::structure::processor::yung`): the mods write
+/// them in Java, the game runs the data form. The tables the mods hold in
+/// their Java code (the block randomizers, the banner list, the brewing
+/// recipes) are written in here, as the mods' own.
+fn yung_processor(kind: &str, p: &Value) -> Option<Vec<Value>> {
+    /// YUNG's `BlockStateRandomizer`: a default and the entries' shares.
+    fn randomizer(default: &str, entries: &[(&str, f64)]) -> Value {
+        json!({
+            "defaultBlockState": block(default),
+            "entries": entries
+                .iter()
+                .map(|(id, p)| json!({"blockState": block(id), "probability": p}))
+                .collect::<Vec<_>>(),
+        })
+    }
+    // The game's `horizon:yung_replace`: the blocks it applies to and the
+    // randomizer they become.
+    let replace = |blocks: &[&str], output: Value, flags: &[(&str, &str)]| {
+        let mut out = json!({"processor_type": "horizon:yung_replace",
+            "blocks": blocks, "output": output});
+        for (key, value) in flags {
+            out[*key] = json!(value);
+        }
+        out
+    };
+    // The game's `horizon:yung_leg`: the placeholder, what it becomes and
+    // what the column under it is made of.
+    let leg = |placeholder: &str, output: &str, pillar: Value, world_when_empty: bool| {
+        json!({"processor_type": "horizon:yung_leg",
+            "blocks": [placeholder], "output": block(output),
+            "world_when_empty": world_when_empty, "pillar_states": pillar})
+    };
+    Some(match kind {
+        // Better Jungle Temples' and Better End Island's block replace: the
+        // mod's own randomizer, with the properties it asks for.
+        "betterjungletemples:block_replace_processor"
+        | "betterendisland:block_replace_processor" => {
+            let target = block_name(&p["target_block"])?;
+            let mut flags = Vec::new();
+            for (key, value) in [
+                ("copy_input_properties", "copy_input_properties"),
+                ("preserve_waterlog", "copy_waterlogged"),
+                ("randomize_facing", "copy_facing"),
+                ("randomize_half", "copy_half"),
+            ] {
+                if p[value].as_bool().unwrap_or(false) {
+                    flags.push((key, "true"));
+                }
+            }
+            vec![replace(&[target.as_str()], p["output"].clone(), &flags)]
+        }
+        // Better Witch Huts' brewing stand: one of five potions, with the
+        // ingredient it is brewed from.
+        "betterwitchhuts:brewing_stand_processor" => vec![json!({
+            "processor_type": "horizon:yung_brew",
+            "recipes": [
+                {"ingredient": "minecraft:glistering_melon_slice", "potion": "minecraft:healing"},
+                {"ingredient": "minecraft:sugar", "potion": "minecraft:swiftness"},
+                {"ingredient": "minecraft:pufferfish", "potion": "minecraft:water_breathing"},
+                {"ingredient": "minecraft:golden_carrot", "potion": "minecraft:night_vision"},
+                {"ingredient": "minecraft:phantom_membrane", "potion": "minecraft:slow_falling"},
+            ],
+        })],
+        // Better Witch Huts' potted mushrooms.
+        "betterwitchhuts:potted_mushroom_processor" => vec![replace(
+            &["minecraft:potted_red_mushroom"],
+            randomizer(
+                "minecraft:potted_red_mushroom",
+                &[
+                    ("minecraft:potted_brown_mushroom", 0.2),
+                    ("minecraft:potted_cornflower", 0.1),
+                    ("minecraft:potted_cactus", 0.1),
+                    ("minecraft:potted_dead_bush", 0.1),
+                    ("minecraft:potted_fern", 0.1),
+                    ("minecraft:potted_azalea", 0.1),
+                ],
+            ),
+            &[],
+        )],
+        // Better Witch Huts' witch circle: its walls, its stairs and its
+        // floor.
+        "betterwitchhuts:witch_circle_processor" => {
+            let bricks = randomizer(
+                "minecraft:stone_bricks",
+                &[
+                    ("minecraft:mossy_stone_bricks", 0.6),
+                    ("minecraft:cracked_stone_bricks", 0.1),
+                ],
+            );
+            let stone = randomizer(
+                "minecraft:cobblestone",
+                &[
+                    ("minecraft:mossy_cobblestone", 0.6),
+                    ("minecraft:coarse_dirt", 0.1),
+                ],
+            );
+            let stairs = randomizer(
+                "minecraft:stone_brick_stairs",
+                &[("minecraft:mossy_stone_brick_stairs", 0.6)],
+            );
+            vec![
+                replace(&["minecraft:stone_bricks"], bricks.clone(), &[]),
+                replace(&["minecraft:mossy_cobblestone"], stone, &[]),
+                replace(&["minecraft:stone_brick_stairs"], stairs, &[]),
+                replace(&["minecraft:gray_stained_glass"], bricks, &[]),
+            ]
+        }
+        // Better Jungle Temples' torches: most of them are taken away.
+        "betterjungletemples:torch_processor" => vec![json!({
+            "processor_type": "horizon:yung_torch",
+            "blocks": ["minecraft:torch", "minecraft:wall_torch"],
+            "chance": 0.9,
+        })],
+        // Better Jungle Temples' dispensers: an empty one and one with a
+        // fire charge.
+        "betterjungletemples:empty_dispenser_processor" => vec![json!({
+            "processor_type": "horizon:yung_dispenser", "items": []})],
+        "betterjungletemples:fireball_dispenser_processor" => vec![json!({
+            "processor_type": "horizon:yung_dispenser",
+            "items": [{"id": "minecraft:fire_charge", "count": 1}]})],
+        // Better Jungle Temples' blast furnaces become utility blocks.
+        "betterjungletemples:blast_furnace_processor" => vec![replace(
+            &["minecraft:blast_furnace"],
+            randomizer(
+                "minecraft:dispenser",
+                &[("minecraft:dropper", 0.4), ("minecraft:observer", 0.2)],
+            ),
+            &[],
+        )],
+        // Better Jungle Temples' cave vines.
+        "betterjungletemples:cave_vine_decoration_processor" => vec![replace(
+            &["minecraft:green_stained_glass"],
+            randomizer(
+                "minecraft:air",
+                &[
+                    ("minecraft:cobblestone_slab", 0.05),
+                    ("minecraft:mossy_cobblestone_slab", 0.05),
+                    ("minecraft:cave_vines", 0.02),
+                    ("minecraft:hanging_roots", 0.02),
+                ],
+            ),
+            &[],
+        )],
+        // Better Strongholds' ores and rare blocks.
+        "betterstrongholds:ore_processor" => vec![replace(
+            &["minecraft:nether_gold_ore"],
+            randomizer(
+                "minecraft:coal_ore",
+                &[
+                    ("minecraft:coal_ore", 0.2),
+                    ("minecraft:iron_ore", 0.2),
+                    ("minecraft:gold_ore", 0.2),
+                    ("minecraft:lapis_ore", 0.15),
+                    ("minecraft:redstone_ore", 0.15),
+                    ("minecraft:emerald_ore", 0.05),
+                    ("minecraft:diamond_ore", 0.05),
+                ],
+            ),
+            &[],
+        )],
+        "betterstrongholds:rare_block_processor" => vec![replace(
+            &["minecraft:purpur_block"],
+            randomizer(
+                "minecraft:iron_block",
+                &[
+                    ("minecraft:iron_block", 0.3),
+                    ("minecraft:quartz_block", 0.3),
+                    ("minecraft:gold_block", 0.3),
+                    ("minecraft:diamond_block", 0.1),
+                ],
+            ),
+            &[],
+        )],
+        // Better Strongholds' banners: one of the mod's own, with its
+        // patterns.
+        "betterstrongholds:banner_processor" => vec![json!({
+            "processor_type": "horizon:yung_banner",
+            "blocks": ["minecraft:gray_wall_banner"],
+            "banners": [
+                {"block": "minecraft:magenta_wall_banner", "patterns": [
+                    {"pattern": "minecraft:stripe_small", "color": "white"},
+                    {"pattern": "minecraft:stripe_top", "color": "black"},
+                    {"pattern": "minecraft:half_horizontal_mirror", "color": "black"},
+                    {"pattern": "minecraft:border", "color": "black"},
+                    {"pattern": "minecraft:stripe_middle", "color": "black"},
+                    {"pattern": "minecraft:stripe_center", "color": "black"}]},
+                {"block": "minecraft:black_wall_banner", "patterns": [
+                    {"pattern": "minecraft:stripe_bottom", "color": "gray"},
+                    {"pattern": "minecraft:stripe_center", "color": "black"},
+                    {"pattern": "minecraft:half_horizontal", "color": "gray"},
+                    {"pattern": "minecraft:creeper", "color": "black"},
+                    {"pattern": "minecraft:skull", "color": "black"}]},
+                {"block": "minecraft:purple_wall_banner", "patterns": [
+                    {"pattern": "minecraft:stripe_small", "color": "magenta"},
+                    {"pattern": "minecraft:bricks", "color": "purple"},
+                    {"pattern": "minecraft:curly_border", "color": "magenta"},
+                    {"pattern": "minecraft:border", "color": "black"}]},
+            ],
+        })],
+        // Better Dungeons' walls and rubble: nothing is built where the
+        // world is empty.
+        "betterdungeons:small_dungeon_cobblestone_processor" => vec![json!({
+            "processor_type": "horizon:yung_carve",
+            "blocks": ["minecraft:cobblestone"]})],
+        "betterdungeons:zombie_rot_processor" => vec![json!({
+            "processor_type": "horizon:yung_carve",
+            "blocks": ["minecraft:cobblestone", "minecraft:cyan_terracotta",
+                "minecraft:cobblestone_stairs"]})],
+        // Better Dungeons' legs: the placeholder becomes the leg's block and
+        // a column runs down from it.
+        "betterdungeons:small_dungeon_leg_processor" => vec![leg(
+            "minecraft:yellow_stained_glass",
+            "minecraft:mossy_cobblestone",
+            randomizer(
+                "minecraft:stone_bricks",
+                &[
+                    ("minecraft:mossy_stone_bricks", 0.5),
+                    ("minecraft:cracked_stone_bricks", 0.2),
+                ],
+            ),
+            false,
+        )],
+        "betterdungeons:skeleton_dungeon_leg_processor" => vec![leg(
+            "minecraft:blue_stained_glass",
+            "minecraft:cobblestone",
+            randomizer(
+                "minecraft:cobblestone",
+                &[("minecraft:mossy_cobblestone", 0.5)],
+            ),
+            false,
+        )],
+        "betterdungeons:zombie_dungeon_leg_processor" => vec![leg(
+            "minecraft:magenta_stained_glass",
+            "minecraft:smooth_stone",
+            randomizer(
+                "minecraft:cobblestone",
+                &[("minecraft:polished_andesite", 0.8)],
+            ),
+            true,
+        )],
+        "betterdungeons:small_nether_dungeon_leg_processor" => vec![leg(
+            "minecraft:orange_terracotta",
+            "minecraft:nether_bricks",
+            randomizer("minecraft:nether_bricks", &[]),
+            false,
+        )],
+        // Better Nether Fortresses' liquids: the mod's own block map.
+        "betterfortresses:liquid_block_processor" => {
+            let target = block_name(&p["target_block"])?;
+            vec![replace(
+                &[target.as_str()],
+                p["target_block_output"].clone(),
+                &[],
+            )]
+        }
+        _ => return None,
+    })
+}
+
+/// A block's name, in 1.21.1's `{"Name": ...}` shape or 26.3's
+/// `{"id": ...}`.
+fn block_name(v: &Value) -> Option<String> {
+    v["Name"]
+        .as_str()
+        .or_else(|| v["id"].as_str())
+        .map(|s| s.to_owned())
 }
 
 /// YUNG's leg processors (Better Ocean Monuments, Better Witch Huts): a

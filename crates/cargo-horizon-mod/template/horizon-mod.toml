@@ -8,5 +8,10 @@ api = "0.1"
 # client: runs in the player's game.
 side = "client"
 # What the mod may do, shown to players before they turn it on:
-# game-read (position, health, time), chat (show messages), hud (draw text).
+# game-read (position, health, time), chat (show messages), hud (draw text),
+# and since API 0.1.1 target (the block looked at or broken), inventory-read
+# (the hotbar, and since 0.1.3 the item tags) and hotbar (select a slot);
+# since 0.1.2 world-read and world-edit (the blocks around, breaking them);
+# since 0.1.4 keys (the mod's own key binds), storage (the mod's own files)
+# and screen (a screen the mod draws itself).
 capabilities = ["chat"]

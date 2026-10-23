@@ -268,7 +268,10 @@ pub fn upgrade_recipe(recipe: &mut Value) -> bool {
 /// rename them in worlds (DataVersion 4541: the chain became the iron chain
 /// when copper chains came in). A data file naming the old id fails to load
 /// in 26.3: a recipe, a loot entry, a processor's block match.
-const RENAMED_IDS: [(&str, &str); 1] = [("minecraft:chain", "minecraft:iron_chain")];
+const RENAMED_IDS: [(&str, &str); 2] = [
+    ("minecraft:chain", "minecraft:iron_chain"),
+    ("minecraft:potted_azalea", "minecraft:potted_azalea_bush"),
+];
 
 /// Every string of a data file that is a renamed id ([`RENAMED_IDS`]) set to
 /// the new one, in place; whether any was.
@@ -285,6 +288,78 @@ pub fn renamed_ids(v: &mut Value) -> bool {
         Value::Object(o) => o.values_mut().fold(false, |c, x| renamed_ids(x) | c),
         _ => false,
     }
+}
+
+/// A structure template's palette names the blocks it is built of. A block
+/// vanilla renamed after the mod's version is not in 26.3's registry, so the
+/// template does not load and the piece is missing. The name is replaced in
+/// the NBT bytes: a string's length is written before it, and the compounds
+/// and lists around it have no length of their own (only the list's element
+/// count, which does not change). The NBT is gzipped; it is read and written
+/// as it is. Whether anything was renamed.
+pub fn renamed_nbt_blocks(bytes: &mut Vec<u8>) -> bool {
+    use std::io::{Read, Write};
+    let gzipped = bytes.starts_with(&[0x1f, 0x8b]);
+    let mut raw = Vec::new();
+    if gzipped {
+        let mut decoder = flate2::read::GzDecoder::new(bytes.as_slice());
+        if decoder.read_to_end(&mut raw).is_err() {
+            return false;
+        }
+    } else {
+        raw = bytes.clone();
+    }
+    let mut changed = false;
+    for (old, new) in RENAMED_IDS {
+        let old = old.as_bytes();
+        let new = new.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+        let mut rest = raw.as_slice();
+        while let Some(at) = find(rest, old) {
+            // The string's length is the two bytes before it.
+            let Some(_len) = rest[..at].len().checked_sub(2) else {
+                break;
+            };
+            let declared = u16::from_be_bytes([rest[at - 2], rest[at - 1]]) as usize;
+            if declared != old.len() {
+                out.extend_from_slice(&rest[..at]);
+                rest = &rest[at..];
+                continue;
+            }
+            out.extend_from_slice(&rest[..at - 2]);
+            out.extend_from_slice(&(new.len() as u16).to_be_bytes());
+            out.extend_from_slice(new);
+            rest = &rest[at + old.len()..];
+            changed = true;
+        }
+        out.extend_from_slice(rest);
+        raw = out;
+    }
+    if !changed {
+        return false;
+    }
+    if gzipped {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        if encoder.write_all(&raw).is_err() {
+            return false;
+        }
+        if let Ok(out) = encoder.finish() {
+            *bytes = out;
+        }
+    } else {
+        *bytes = raw;
+    }
+    true
+}
+
+/// The first place `needle` is in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// A 1.21.1 advancement in 26.3's shape, in place: an `enter_block`
@@ -750,6 +825,10 @@ pub fn carry(
             };
             // Blocks and items are declared under the mod id only.
             let own = ns == id;
+            // A structure template's palette names the blocks it is built of.
+            if name.starts_with("data/") && name.ends_with(".nbt") {
+                renamed_nbt_blocks(&mut bytes);
+            }
             if name.starts_with("data/")
                 && (rel.starts_with("worldgen/") || rel.starts_with("structure/"))
             {

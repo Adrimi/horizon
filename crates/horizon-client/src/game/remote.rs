@@ -261,6 +261,9 @@ impl Game<'_> {
         self.armor = [None, None, None, None];
         self.craft_grid = vec![None; 9];
         self.craft_size = 2;
+        // The Item Highlighter extra: the items a server sends are not new.
+        self.highlighter
+            .reset(self.started.elapsed().as_millis() as u64);
         self.player = None;
         self.spawn = None;
         self.mobs.clear();
@@ -504,11 +507,21 @@ impl Game<'_> {
         Some(stack)
     }
     pub(super) fn chat_line(&mut self, text: String) {
+        self.chat_line_from(text, None);
+    }
+    /// [`Game::chat_line`] for a message a player (`sender`) wrote.
+    pub(super) fn chat_line_from(&mut self, text: String, sender: Option<u128>) {
         log::info!("[chat] {text}");
-        self.ui.chat.add(
+        if let Some(uuid) = sender
+            && self.settings.extras.chat_heads
+        {
+            self.refresh_chat_heads(uuid);
+        }
+        self.ui.chat.add_from(
             &self.gui.atlas,
             horizon_client::text::Text::literal(text.clone()),
             None,
+            sender,
             self.ticks,
             self.screen == Screen::Chat,
         );
@@ -1940,7 +1953,7 @@ impl Game<'_> {
                     .as_ref()
                     .map_or_else(|| p.content.clone(), |t| plain(t, &lang));
                 let line = self.format_chat(&p.chat_type, &content);
-                self.chat_line(line);
+                self.chat_line_from(line, Some(p.sender));
             }
             C::DisguisedChat(p) => {
                 let lang = self
@@ -2247,6 +2260,20 @@ impl Game<'_> {
             }
             _ => {}
         }
+    }
+    /// The chat heads extra: the skins of the listed players (downloaded
+    /// ones once ready), and `sender`'s default skin when unlisted.
+    fn refresh_chat_heads(&mut self, sender: u128) {
+        if let Some((players, _, _)) = self.remote_tab_players() {
+            for p in players {
+                self.ui.chat.head_skins.insert(p.uuid, p.skin);
+            }
+        }
+        self.ui
+            .chat
+            .head_skins
+            .entry(sender)
+            .or_insert_with(|| horizon_client::tab_list::default_skin(sender).to_owned());
     }
     /// The player list's view of the connection: the listed players (with
     /// their downloaded skins once ready), online mode, and which players

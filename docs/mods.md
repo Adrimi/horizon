@@ -11,7 +11,7 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 
 | Part | Where | State |
 |---|---|---|
-| The contract (WIT) | `crates/horizon-mod-sdk/wit/horizon.wit` | 0.1: log, game-read, chat, hud; tick, frame, chat and command hooks |
+| The contract (WIT) | `crates/horizon-mod-sdk/wit/horizon.wit` | 0.1.4: log, game-read, chat, hud, target, inventory-read, hotbar, world-read, world-edit, keys, storage, screen; tick, frame, chat and command hooks |
 | SDK for mod authors | `crates/horizon-mod-sdk` | 0.1 |
 | Example mod | `crates/horizon-mod-sdk/examples/coords-hud` | coordinates, facing and time HUD, `/where`, `/coords` |
 | Runtime | `crates/horizon-mods` | wasmtime 36 LTS, component model |
@@ -79,9 +79,27 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | Interface | Capability | Functions |
 |---|---|---|
 | `log` | always | `write(level, message)`, in the game log as `[mod <id>]` |
-| `game` | `game-read` | `get-player()`: x y z, yaw, pitch, health, food, dimension; `get-clock()`: game time, day time |
+| `game` | `game-read` | `get-player()`: x y z, yaw, pitch, health, food, dimension; `get-clock()`: game time, day time. Since 0.1.2: `get-food-stats()`: food, saturation and exhaustion as `FoodData` keeps them |
 | `chat` | `chat` | `show(text)`: a line only the local player sees, after the mod's name (8 per call) |
 | `hud` | `hud` | `set-panel(corner, lines)`, `clear()`: up to 16 lines of 256 characters |
+| `target` (0.1.1) | `target` | `get-block()`: the block under the crosshair within reach; `get-breaking()`: the block being broken (survival and adventure, from its first tick to its last). Each with its position, id, hardness, `requires-tool` and every block tag it is in (`minecraft:mineable/pickaxe`, `minecraft:needs_iron_tool`, ...). Since 0.1.2: `get-breaking-progress()` (0 to 1), `get-block-name()` (the looked-at block's name in the game's language), `get-entity()` (the mob an attack would hit, before any block: its id, type id, name, health and max health) |
+| `inventory` (0.1.1) | `inventory-read` | `get-hotbar()`: slots 0 to 8, each stack's id, count, damage, max damage, Efficiency level, and how it breaks the targeted block (the one being broken, else the one looked at): `mining-speed` (`Tool.getMiningSpeed` plus Efficiency's `mining_efficiency`, as `Player.getDestroySpeed` adds it) and `correct-for-drops`; `get-selected()`. Since 0.1.2: `get-food(slot)`: a hotbar slot's `minecraft:food` component (nutrition and the saturation `FoodData.eat` adds), none for an item that is not food. Since 0.1.3: `item-tags(id)`: every tag an item is in (`minecraft:axes`, `minecraft:pickaxes`, `minecraft:swords`, material tags, ...), empty for an unknown id, which also works for the `tool` of a `block-broken`; `get-tags(slot)`: the same for the item in hotbar slot 0 to 8, empty for an empty slot |
+| `hotbar` (0.1.1) | `hotbar` | `select(slot)`: selects slot 0 to 8 as the number keys do, before the next tick (a server hears of it as from the keys); the last call in a tick wins, other values are ignored |
+| `world` (0.1.2) | `world-read`, `world-edit` | `get-block(pos)`: the block at a position, with its state properties and every block tag it is in; `broken-blocks()`: the blocks broken since the last tick, with the tool and whether the player was sneaking; `break-block(pos, drops)`, `break-block-with-held(pos)`: breaking a block, with or without the loot rolled with the held item; `damage-held(amount)`: wearing the item in the hand. Since 0.1.4: `get-chunk-surface(cx, cz)`: the map surface of a loaded chunk (256 columns: map colour, height, water depth, biome), `get-biome-names()` and `get-map-colors()`: the biome names and the map colours, by index |
+| `keys` (0.1.4) | `keys` | `bind(action, default-key)`: the mod's own key, shown in Controls > Key Binds; `get(action)`: the key in use; `poll()`: the key events since the last call |
+| `storage` (0.1.4) | `storage` | `read(name)`, `write(name, data)`, `remove(name)`, `files()`: the mod's own files, in a folder of its own beside the settings, with a 32 MiB quota |
+| `screen` (0.1.4) | `screen` | `open(title)`: a screen the mod draws and handles itself, with the mouse free; `draw(id, shapes)`: rectangles, text and images; `get-input(id)`: the keys, the mouse and the wheel, and the `closed` event; `upload-texture(width, height, rgba)`: the mod's own picture (8 of 256x256 at most) |
+
+The target and the hotbar are read into the snapshot only while a running
+mod declares `target` or `inventory-read`, so they cost nothing otherwise.
+API 0.1.1 adds imports only: a mod built for 0.1.0 links and runs unchanged
+(wasmtime matches `@0.1.0` imports and exports to the game's `@0.1.1`).
+The same holds for 0.1.2, 0.1.3 and 0.1.4: only new functions in existing
+interfaces, no record changes, so mods built for any earlier 0.1.x keep
+loading. The item tags of 0.1.3 are indexed once at start and shared by
+reference in every snapshot, not copied each tick. The mod's screen images
+live in the atlas' bottom rows, which were reserved for them, so the atlas
+does not grow for them.
 
 | Hook (export) | When |
 |---|---|
@@ -97,6 +115,37 @@ The chat box colours and Tab-completes a mod's commands like vanilla's, for
 every player whatever their permission level, and takes any text after the
 name (the mod reads it as `args`; API 0.1 has no way to declare argument types).
 
+### Recognising a tool (API 0.1.3)
+
+A mod that wants to know what the player holds asks for the item's tags, not
+for its name: a mod's axe is an axe too, and no name ends in `_axe` by
+accident. `inventory::item_tags(id)` gives the tags of any item id (also the
+`tool` of a `block-broken`), `inventory::get_tags(slot)` those of the item in
+a hotbar slot. The lists are complete: nested tags are already expanded, as
+vanilla's `TagLoader` does.
+
+```rust
+use horizon_mod_sdk::inventory;
+
+/// Whether the item is an axe, by its tags.
+fn is_axe(id: &str) -> bool {
+    inventory::item_tags(id).iter().any(|t| t == "minecraft:axes")
+}
+```
+
+The tool classes have tags: `minecraft:axes`, `minecraft:pickaxes`,
+`minecraft:shovels`, `minecraft:swords`, `minecraft:hoes`, `minecraft:spears`.
+The material tags (`minecraft:iron_tool_materials` and its sisters) hold the
+*materials* (`minecraft:iron_ingot`), not the tools made of them, so they say
+nothing about a tool's tier.
+
+A tool's tier is not in any tag either. What the game computes is in
+`inventory::get-hotbar()`: `correct-for-drops` is `Tool.isCorrectForDrops` for
+the block being broken (else the one looked at), so a pickaxe that may mine
+the block is the one whose `correct-for-drops` is true. Read it while that
+block is being broken: the game recomputes it for the new target as soon as
+the block is gone.
+
 ### Planned interfaces
 
 Each is a new capability, added in a 0.x minor version so older mods keep
@@ -104,14 +153,14 @@ loading. Ordered by what the first native ports need ([research](research/java-m
 
 | Interface | For | Notes |
 |---|---|---|
-| `keys` | keybinds | registered binds appear in Controls; press/release events |
-| `target` | the crosshair's block or entity, with its state and NBT summary | Jade/WTHIT-style tooltips |
-| `inventory-read` | the player's inventory, held item, open container | AppleSkin, recipe viewers |
+| `keys` | keybinds | 0.1.4: the mod's own binds appear in Controls; the events are polled |
+| `target` | block state properties and NBT summary, non-mob entities (0.1.2 has the block, its tags and name, the one being broken and its progress, the mob in the crosshair) | Jade/WTHIT-style tooltips |
+| `inventory-read` | the whole inventory, offhand, armour, open container (0.1.2 has the hotbar and its food, 0.1.3 the item tags) | AppleSkin, recipe viewers |
 | `recipes` | the recipe registry and lookups | JEI/EMI-style viewers |
-| `ui` | widgets: text, item icons, lists, a screen the mod owns, a settings page in Options > Mods | built on `ui_theme` so it matches the menus |
-| `world-read` | blocks and biomes around the player, within the render distance | minimaps, schematics |
+| `ui` | widgets: text, item icons, lists, a settings page in Options > Mods (0.1.4 has `screen`: a screen the mod draws and handles itself) | built on `ui_theme` so it matches the menus |
+| `world-read` | blocks and biomes around the player, within the render distance (0.1.4 has the chunk surface, the biomes and the map colours) | minimaps, schematics |
 | `render` | world-space lines, boxes and ghost blocks in a per-frame budget | Litematica-style placement, waypoints |
-| `storage` | a per-mod folder of key/value files, quota'd | settings, waypoints |
+| `storage` | a per-mod folder of key/value files, quota'd | 0.1.4 |
 | `registries` | new blocks, items, entities and recipes, mostly data: JSON models, textures, loot and recipes in the `.hmod`'s `assets/` and `data/` | server side; see [Multiplayer](#multiplayer) |
 | `server` | world events (block break/place, entity spawn/death, player join), game rules, server commands | runs where the world is simulated |
 | `net` | a mod's own client↔server channel (custom payloads) | only between the two halves of the same mod |
@@ -257,6 +306,7 @@ authors = ["..."]
 api = "0.1"                  # the API the SDK targets
 side = "client"              # client | server | both
 capabilities = ["game-read", "hud", "chat"]
+worldgen_overrides = false   # a content mod that replaces vanilla's world generation
 ```
 
 Unknown keys are refused, so a typo is an error, not a silently ignored
@@ -322,6 +372,52 @@ skipped.
 A pool addition holds `"elements"` as a pool does. This is what lithostitched's
 `add_structure_set_entries` and `add_template_pool_elements` modifiers do on
 NeoForge and Fabric, and `horizon-port-pack carry` writes them from those.
+
+### World generation in a content mod
+
+A content mod may add world generation of its own: biomes
+(`data/<id>/worldgen/biome/<name>.json`, sub-folders included, so
+`cave/deep_caves.json` is `<id>:cave/deep_caves`), noise settings, density
+functions, noises, surface rules (material rules), carvers, block state
+providers, configured and placed features, structures, structure sets, template
+pools, processor lists and world presets. They join the bundles the world
+generator reads (`worldgen/biomes.json`, `worldgen/densities.json` and the
+rest), and the client knows the mod's biomes, so their colours, sounds and
+spawns work.
+
+A mod that *replaces* vanilla's world generation (Terralith, Tectonic) says so
+in its manifest:
+
+```toml
+id = "terralith"
+api = "0.2"
+capabilities = ["registries"]
+worldgen_overrides = true
+```
+
+Then, and only then, its files under `data/minecraft/worldgen/` and
+`data/minecraft/dimension/` are read: they replace vanilla's of the same name
+(the Overworld's noise settings, density functions, surface rules, biomes and
+the biome distribution). The fence refuses them without the declaration, so a
+mod cannot change the world's terrain by accident. The world preset's entry for
+a dimension the mod replaces takes the mod's type and generator; the biome
+distribution comes from the mod's
+`data/minecraft/worldgen/multi_noise_biome_source_parameter_list/<name>.json`,
+which the game reads as the quantized table the biome source uses.
+
+World generation is a whole world: a world generated with such a mod on is
+generated with it on, and the mod's data is read for every new chunk. Vanilla's
+tags are never replaced (a mod adds to them), so a mod that meant to narrow
+`minecraft:is_forest` widens it instead.
+
+A mod's density functions may also use the types Horizon reads for them:
+Tectonic's `tectonic:config_constant` (a number the mod's configuration
+holds), `tectonic:config_noise` (a noise the configuration scales) and
+`tectonic:config_clamp` (a clamp to the limits of two functions), and the
+surface condition `lithostitched:slope` (the height difference between the
+column and its neighbours, on either axis, without a sign). They are read
+only when a mod's data names them, so a world without such a mod is the
+vanilla one, bit for bit.
 
 A structure (and any of its pool elements, in place of the structure's) may
 hold `horizon:enhanced_terrain_adaptation`: YUNG's API's and

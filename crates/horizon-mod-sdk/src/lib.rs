@@ -21,7 +21,10 @@
 //! ```
 //!
 //! Every interface but `log` is a capability: list the ones the mod uses in
-//! `horizon-mod.toml` (`game-read`, `chat`, `hud`).
+//! `horizon-mod.toml` (`game-read`, `chat`, `hud`, and since API 0.1.1
+//! `target`, `inventory-read`, `hotbar`, since API 0.1.2 `world-read` and
+//! `world-edit`, since API 0.1.4 `keys`, `storage` and `screen`; 0.1.3 adds
+//! `inventory::item-tags` and `get-tags`).
 
 wit_bindgen::generate!({
     path: "wit",
@@ -32,7 +35,9 @@ wit_bindgen::generate!({
 });
 
 pub use exports::horizon::mods::events::{Guest as __Guest, Registration};
-pub use horizon::mods::{chat, game, hud, log};
+pub use horizon::mods::{
+    chat, game, hotbar, hud, inventory, items, keys, log, recipes, screen, storage, target, world,
+};
 
 /// The game's calls into a mod. Only the hooks [`Registration`] asks for
 /// are called; the others may stay as their defaults.

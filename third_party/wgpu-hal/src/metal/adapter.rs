@@ -459,9 +459,10 @@ impl crate::Adapter for super::Adapter {
                 // iOS 10.3 was tested to use 3 on iphone5s
                 2..=2
             },
-            // We enable Immediate mode using `-[CAMetalLayer setDisplaySyncEnabled: false]`.
+            // No Immediate: `-[CAMetalLayer setDisplaySyncEnabled: false]` can panic macOS
+            // (surface.rs). Mailbox draws uncapped with display sync on.
             present_modes: if OsFeatures::display_sync() {
-                vec![wgt::PresentMode::Fifo, wgt::PresentMode::Immediate]
+                vec![wgt::PresentMode::Fifo, wgt::PresentMode::Mailbox]
             } else {
                 vec![wgt::PresentMode::Fifo]
             },

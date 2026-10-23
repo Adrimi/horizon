@@ -644,6 +644,13 @@ pub struct Surface {
     render_layer: Mutex<Retained<CAMetalLayer>>,
     swapchain_format: RwLock<Option<wgt::TextureFormat>>,
     extent: RwLock<wgt::Extent3d>,
+    /// The texture a Mailbox frame is drawn into when every drawable is queued for the
+    /// display: the frame is dropped instead of waiting, as a compositor drops it.
+    mailbox_target: Mutex<Option<Retained<ProtocolObject<dyn MTLTexture>>>>,
+    /// Drawables acquired and not yet on screen, counted down by their presented handlers.
+    drawables_queued: Arc<atomic::AtomicUsize>,
+    maximum_drawables: atomic::AtomicUsize,
+    last_drawable: Mutex<Option<std::time::Instant>>,
 }
 
 unsafe impl Send for Surface {}
@@ -654,7 +661,8 @@ pub struct SurfaceTexture {
     texture: Texture,
     // Useful for UI-intensive applications that are sensitive to
     // window resizing.
-    drawable: Retained<ProtocolObject<dyn MTLDrawable>>,
+    // `None` for a Mailbox frame drawn into the surface's spare target: nothing to present.
+    drawable: Option<Retained<ProtocolObject<dyn MTLDrawable>>>,
     present_with_transaction: bool,
 }
 
@@ -804,6 +812,9 @@ impl crate::Queue for Queue {
         _surface: &Surface,
         texture: SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
+        let Some(drawable) = texture.drawable else {
+            return Ok(());
+        };
         autoreleasepool(|_| {
             // We do not bother adjusting `command_buffer_created_not_submitted`
             // because we immediately commit this buffer.
@@ -812,14 +823,14 @@ impl crate::Queue for Queue {
 
             // https://developer.apple.com/documentation/quartzcore/cametallayer/1478157-presentswithtransaction?language=objc
             if !texture.present_with_transaction {
-                command_buffer.presentDrawable(&texture.drawable);
+                command_buffer.presentDrawable(&drawable);
             }
 
             command_buffer.commit();
 
             if texture.present_with_transaction {
                 command_buffer.waitUntilScheduled();
-                texture.drawable.present();
+                drawable.present();
             }
         });
         Ok(())

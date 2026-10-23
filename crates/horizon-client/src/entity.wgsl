@@ -19,8 +19,21 @@ struct Globals {
     crumbling_sprite: vec4<f32>,
     // Selection outline parameters (read by terrain.wgsl).
     outline_params: vec4<f32>,
+    // x: how many dynamic_lights are set (0: the extra is off).
+    dynamic_count: vec4<f32>,
+    // Dynamic lights: camera-relative xyz and level (dynamic_lights.rs).
+    dynamic_lights: array<vec4<f32>, 16>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
+// terrain.wgsl's dynamic_block_light, in the lightmap's 0..240 block units.
+fn dynamic_block_light(pos: vec3<f32>, block: f32) -> f32 {
+    var light = block;
+    for (var i = 0u; i < u32(globals.dynamic_count.x); i++) {
+        let s = globals.dynamic_lights[i];
+        light = max(light, (s.w - distance(pos, s.xyz)) * 16.0);
+    }
+    return light;
+}
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
 @group(0) @binding(3) var lightmap: texture_2d<f32>;
@@ -64,7 +77,7 @@ fn entity_vertex(position: vec3<f32>, uv: vec2<f32>,
     out.clip = globals.view_proj * vec4(position, 1.0);
     out.proj = vec4(out.clip.xy * 0.5 + out.clip.w * 0.5, out.clip.zw);
     out.uv = uv;
-    let l = vec2(f32(light.y), f32(light.x));
+    let l = vec2(dynamic_block_light(position, f32(light.y)), f32(light.x));
     let lm = textureSampleLevel(lightmap, lightmap_sampler,
         clamp(l / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0)), 0.0);
     // Celestial bodies, clouds, beacon beams, End portals and breaking cracks are unlit.

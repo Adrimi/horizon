@@ -442,10 +442,18 @@ mod tests {
             Some(Mailbox)
         );
         assert_eq!(chosen_present_mode(&all, false, Some(Fifo)), Some(Fifo));
-        // Metal has no Mailbox: vanilla's choice instead.
+        // A surface without Mailbox: vanilla's choice instead.
         assert_eq!(
             chosen_present_mode(&[Fifo, Immediate], false, Some(Mailbox)),
             Some(Immediate)
         );
+        // Metal on macOS offers Fifo and Mailbox, never Immediate (third_party/wgpu-hal):
+        // VSync off draws uncapped through Mailbox, whatever the setting asks.
+        for setting in [None, Some(Mailbox), Some(Immediate)] {
+            assert_eq!(
+                chosen_present_mode(&[Fifo, Mailbox], false, setting),
+                Some(Mailbox)
+            );
+        }
     }
 }

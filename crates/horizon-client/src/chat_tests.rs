@@ -29,6 +29,8 @@ fn add(chat: &mut Chat, font: &Font, content: Text) {
                 added: 0,
                 content,
                 indicator: None,
+                head: None,
+                indent: 0,
             },
         );
     }
@@ -284,4 +286,104 @@ fn ask_server_nodes_wait_for_the_servers_completions() {
     let mut screen = ChatScreen::new(&m, &c, "", 0, 640, 360);
     screen.type_text(&m, &c, "/bossbar get pt");
     assert_eq!(screen.take_request(), None);
+}
+
+/// A message from `sender` as `Chat::add_from` adds it, without an atlas.
+fn add_from(chat: &mut Chat, font: &Font, content: Text, sender: Option<u128>) {
+    let message = Message {
+        added: 0,
+        content,
+        indicator: None,
+        sender,
+    };
+    chat.add_lines(font, &message, false);
+    chat.messages.insert(0, message);
+}
+
+fn heads_and_texts(chat: &Chat) -> (Vec<String>, Vec<(i32, String)>) {
+    let mut heads = Vec::new();
+    let mut texts = Vec::new();
+    for draw in chat.layout(361, 0, true) {
+        match draw {
+            GuiDraw::Blit { texture, .. } => heads.push(texture.into_owned()),
+            GuiDraw::Text { text, x, .. } => texts.push((x, text.plain())),
+            _ => {}
+        }
+    }
+    (heads, texts)
+}
+
+#[test]
+fn without_the_extra_a_players_message_draws_as_vanilla() {
+    let font = font();
+    let mut plain = Chat::default();
+    let mut from = Chat::default();
+    add(&mut plain, &font, Text::literal("<Steve> hello"));
+    add_from(&mut from, &font, Text::literal("<Steve> hello"), Some(7));
+    assert_eq!(
+        format!("{:?}", plain.layout(361, 0, true)),
+        format!("{:?}", from.layout(361, 0, true))
+    );
+    assert!(heads_and_texts(&from).0.is_empty());
+}
+
+#[test]
+fn chat_heads_draw_the_senders_face_and_hat_before_the_first_line() {
+    let font = font();
+    let mut chat = Chat {
+        heads: true,
+        ..Chat::default()
+    };
+    chat.head_skins.insert(7, "skins/abc".into());
+    add_from(&mut chat, &font, Text::literal("<Steve> hello"), Some(7));
+    add_from(&mut chat, &font, Text::literal("[Server] hi"), None);
+    // An unknown sender gets the default skin for their UUID.
+    add_from(&mut chat, &font, Text::literal("<Alex> hey"), Some(0));
+    let (heads, texts) = heads_and_texts(&chat);
+    assert_eq!(
+        heads,
+        [
+            "skins/abc",
+            "skins/abc",
+            tab_list_default(0),
+            tab_list_default(0),
+        ]
+    );
+    assert_eq!(
+        texts,
+        [
+            (HEAD_WIDTH, "<Steve> hello".to_owned()),
+            (0, "[Server] hi".to_owned()),
+            (HEAD_WIDTH, "<Alex> hey".to_owned()),
+        ]
+    );
+}
+
+fn tab_list_default(uuid: u128) -> &'static str {
+    crate::tab_list::default_skin(uuid)
+}
+
+#[test]
+fn a_wrapped_message_with_a_head_indents_every_line_and_heads_only_the_first() {
+    let font = font();
+    let mut chat = Chat {
+        heads: true,
+        ..Chat::default()
+    };
+    let long = "word ".repeat(80);
+    add_from(&mut chat, &font, Text::literal(long.clone()), Some(1));
+    assert!(chat.lines.len() > 1);
+    assert!(chat.lines.iter().all(|l| l.indent == HEAD_WIDTH));
+    assert_eq!(chat.lines.iter().filter(|l| l.head.is_some()).count(), 1);
+    // The first line (oldest, last in the list) carries the head.
+    assert_eq!(chat.lines.last().unwrap().head, Some(1));
+    // The head's width comes off the wrapping width.
+    let max = chat.max_width() - HEAD_WIDTH;
+    assert!(
+        chat.lines
+            .iter()
+            .all(|l| font.width_text(&l.content) <= max as f32)
+    );
+    // Clicks left of the indent hit nothing.
+    assert_eq!(chat.click_at(&font, 360, 4.0 + 5.0, 315.0), None);
 }

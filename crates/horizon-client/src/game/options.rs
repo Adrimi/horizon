@@ -200,6 +200,8 @@ impl Game<'_> {
                     self.settings.save(&Self::options_path());
                     self.apply_settings();
                     self.sync_mods();
+                    // The mods' key bindings may have changed (API 0.1.4).
+                    self.sync_mod_keys();
                 }
                 Event::Close if self.ui.options.resource_error.is_some() => {}
                 Event::Close => {
@@ -271,6 +273,7 @@ impl Game<'_> {
         if rescale {
             self.ui.chat.rescale(&self.gui.atlas);
         }
+        self.ui.chat.set_heads(&self.gui.atlas, s.extras.chat_heads);
         let font = &mut self.gui.atlas.font;
         if font.uniform != s.force_unicode || font.japanese != s.japanese_glyphs {
             font.uniform = s.force_unicode;

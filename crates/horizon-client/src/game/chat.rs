@@ -584,9 +584,20 @@ impl Game<'_> {
             );
             let focused = self.screen == Screen::Chat;
             let heard = self.mods.mods.is_running().then(|| line.plain());
+            // The integrated server's player, with the skin the player list shows.
+            let me = self.level.player_uuid.map(|u| {
+                u.iter()
+                    .fold(0u128, |a, &w| (a << 32) | u128::from(w as u32))
+            });
+            if let Some(me) = me {
+                self.ui
+                    .chat
+                    .head_skins
+                    .insert(me, "entity/player/wide/steve".into());
+            }
             self.ui
                 .chat
-                .add(&self.gui.atlas, line, None, self.ticks, focused);
+                .add_from(&self.gui.atlas, line, None, me, self.ticks, focused);
             if let Some(line) = heard {
                 self.mods_chat(&line);
             }

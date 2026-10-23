@@ -20,6 +20,10 @@ const ZOOM_STEP: f32 = 1.25;
 /// The minimap's sizes in GUI pixels, and its zooms in blocks per pixel.
 pub const MINIMAP_SIZES: [(u8, &str); 3] = [(64, "Small"), (96, "Medium"), (128, "Large")];
 pub const MINIMAP_ZOOMS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+/// Falling leaves: times vanilla's chance.
+pub const FALLING_LEAVES_AMOUNTS: [u8; 4] = [2, 4, 8, 16];
+/// Particle rain: times Horizon's own density of weather particles.
+pub const PARTICLE_RAIN_AMOUNTS: [u8; 4] = [1, 2, 4, 8];
 
 /// A screen corner for an overlay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +73,8 @@ impl Corner {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Extras {
     pub fullbright: bool,
+    /// Held, dropped and burning things light their surroundings.
+    pub dynamic_lights: crate::dynamic_lights::Mode,
     pub zoom: bool,
     /// A vanilla key name (`key.keyboard.z`).
     pub zoom_key: String,
@@ -105,11 +111,35 @@ pub struct Extras {
     pub sort: bool,
     /// A vanilla key name: sorts the part under the cursor.
     pub sort_key: String,
+    /// Every item in a panel beside the inventory; R and U show an item's
+    /// recipes and uses (`item_browser`).
+    pub recipe_browser: bool,
+    /// More leaves fall from every leaf block and lie a moment where they land.
+    pub falling_leaves: bool,
+    /// Times vanilla's falling-leaf chance (`FALLING_LEAVES_AMOUNTS`).
+    pub falling_leaves_amount: u8,
+    /// The weather as particles: drops of rain, flakes of snow and the sand
+    /// of a desert storm.
+    pub particle_rain: bool,
+    /// Times Horizon's own density of weather particles
+    /// (`PARTICLE_RAIN_AMOUNTS`).
+    pub particle_rain_amount: u8,
+    /// A shulker box's tooltip shows its slots as a grid of items.
+    pub shulker_preview: bool,
+    /// Enchantment lines get a short line saying what each does.
+    pub enchant_descriptions: bool,
+    /// A player's chat message starts with their head.
+    pub chat_heads: bool,
+    /// Resource packs' connected textures (OptiFine CTM, `ctm`).
+    pub connected_textures: bool,
+    /// The slots that hold a newly gained item are marked.
+    pub item_highlighter: bool,
 }
 impl Default for Extras {
     fn default() -> Self {
         Self {
             fullbright: false,
+            dynamic_lights: crate::dynamic_lights::Mode::Off,
             zoom: false,
             zoom_key: "key.keyboard.z".into(),
             zoom_level: 4,
@@ -132,6 +162,16 @@ impl Default for Extras {
             mouse_tweaks_wheel: true,
             sort: false,
             sort_key: "key.keyboard.unknown".into(),
+            recipe_browser: false,
+            falling_leaves: false,
+            falling_leaves_amount: 4,
+            particle_rain: false,
+            particle_rain_amount: 2,
+            shulker_preview: false,
+            enchant_descriptions: false,
+            chat_heads: false,
+            connected_textures: false,
+            item_highlighter: false,
         }
     }
 }
@@ -158,6 +198,9 @@ impl Extras {
             };
             match key.trim() {
                 "fullbright" => e.fullbright = flag(e.fullbright),
+                "dynamicLights" => {
+                    e.dynamic_lights = crate::dynamic_lights::Mode::parse(value, e.dynamic_lights)
+                }
                 "zoom" => e.zoom = flag(e.zoom),
                 "zoomKey" if value.starts_with("key.") => e.zoom_key = value.to_owned(),
                 "zoomLevel" => {
@@ -194,15 +237,40 @@ impl Extras {
                 "mouseTweaksWheel" => e.mouse_tweaks_wheel = flag(e.mouse_tweaks_wheel),
                 "sort" => e.sort = flag(e.sort),
                 "sortKey" if value.starts_with("key.") => e.sort_key = value.to_owned(),
+                "recipeBrowser" => e.recipe_browser = flag(e.recipe_browser),
+                "fallingLeaves" => e.falling_leaves = flag(e.falling_leaves),
+                "fallingLeavesAmount" => {
+                    if let Some(&v) = FALLING_LEAVES_AMOUNTS
+                        .iter()
+                        .find(|v| v.to_string() == value)
+                    {
+                        e.falling_leaves_amount = v;
+                    }
+                }
+                "shulkerPreview" => e.shulker_preview = flag(e.shulker_preview),
+                "enchantDescriptions" => e.enchant_descriptions = flag(e.enchant_descriptions),
+                "chatHeads" => e.chat_heads = flag(e.chat_heads),
+                "connectedTextures" => e.connected_textures = flag(e.connected_textures),
+                "itemHighlighter" => e.item_highlighter = flag(e.item_highlighter),
+                "particleRain" => e.particle_rain = flag(e.particle_rain),
+                "particleRainAmount" => {
+                    if let Some(&v) = PARTICLE_RAIN_AMOUNTS
+                        .iter()
+                        .find(|v| v.to_string() == value)
+                    {
+                        e.particle_rain_amount = v;
+                    }
+                }
                 _ => {}
             }
         }
         e
     }
     pub fn serialize(&self) -> String {
-        format!(
-            "fullbright:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n",
+        let mut out = format!(
+            "fullbright:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\n",
             bool_text(self.fullbright),
+            self.dynamic_lights.name(),
             bool_text(self.zoom),
             self.zoom_key,
             self.zoom_level,
@@ -229,7 +297,36 @@ impl Extras {
             bool_text(self.mouse_tweaks_wheel),
             bool_text(self.sort),
             self.sort_key,
-        )
+        );
+        out.push_str(&format!(
+            "recipeBrowser:{}\n",
+            bool_text(self.recipe_browser)
+        ));
+        out.push_str(&format!(
+            "fallingLeaves:{}\nfallingLeavesAmount:{}\n",
+            bool_text(self.falling_leaves),
+            self.falling_leaves_amount,
+        ));
+        out.push_str(&format!(
+            "particleRain:{}\nparticleRainAmount:{}\n",
+            bool_text(self.particle_rain),
+            self.particle_rain_amount,
+        ));
+        out.push_str(&format!(
+            "shulkerPreview:{}\nenchantDescriptions:{}\n",
+            bool_text(self.shulker_preview),
+            bool_text(self.enchant_descriptions),
+        ));
+        out.push_str(&format!("chatHeads:{}\n", bool_text(self.chat_heads)));
+        out.push_str(&format!(
+            "connectedTextures:{}\n",
+            bool_text(self.connected_textures)
+        ));
+        out.push_str(&format!(
+            "itemHighlighter:{}\n",
+            bool_text(self.item_highlighter)
+        ));
+        out
     }
     /// Binds the extra key `name` (`ZOOM_KEY`, `SORT_KEY`); false for
     /// another name (a vanilla mapping).
@@ -423,6 +520,7 @@ impl Cps {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Fullbright,
+    DynamicLights,
     Zoom,
     ZoomKey,
     ZoomLevel,
@@ -445,6 +543,16 @@ pub enum Item {
     MouseTweaksWheel,
     Sort,
     SortKey,
+    RecipeBrowser,
+    FallingLeaves,
+    FallingLeavesAmount,
+    ShulkerPreview,
+    EnchantDescriptions,
+    ChatHeads,
+    ConnectedTextures,
+    ParticleRain,
+    ParticleRainAmount,
+    ItemHighlighter,
 }
 /// The Extras page: headers and items.
 pub fn rows() -> Vec<Result<Item, &'static str>> {
@@ -452,6 +560,15 @@ pub fn rows() -> Vec<Result<Item, &'static str>> {
     vec![
         Err("Lighting"),
         Ok(Fullbright),
+        Ok(DynamicLights),
+        Err("Particles"),
+        Ok(FallingLeaves),
+        Ok(FallingLeavesAmount),
+        Err("Weather"),
+        Ok(ParticleRain),
+        Ok(ParticleRainAmount),
+        Err("Textures"),
+        Ok(ConnectedTextures),
         Err("Zoom"),
         Ok(Zoom),
         Ok(ZoomKey),
@@ -478,6 +595,14 @@ pub fn rows() -> Vec<Result<Item, &'static str>> {
         Ok(MouseTweaksWheel),
         Ok(Sort),
         Ok(SortKey),
+        Ok(ItemHighlighter),
+        Err("World map"),
+        Ok(RecipeBrowser),
+        Err("Tooltips"),
+        Ok(ShulkerPreview),
+        Ok(EnchantDescriptions),
+        Err("Chat"),
+        Ok(ChatHeads),
         Err("Multiplayer"),
         Ok(AutoReconnect),
     ]
@@ -501,6 +626,7 @@ impl Item {
     pub fn caption(self) -> &'static str {
         match self {
             Item::Fullbright => "Fullbright",
+            Item::DynamicLights => "Dynamic lights",
             Item::Zoom => "Zoom",
             Item::ZoomKey => "Zoom key",
             Item::ZoomLevel => "Starting zoom",
@@ -518,6 +644,16 @@ impl Item {
             Item::MouseTweaksWheel => "Scroll wheel moves items",
             Item::Sort => "Sort buttons",
             Item::SortKey => "Sort key",
+            Item::RecipeBrowser => "Item and recipe browser",
+            Item::FallingLeaves => "Falling leaves",
+            Item::FallingLeavesAmount => "Amount",
+            Item::ShulkerPreview => "Shulker box preview",
+            Item::EnchantDescriptions => "Enchantment descriptions",
+            Item::ChatHeads => "Chat heads",
+            Item::ConnectedTextures => "Connected textures",
+            Item::ParticleRain => "Particle rain",
+            Item::ParticleRainAmount => "Rain amount",
+            Item::ItemHighlighter => "Item highlighter",
             Item::FpsLows => "Minimum and 1% low",
             Item::Keystrokes => "Keystrokes",
             Item::KeystrokesCps => "Clicks per second",
@@ -527,6 +663,9 @@ impl Item {
     pub fn description(self) -> &'static str {
         match self {
             Item::Fullbright => "Show blocks and entities at full light, even in dark areas.",
+            Item::DynamicLights => {
+                "Held, dropped and burning things light up their surroundings. Fast updates every few frames."
+            }
             Item::Zoom => "Hold the zoom key to zoom; the wheel changes it while held.",
             Item::ZoomKey => "Click, then press a key. Escape unbinds it.",
             Item::ZoomLevel => "The zoom the key starts at.",
@@ -557,8 +696,32 @@ impl Item {
             Item::SortKey => {
                 "Sorts the part under the cursor. Click, then press a key; Escape unbinds it."
             }
+            Item::RecipeBrowser => {
+                "Every item beside the inventory, with a search. R over an item shows its recipes, U what it is used in."
+            }
+            Item::FallingLeaves => {
+                "More leaves drift down from every tree, spruce and azalea too, and lie a moment where they land."
+            }
+            Item::FallingLeavesAmount => {
+                "Times as many as vanilla; fewer with Particles: Decreased, none on Minimal."
+            }
             Item::Keystrokes => "Movement keys, jump and mouse buttons as you press them.",
             Item::KeystrokesCps => "Clicks in the last second under each mouse button.",
+            Item::ShulkerPreview => "A shulker box's tooltip shows its 27 slots with their items.",
+            Item::EnchantDescriptions => "A short line under each enchantment says what it does.",
+            Item::ChatHeads => "A player's chat message starts with their head from their skin.",
+            Item::ConnectedTextures => {
+                "Glass and other blocks join up across a wall, from resource packs with OptiFine CTM."
+            }
+            Item::ParticleRain => {
+                "Rain falls as drops that splash where they land, snow as flakes, and a desert storm blows sand."
+            }
+            Item::ParticleRainAmount => {
+                "How many particles a tick; fewer with Particles: Decreased, none on Minimal."
+            }
+            Item::ItemHighlighter => {
+                "A new item is marked in the hotbar and the inventory until you look at it."
+            }
         }
     }
     /// The frame-time cost the main switch of an extra shows.
@@ -566,8 +729,17 @@ impl Item {
         use crate::graphics_style::Cost;
         match self {
             Item::Fullbright | Item::Zoom | Item::Fps | Item::Keystrokes => Some(Cost::None),
+            Item::DynamicLights => Some(Cost::Low),
             Item::Minimap => Some(Cost::Low),
-            Item::AutoReconnect | Item::MouseTweaks | Item::Sort => Some(Cost::None),
+            Item::AutoReconnect | Item::MouseTweaks | Item::Sort | Item::RecipeBrowser => {
+                Some(Cost::None)
+            }
+            Item::FallingLeaves => Some(Cost::Low),
+            Item::ShulkerPreview | Item::EnchantDescriptions => Some(Cost::None),
+            Item::ChatHeads => Some(Cost::None),
+            Item::ConnectedTextures => Some(Cost::None),
+            Item::ParticleRain => Some(Cost::Low),
+            Item::ItemHighlighter => Some(Cost::None),
             _ => None,
         }
     }
@@ -588,6 +760,14 @@ impl Item {
             Item::MouseTweaks => e.mouse_tweaks,
             Item::MouseTweaksWheel => e.mouse_tweaks_wheel,
             Item::Sort => e.sort,
+            Item::RecipeBrowser => e.recipe_browser,
+            Item::FallingLeaves => e.falling_leaves,
+            Item::ShulkerPreview => e.shulker_preview,
+            Item::EnchantDescriptions => e.enchant_descriptions,
+            Item::ChatHeads => e.chat_heads,
+            Item::ConnectedTextures => e.connected_textures,
+            Item::ParticleRain => e.particle_rain,
+            Item::ItemHighlighter => e.item_highlighter,
             _ => return None,
         })
     }
@@ -607,6 +787,9 @@ impl Item {
                 .into(),
             Item::MinimapShape => if e.minimap_round { "Round" } else { "Square" }.into(),
             Item::MinimapZoom => format!("{} per pixel", block_count(e.minimap_zoom)),
+            Item::DynamicLights => e.dynamic_lights.label().into(),
+            Item::FallingLeavesAmount => format!("{}x", e.falling_leaves_amount),
+            Item::ParticleRainAmount => format!("{}x", e.particle_rain_amount),
             other => match other.switch(e) {
                 Some(true) => "On".into(),
                 _ => "Off".into(),
@@ -617,6 +800,9 @@ impl Item {
     pub fn cycle(self, e: &mut Extras, back: bool) {
         match self {
             Item::Fullbright => e.fullbright = !e.fullbright,
+            Item::DynamicLights => {
+                e.dynamic_lights = next(&crate::dynamic_lights::Mode::ALL, e.dynamic_lights, back)
+            }
             Item::Zoom => e.zoom = !e.zoom,
             Item::ZoomSmooth => e.zoom_smooth = !e.zoom_smooth,
             Item::ZoomSensitivity => e.zoom_sensitivity = !e.zoom_sensitivity,
@@ -635,6 +821,21 @@ impl Item {
             Item::MouseTweaks => e.mouse_tweaks = !e.mouse_tweaks,
             Item::MouseTweaksWheel => e.mouse_tweaks_wheel = !e.mouse_tweaks_wheel,
             Item::Sort => e.sort = !e.sort,
+            Item::RecipeBrowser => e.recipe_browser = !e.recipe_browser,
+            Item::FallingLeaves => e.falling_leaves = !e.falling_leaves,
+            Item::FallingLeavesAmount => {
+                e.falling_leaves_amount =
+                    next(&FALLING_LEAVES_AMOUNTS, e.falling_leaves_amount, back)
+            }
+            Item::ParticleRain => e.particle_rain = !e.particle_rain,
+            Item::ParticleRainAmount => {
+                e.particle_rain_amount = next(&PARTICLE_RAIN_AMOUNTS, e.particle_rain_amount, back)
+            }
+            Item::ShulkerPreview => e.shulker_preview = !e.shulker_preview,
+            Item::EnchantDescriptions => e.enchant_descriptions = !e.enchant_descriptions,
+            Item::ChatHeads => e.chat_heads = !e.chat_heads,
+            Item::ConnectedTextures => e.connected_textures = !e.connected_textures,
+            Item::ItemHighlighter => e.item_highlighter = !e.item_highlighter,
             Item::MinimapCorner => e.minimap_corner = next(&Corner::ALL, e.minimap_corner, back),
             Item::MinimapSize => {
                 let sizes: Vec<u8> = MINIMAP_SIZES.iter().map(|s| s.0).collect();
@@ -665,6 +866,7 @@ mod tests {
         assert!(!d.fullbright);
         assert!(!d.zoom && !d.fps && !d.keystrokes && !d.minimap && !d.auto_reconnect);
         assert!(!d.mouse_tweaks && !d.sort);
+        assert!(!d.recipe_browser);
         assert_eq!(Extras::parse(""), d);
         assert_eq!(Extras::parse(&d.serialize()), d);
         let mut e = d.clone();
@@ -687,6 +889,17 @@ mod tests {
         e.mouse_tweaks_wheel = false;
         e.sort = true;
         e.sort_key = "key.keyboard.r".into();
+        assert_eq!(Extras::parse(&e.serialize()), e);
+    }
+
+    #[test]
+    fn the_item_highlighter_is_off_by_default_and_round_trips() {
+        let d = Extras::default();
+        assert!(!d.item_highlighter);
+        let mut e = d.clone();
+        Item::ItemHighlighter.cycle(&mut e, false);
+        assert_eq!(Item::ItemHighlighter.switch(&e), Some(true));
+        assert!(rows().contains(&Ok(Item::ItemHighlighter)));
         assert_eq!(Extras::parse(&e.serialize()), e);
     }
 

@@ -33,8 +33,14 @@ enum Animate {
     Campfire {
         spawn_particles: bool,
     },
-    /// Leaves: optional falling-leaf particle and chance, tinted by foliage.
-    Leaves(Option<(T, f32)>),
+    /// Leaves: vanilla's optional falling-leaf particle and chance, tinted by
+    /// foliage; the fixed colour Horizon's falling leaves give the leaves
+    /// vanilla drops none from; and whether Horizon adds any more at all.
+    Leaves {
+        falling: Option<(T, f32)>,
+        color: Option<u32>,
+        more: bool,
+    },
     NetherPortal,
     EnchantingTable,
     EndRod([i32; 3]),
@@ -93,10 +99,39 @@ fn classify(name: &str, prop: &dyn Fn(&str) -> Option<String>) -> Animate {
             spawn_particles: false,
         },
         "oak_leaves" | "birch_leaves" | "jungle_leaves" | "acacia_leaves" | "dark_oak_leaves"
-        | "mangrove_leaves" => Animate::Leaves(Some((T::TintedLeaves, 0.01))),
-        "cherry_leaves" => Animate::Leaves(Some((T::CherryLeaves, 0.1))),
-        "pale_oak_leaves" => Animate::Leaves(Some((T::PaleOakLeaves, 0.02))),
-        "spruce_leaves" | "azalea_leaves" | "flowering_azalea_leaves" => Animate::Leaves(None),
+        | "mangrove_leaves" => Animate::Leaves {
+            falling: Some((T::TintedLeaves, VANILLA_LEAF_CHANCE)),
+            color: None,
+            more: true,
+        },
+        // Vanilla already drops these two, plenty of petals on the cherry:
+        // Horizon leaves them alone rather than doubling the particles.
+        "cherry_leaves" => Animate::Leaves {
+            falling: Some((T::CherryLeaves, 0.1)),
+            color: None,
+            more: false,
+        },
+        "pale_oak_leaves" => Animate::Leaves {
+            falling: Some((T::PaleOakLeaves, 0.02)),
+            color: None,
+            more: false,
+        },
+        // FoliageColor.FOLIAGE_EVERGREEN; the azaleas' untinted textures, averaged.
+        "spruce_leaves" => Animate::Leaves {
+            falling: None,
+            color: Some(0x619961),
+            more: true,
+        },
+        "azalea_leaves" => Animate::Leaves {
+            falling: None,
+            color: Some(0x6a8b2f),
+            more: true,
+        },
+        "flowering_azalea_leaves" => Animate::Leaves {
+            falling: None,
+            color: Some(0x7f8a4c),
+            more: true,
+        },
         "nether_portal" => Animate::NetherPortal,
         "enchanting_table" => Animate::EnchantingTable,
         "end_rod" => Animate::EndRod(facing()),
@@ -254,6 +289,9 @@ pub struct AnimateContext<'a> {
     pub registry: &'a BlockRegistry,
     /// `Level.isRainingAt`.
     pub raining_at: &'a dyn Fn([i32; 3]) -> bool,
+    /// Horizon's falling leaves: times vanilla's leaf chance
+    /// (`falling_leaves_multiplier`), 0 when off.
+    pub falling_leaves: f32,
 }
 impl AnimateContext<'_> {
     fn state(&self, p: [i32; 3]) -> BlockStateId {
@@ -294,6 +332,60 @@ impl AnimateContext<'_> {
             .map_or(0, |c| c.biome(p[0], p[1], p[2]));
         self.biomes.get(biome).foliage
     }
+}
+
+/// `FallingParticlesLeavesBlock`'s chance for the tinted leaves.
+const VANILLA_LEAF_CHANCE: f32 = 0.01;
+/// Ticks a leaf of Horizon's falling leaves lies where it lands.
+pub const LEAF_LINGER: u16 = 60;
+
+/// Horizon's falling leaves (`horizon-extras.txt`): how many times vanilla's
+/// chance a leaf block drops a leaf, scaled down by the particles option
+/// (none on Minimal); 0 when off.
+pub fn falling_leaves_multiplier(enabled: bool, amount: u8, particles: u8) -> f32 {
+    let level = match particles {
+        0 => 1.0,
+        1 => 1.0 / 3.0,
+        _ => 0.0,
+    };
+    if enabled {
+        f32::from(amount) * level
+    } else {
+        0.0
+    }
+}
+
+/// The leaf Horizon's falling leaves add beside vanilla's (`multiplier` times
+/// vanilla's chance in all): its particle, chance and fixed colour (else the
+/// block's foliage tint). `None` for leaves vanilla already drops (the cherry
+/// and pale oak) and when the option adds none.
+fn extra_leaf(
+    falling: Option<(T, f32)>,
+    color: Option<u32>,
+    more: bool,
+    multiplier: f32,
+) -> Option<(T, f32, Option<u32>)> {
+    if !more {
+        return None;
+    }
+    let (ty, chance, color) = match (falling, color) {
+        (Some((ty, chance)), _) => (ty, chance * (multiplier - 1.0), None),
+        (None, Some(color)) => (
+            T::TintedLeaves,
+            VANILLA_LEAF_CHANCE * multiplier,
+            Some(color),
+        ),
+        (None, None) => return None,
+    };
+    (chance > 0.0).then_some((ty, chance.min(1.0), color))
+}
+
+/// The colour a leaf of Horizon's falling leaves takes: its own when the block
+/// has one, else the block's `FoliageColor` (the biome tint).
+fn leaf_tint(color: Option<u32>, foliage: u32) -> [f32; 4] {
+    let c = color.unwrap_or(foliage);
+    let f = |s: u32| ((c >> s) & 255) as f32 / 255.0;
+    [f(16), f(8), f(0), 1.0]
 }
 
 fn add(engine: &mut ParticleEngine, ty: T, p: [f64; 3], v: [f64; 3]) {
@@ -621,7 +713,11 @@ fn block_animate_tick(
                 }
             }
         }
-        Animate::Leaves(falling) => {
+        Animate::Leaves {
+            falling,
+            color,
+            more,
+        } => {
             let below = [pos[0], pos[1] - 1, pos[2]];
             // LeavesBlock.makeDrippingWaterParticles.
             if (ctx.raining_at)([pos[0], pos[1] + 1, pos[2]]) && next_int(engine.random(), 15) == 1
@@ -648,6 +744,21 @@ fn block_animate_tick(
                     ParticleOptions::simple(ty)
                 };
                 engine.add(&options, p, [0.0; 3]);
+            }
+            // Horizon's falling leaves (off by default): more of them, from
+            // every leaf, lying a moment where they land.
+            if let Some((ty, chance, color)) = extra_leaf(falling, color, more, ctx.falling_leaves)
+                && engine.random().next_float() < chance
+                && !ctx.sturdy(below)
+            {
+                let r = engine.random();
+                let p = [fx + r.next_double(), fy - 0.05, fz + r.next_double()];
+                let options = if ty == T::TintedLeaves {
+                    ParticleOptions::colored(ty, leaf_tint(color, ctx.foliage(pos)))
+                } else {
+                    ParticleOptions::simple(ty)
+                };
+                engine.add_horizon_leaf(&options, p, LEAF_LINGER);
             }
         }
         Animate::NetherPortal => {
@@ -1108,6 +1219,86 @@ mod tests {
         assert_eq!(
             classify("minecraft:red_candle_cake", &lit),
             Animate::CandleCake
+        );
+    }
+    #[test]
+    fn falling_leaves_follow_the_option_and_the_particles_setting() {
+        assert_eq!(falling_leaves_multiplier(false, 4, 0), 0.0);
+        assert_eq!(falling_leaves_multiplier(true, 4, 0), 4.0);
+        assert!((falling_leaves_multiplier(true, 4, 1) - 4.0 / 3.0).abs() < 1e-6);
+        assert_eq!(falling_leaves_multiplier(true, 16, 2), 0.0);
+    }
+    #[test]
+    fn falling_leaves_add_to_vanillas_and_give_evergreens_their_own() {
+        let none = |_: &str| None;
+        let oak = classify("minecraft:oak_leaves", &none);
+        let spruce = classify("minecraft:spruce_leaves", &none);
+        assert_eq!(
+            oak,
+            Animate::Leaves {
+                falling: Some((T::TintedLeaves, 0.01)),
+                color: None,
+                more: true,
+            }
+        );
+        assert_eq!(
+            spruce,
+            Animate::Leaves {
+                falling: None,
+                color: Some(0x619961),
+                more: true,
+            }
+        );
+        let extra = |a: Animate, m| match a {
+            Animate::Leaves {
+                falling,
+                color,
+                more,
+            } => extra_leaf(falling, color, more, m),
+            _ => unreachable!(),
+        };
+        // Off, or no more than vanilla's: vanilla's leaves alone.
+        assert_eq!(extra(oak, 0.0), None);
+        assert_eq!(extra(oak, 1.0), None);
+        assert_eq!(extra(spruce, 0.0), None);
+        // 4x vanilla's: three more chances in a hundred beside vanilla's one.
+        let (ty, chance, color) = extra(oak, 4.0).unwrap();
+        assert_eq!((ty, color), (T::TintedLeaves, None));
+        assert!((chance - 0.03).abs() < 1e-6);
+        // Spruce drops none in vanilla: all four are Horizon's, in evergreen.
+        let (ty, chance, color) = extra(spruce, 4.0).unwrap();
+        assert_eq!((ty, color), (T::TintedLeaves, Some(0x619961)));
+        assert!((chance - 0.04).abs() < 1e-6);
+        // Cherry and pale oak keep vanilla's own particles: no duplicates,
+        // though vanilla still drops its 0.1 and 0.02 as before.
+        let cherry = classify("minecraft:cherry_leaves", &none);
+        assert_eq!(extra(cherry, 16.0), None);
+        let pale = classify("minecraft:pale_oak_leaves", &none);
+        assert_eq!(extra(pale, 16.0), None);
+        // Blocks that are not leaves never drop one.
+        assert_eq!(extra_leaf(None, None, true, 16.0), None);
+    }
+    #[test]
+    fn falling_leaves_take_the_leafs_own_colour_or_the_biome_tint() {
+        // Oak: the block's foliage tint where it stands.
+        assert_eq!(
+            leaf_tint(None, 0x79c05a),
+            [
+                0x79 as f32 / 255.0,
+                0xc0 as f32 / 255.0,
+                0x5a as f32 / 255.0,
+                1.0
+            ]
+        );
+        // Spruce: its fixed evergreen colour, not the biome's.
+        assert_eq!(
+            leaf_tint(Some(0x619961), 0x79c05a),
+            [
+                0x61 as f32 / 255.0,
+                0x99 as f32 / 255.0,
+                0x61 as f32 / 255.0,
+                1.0
+            ]
         );
     }
     #[test]

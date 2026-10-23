@@ -682,6 +682,139 @@ fn manifest(id: &str, namespaces: &str) -> String {
     )
 }
 
+/// A mod that replaces the Overworld's world generation (Terralith's kind):
+/// its own biome, a replaced vanilla biome, the Overworld's dimension and
+/// its biome distribution.
+fn worldgen_mod(dir: &Path, biome: &str) -> ContentMod {
+    folder_mod(
+        dir,
+        &[
+            (
+                "horizon-mod.toml",
+                "id = \"terra\"\nname = \"Terra\"\nversion = \"1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\nworldgen_overrides = true\n",
+            ),
+            ("data/terra/worldgen/biome/terra_hills.json", biome),
+            ("data/minecraft/worldgen/biome/plains.json", biome),
+            (
+                "data/terra/tags/worldgen/biome/terra_hills.json",
+                r#"{"values": ["terra:terra_hills", "minecraft:plains"]}"#,
+            ),
+            (
+                "data/minecraft/dimension/overworld.json",
+                r#"{"type": "minecraft:overworld", "generator": {"type": "minecraft:noise",
+                    "biome_source": {"type": "minecraft:fixed", "biome": "terra:terra_hills"},
+                    "settings": "minecraft:overworld"}}"#,
+            ),
+            (
+                "data/minecraft/worldgen/multi_noise_biome_source_parameter_list/overworld.json",
+                r#"{"biomes": [{"parameters": {"temperature": [0, 1], "humidity": [0, 1],
+                    "continentalness": [-1, 1], "erosion": [-1, 1], "depth": [0, 1],
+                    "weirdness": [-1, 1], "offset": 0}, "biome": "terra:terra_hills"}]}"#,
+            ),
+        ],
+    )
+}
+
+/// A mod that replaces the Overworld's world generation puts its biomes, the
+/// biome distribution and the dimension into the root, and the world
+/// generator reads them.
+#[test]
+fn a_worldgen_mod_replaces_the_overworld_generator() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("horizon-mod-wgen-override-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    // The mod's biome is vanilla's plains, with its own temperature.
+    let plains =
+        fs::read_to_string(base.join("data/minecraft/worldgen/biome/plains.json")).unwrap();
+    let biome = plains.replace("\"temperature\": 0.8", "\"temperature\": 0.9");
+    let m = worldgen_mod(&scratch.join("terra"), &biome);
+    let root = scratch.join("root");
+    build(&base, &[m], &root).unwrap();
+    // The mod's biome and the replaced vanilla one are in the bundle.
+    let biomes: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(root.join("worldgen/biomes.json")).unwrap()).unwrap();
+    assert!(biomes.contains_key("terra:terra_hills"));
+    assert!(biomes["minecraft:plains"].contains("0.9"));
+    // The biome distribution is the mod's list.
+    let list: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join("worldgen/biome_parameters/overworld.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(list["biomes"][0]["biome"], "terra:terra_hills");
+    // The world preset's Overworld is the mod's dimension.
+    let presets: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(root.join("worldgen/world_presets.json")).unwrap())
+            .unwrap();
+    let normal: serde_json::Value = serde_json::from_str(&presets["minecraft:normal"]).unwrap();
+    let source = &normal["dimensions"]["minecraft:overworld"]["generator"]["biome_source"];
+    assert_eq!(source["type"], "minecraft:fixed");
+    assert_eq!(source["biome"], "terra:terra_hills");
+    // The mod's biome tag holds: its own biome and a vanilla one.
+    let tags: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(root.join("worldgen/biome_tags.json")).unwrap()).unwrap();
+    let tag: serde_json::Value = serde_json::from_str(&tags["terra:terra_hills"]).unwrap();
+    assert_eq!(
+        tag["values"],
+        serde_json::json!(["terra:terra_hills", "minecraft:plains"])
+    );
+    // The client knows the mod's biome.
+    let biomes = crate::biome::Biomes::load(&root).unwrap();
+    assert!(biomes.index.contains_key("terra:terra_hills"));
+    // And the commands know it too: `/locate biome terra:terra_hills`.
+    let registries: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("command-registries.json")).unwrap()).unwrap();
+    let ids = registries["by_registry"]["minecraft:worldgen/biome"]["ids"]
+        .as_array()
+        .unwrap();
+    assert!(ids.contains(&serde_json::json!("terra:terra_hills")));
+    let tags = registries["by_registry"]["minecraft:worldgen/biome"]["tags"]
+        .as_array()
+        .unwrap();
+    assert!(tags.contains(&serde_json::json!("terra:terra_hills")));
+    // And the world generator runs with it.
+    let assets = Assets::load(&root).unwrap();
+    let terrain = crate::vanillagen::VanillaTerrain::new(
+        &root.join("worldgen"),
+        assets.registry,
+        &biomes,
+        1234,
+    )
+    .unwrap();
+    let names = terrain.noise_biomes(&[[0, 64, 0], [64, 64, 64]]);
+    assert_eq!(
+        names,
+        vec![
+            Some("terra:terra_hills".to_owned()),
+            Some("terra:terra_hills".to_owned())
+        ]
+    );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// A mod that does not declare `worldgen_overrides` may not replace vanilla's
+/// world generation: the fence refuses its files.
+#[test]
+fn a_mod_may_not_replace_vanilla_worldgen_unless_it_says_so() {
+    let scratch =
+        std::env::temp_dir().join(format!("horizon-mod-worldgen-fence-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let dir = scratch.join("terra");
+    fs::create_dir_all(dir.join("data/minecraft/worldgen/biome")).unwrap();
+    fs::write(
+        dir.join("horizon-mod.toml"),
+        "id = \"terra\"\nname = \"Terra\"\nversion = \"1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("data/minecraft/worldgen/biome/plains.json"), "{}").unwrap();
+    let package = horizon_mods::Package::read(&dir).unwrap();
+    let e = Content::read(&dir, &package.manifest).unwrap_err();
+    assert!(e.contains("a mod adds files in its own namespaces"), "{e}");
+    let _ = fs::remove_dir_all(&scratch);
+}
+
 /// A mod whose files sit under namespaces besides its id (Towns and Towers'
 /// `kaisyn`): they join the root, and loaders read those namespaces.
 #[test]

@@ -677,21 +677,41 @@ const TAG_BUNDLES: [&str; 2] = ["block-tags.json", "worldgen/block_tags.json"];
 /// The worldgen loader's bundle of biome tags.
 const BIOME_TAGS: &str = "worldgen/biome_tags.json";
 /// Worldgen registries a content mod may add to, and the bundle the
-/// worldgen loader reads each from (id → the file's text): what structure
-/// mods hold. Biomes, noise and density functions change the terrain and
-/// are not read from mods.
-const WORLDGEN_BUNDLES: [(&str, &str); 6] = [
+/// worldgen loader reads each from (id → the file's text). The first six are
+/// what structure mods hold; the rest are world generation (biomes, noise
+/// settings, density functions, surface rules, carvers, presets), which a mod
+/// may replace vanilla's of only with `worldgen_overrides` in its manifest
+/// (docs/mods.md).
+const WORLDGEN_BUNDLES: [(&str, &str); 15] = [
     ("structure", "worldgen/structures.json"),
     ("structure_set", "worldgen/structure_sets.json"),
     ("template_pool", "worldgen/template_pools.json"),
     ("processor_list", "worldgen/processor_lists.json"),
     ("configured_feature", "worldgen/features.json"),
     ("placed_feature", "worldgen/placed_features.json"),
+    ("biome", "worldgen/biomes.json"),
+    ("noise_settings", "worldgen/settings.json"),
+    ("density_function", "worldgen/densities.json"),
+    ("noise", "worldgen/noises.json"),
+    ("material_rule", "worldgen/rules.json"),
+    ("material_condition", "worldgen/conditions.json"),
+    ("carver", "worldgen/carvers.json"),
+    ("block_state_provider", "worldgen/state_providers.json"),
+    ("world_preset", "worldgen/world_presets.json"),
 ];
+/// The multi-noise biome parameter lists a mod replaces the Overworld's
+/// distribution with (`minecraft:overworld`): the game reads them as the
+/// quantized tables the biome source uses.
+const PARAMETER_LIST: &str = "data/minecraft/worldgen/multi_noise_biome_source_parameter_list/";
 
 /// A mod file that adds to a worldgen bundle: (bundle, id).
 fn worldgen_entry(file: &str) -> Option<(&'static str, String)> {
     let (ns, rest) = file.strip_prefix("data/")?.split_once("/worldgen/")?;
+    // Only `data/<namespace>/worldgen/<kind>/...`: a tag file under
+    // `data/<namespace>/tags/worldgen/biome/...` is a tag, not a biome.
+    if ns.contains('/') {
+        return None;
+    }
     let (kind, path) = rest.split_once('/')?;
     let (_, bundle) = WORLDGEN_BUNDLES.iter().find(|(k, _)| *k == kind)?;
     Some((bundle, format!("{ns}:{}", path.strip_suffix(".json")?)))
@@ -989,6 +1009,10 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<()> {
     let mut tags: BTreeMap<String, Vec<J>> = BTreeMap::new();
     let mut worldgen: BTreeMap<&str, Vec<(String, String)>> = BTreeMap::new();
     let mut additions: BTreeMap<&str, Vec<Addition>> = BTreeMap::new();
+    // A worldgen-override mod's Overworld: its dimension definition (type and
+    // generator) and its multi-noise parameter list.
+    let mut dimensions: BTreeMap<String, J> = BTreeMap::new();
+    let mut parameter_lists: BTreeMap<String, J> = BTreeMap::new();
     for m in mods {
         let declarations = format!("data/{}/horizon/", m.id);
         for file in &m.content.files {
@@ -1009,9 +1033,36 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<()> {
                 tags.entry(file.clone())
                     .or_default()
                     .extend(values.iter().cloned());
+            } else if let Some(path) = file
+                .strip_prefix("data/minecraft/dimension/")
+                .and_then(|p| p.strip_suffix(".json"))
+            {
+                // The dimension the world preset names (the Overworld), as
+                // vanilla's own `dimension/overworld.json` overrides it.
+                let doc: J = serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
+                dimensions.insert(format!("minecraft:{path}"), doc);
+            } else if let Some(path) = file
+                .strip_prefix(PARAMETER_LIST)
+                .and_then(|p| p.strip_suffix(".json"))
+            {
+                // Vanilla's file is a reference to the built-in preset; a
+                // worldgen mod's (or lithostitched's) holds the biome list.
+                let doc: J = serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
+                let list = doc
+                    .get("biomes")
+                    .or_else(|| doc.get("lithostitched:biomes"));
+                if let Some(list) = list {
+                    parameter_lists.insert(
+                        format!("minecraft:{path}"),
+                        J::Obj(vec![("biomes".into(), list.clone())]),
+                    );
+                }
             } else if !file.starts_with(&declarations) {
                 overlay.write(file, &bytes)?;
                 if let Some((bundle, id)) = worldgen_entry(file) {
+                    // A worldgen mod's file under vanilla's namespace replaces
+                    // vanilla's (the fence in horizon-mods lets only one that
+                    // declares `worldgen_overrides` do that).
                     let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
                     let entries = worldgen.entry(bundle).or_default();
                     match Addition::read(bundle, &text).map_err(|e| format!("{file}: {e}"))? {
@@ -1033,7 +1084,15 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<()> {
     // A tag naming an id nobody registers fails as a whole in vanilla, and
     // carried-over mods name blocks left out or other mods' ids: such
     // entries are dropped instead, so the rest of the tag holds.
-    let known = Known::new(base, &plan, &tags)?;
+    let mut known = Known::new(base, &plan, &tags)?;
+    // A mod's own biomes are known to it: its biome tags name them.
+    known.biomes.extend(
+        worldgen
+            .get("worldgen/biomes.json")
+            .into_iter()
+            .flatten()
+            .map(|(id, _)| id.clone()),
+    );
     for (file, values) in &mut tags {
         values.retain(|v| known.keeps(file, v));
     }
@@ -1107,6 +1166,128 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<()> {
                 .map_err(|e| format!("{bundle}: {e}"))?;
         }
         overlay.write(bundle, &serde_json::to_vec(&doc)?)?;
+    }
+    // A worldgen mod's multi-noise parameter list replaces the Overworld's
+    // biome distribution: the worldgen loader reads the quantized tables the
+    // biome source uses from `worldgen/biome_parameters/<name>.json`.
+    for (id, doc) in &parameter_lists {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        overlay.write(
+            &format!("worldgen/biome_parameters/{name}.json"),
+            &serde_json::to_vec(doc)?,
+        )?;
+    }
+    // A worldgen mod's dimension definition replaces the world preset's entry
+    // for it: the game reads dimensions from `worldgen/world_presets`, not
+    // from `dimension/` files (26.3 has none). Its type and generator carry
+    // over; the rest of the file is its loader's (conditions and the like).
+    if !dimensions.is_empty() {
+        let written = out.join("worldgen/world_presets.json");
+        let source = match written.exists() {
+            true => written,
+            false => base.join("worldgen/world_presets.json"),
+        };
+        if source.exists() {
+            let mut doc = read_json(&source)?;
+            let names: Vec<String> = match &doc {
+                J::Obj(o) => o.iter().map(|(k, _)| k.clone()).collect(),
+                _ => Vec::new(),
+            };
+            let mut changed = false;
+            for name in names {
+                let Some(J::Str(text)) = doc.get(&name) else {
+                    continue;
+                };
+                let mut preset: J = serde_json::from_str(text)?;
+                let mut overridden = false;
+                for (id, dimension) in &dimensions {
+                    let Some(entry) = preset.at(&format!("dimensions/{id}")) else {
+                        continue;
+                    };
+                    for key in ["type", "generator"] {
+                        if let Some(value) = dimension.get(key) {
+                            entry.set(key, value.clone());
+                            overridden = true;
+                        }
+                    }
+                    // A dimension file may hold the biome list itself; the
+                    // parameter list holds the same list, and the biome
+                    // source reads the quantized tables, so it takes over.
+                    if let Some(generator) = entry.get_mut("generator") {
+                        let inline = generator
+                            .get("biome_source")
+                            .is_some_and(|s| s.get("biomes").is_some());
+                        if inline && parameter_lists.contains_key(id) {
+                            let source = J::Obj(vec![
+                                ("type".into(), J::Str("minecraft:multi_noise".into())),
+                                ("preset".into(), J::Str(id.clone())),
+                            ]);
+                            generator.set("biome_source", source);
+                        }
+                    }
+                }
+                if overridden {
+                    doc.set(&name, J::Str(serde_json::to_string(&preset)?));
+                    changed = true;
+                }
+            }
+            if changed {
+                overlay.write("worldgen/world_presets.json", &serde_json::to_vec(&doc)?)?;
+            }
+        }
+    }
+    // The registries the commands check ids against: a mod's biomes and
+    // structures are in them, so `/locate biome <mod>:<name>` works, and
+    // its biome and structure tags are in theirs.
+    let registries = out.join("command-registries.json");
+    if registries.exists() {
+        let mut doc = read_json(&registries)?;
+        let mut changed = false;
+        for (registry, bundle) in [
+            ("minecraft:worldgen/biome", "worldgen/biomes.json"),
+            ("minecraft:worldgen/structure", "worldgen/structures.json"),
+        ] {
+            let Some(entries) = worldgen.get(bundle) else {
+                continue;
+            };
+            let ids: Vec<J> = entries.iter().map(|(id, _)| J::Str(id.clone())).collect();
+            if let Some(J::Arr(list)) = doc
+                .get_mut("by_registry")
+                .and_then(|r| r.get_mut(registry))
+                .and_then(|e| e.get_mut("ids"))
+            {
+                list.extend(ids);
+                changed = true;
+            }
+        }
+        for (registry, kind) in [
+            ("minecraft:worldgen/biome", "worldgen/biome"),
+            ("minecraft:worldgen/structure", "worldgen/structure"),
+        ] {
+            let ids: Vec<J> = tags
+                .keys()
+                .filter_map(|file| {
+                    let (ns, path) = file
+                        .strip_prefix("data/")?
+                        .split_once(&format!("/tags/{kind}/"))?;
+                    Some(J::Str(format!("{ns}:{}", path.strip_suffix(".json")?)))
+                })
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            if let Some(J::Arr(list)) = doc
+                .get_mut("by_registry")
+                .and_then(|r| r.get_mut(registry))
+                .and_then(|e| e.get_mut("tags"))
+            {
+                list.extend(ids);
+                changed = true;
+            }
+        }
+        if changed {
+            overlay.write("command-registries.json", &serde_json::to_vec(&doc)?)?;
+        }
     }
     // A block without its own blockstate looks like its template, so every
     // state still has a model.

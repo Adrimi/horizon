@@ -37,6 +37,7 @@ mod dedicated;
 mod dispense_fixture;
 mod dispenser;
 mod dragon;
+mod dynamic_lights;
 mod enchant_effects;
 mod end;
 mod entity_culling;
@@ -60,7 +61,9 @@ mod growth;
 mod hand;
 mod initial_spawn;
 mod integrated;
+mod item_browser;
 mod item_draw;
+mod item_highlighter;
 mod item_particles;
 mod jukebox;
 mod lan;
@@ -86,6 +89,8 @@ mod maps;
 mod minecarts;
 mod mob_blocks;
 mod mob_gear;
+mod mod_scan;
+mod mod_world;
 mod mods;
 mod mount_menu;
 mod mounts;
@@ -309,7 +314,7 @@ impl Options {
             dimension: None,
             no_pause: false,
             control: None,
-            offscreen: false,
+            offscreen: background(),
             spikes: std::env::var("HORIZON_SPIKES")
                 .ok()
                 .and_then(|v| v.parse().ok()),
@@ -441,6 +446,8 @@ enum Screen {
     WorldOptions,
     /// CommandBlockEditScreen (game/command_blocks.rs).
     CommandBlock,
+    /// A screen a mod draws and handles itself (API 0.1.4).
+    ModOwned,
 }
 struct Mining {
     pos: [i32; 3],
@@ -1039,6 +1046,9 @@ struct Game<'a> {
     inv_clicks: horizon_client::container_screen::Clicks,
     /// The Mouse Tweaks extra's drag and wheel (`tweaks`).
     tweaks: tweaks::Tweaks,
+    /// The Item Highlighter extra: the slots that hold a new item.
+    highlighter: horizon_client::item_highlighter::Highlighter,
+    item_browser: item_browser::ItemBrowser,
     /// The last inventory click, for the double click that gathers a stack.
     last_inv_click: Option<(std::time::Instant, usize, bool)>,
     /// `lastQuickMoved`: what the last Shift click moved, which a Shift
@@ -1099,6 +1109,8 @@ struct Game<'a> {
     /// Controllers (Horizon's own).
     pad: pad::Pads,
     frames: u64,
+    /// The Dynamic lights extra's sources at their last gathering (`dynamic_lights`).
+    dynamic_light_sources: Vec<horizon_client::dynamic_lights::Source>,
     /// Frames drawn with the player in the world, for `--world-frames`.
     world_frames: u64,
     fps: f32,
@@ -2840,6 +2852,9 @@ impl Game<'_> {
                 creative,
             )
         });
+        if removed {
+            self.mod_block_broken(pos, state, true);
+        }
         if removed && !creative {
             let held = self.held().cloned();
             self.mine_block_with_held(&facts.name, facts.hardness);
@@ -4187,6 +4202,14 @@ impl Game<'_> {
         // The real pointer takes over from an agent's.
         self.agent_pointer = false;
         let Some(window) = &self.window else { return };
+        // In the background the game plays as if captured, the OS pointer stays free.
+        if background() {
+            if capture {
+                self.mouse.set_ignore_first_move();
+            }
+            self.captured = capture;
+            return;
+        }
         if capture {
             self.mouse.set_ignore_first_move();
             self.captured = window
@@ -4377,6 +4400,8 @@ impl Game<'_> {
             self.draw_level_loading(&mut batch, reason);
             return batch;
         }
+        // The Item Highlighter extra: the slots that hold a new item.
+        self.update_highlighter();
         // Hud.extractRenderState: F1 (keyToggleGui) hides camera overlays, the
         // crosshair, hotbar, effects, bars, sidebar, action bar, titles and chat;
         // the sleep overlay, debug screen and open screens still draw.
@@ -4424,6 +4449,8 @@ impl Game<'_> {
                         }
                     }
                 }
+                // The Item Highlighter extra: the slots with a new item.
+                self.draw_hotbar_marks(&mut batch, wi, hi);
             }
             self.draw_effect_icons(&mut batch);
             // Hud: the action bar and titles draw over the hotbar (nextStratum).
@@ -4550,6 +4577,7 @@ impl Game<'_> {
                 self.draw_creative(&mut batch);
             }
             Screen::Chat => self.draw_chat_screen(&mut batch),
+            Screen::ModOwned => self.draw_mod_screen(&mut batch),
             Screen::Playing | Screen::Options => {}
         }
         self.draw_toasts(&mut batch);
@@ -4891,6 +4919,8 @@ impl Game<'_> {
             self.draw_inventory_player(batch, ox, oy);
         }
         self.draw_inventory_slots(batch, ox, oy);
+        // The Item Highlighter extra: the slots that hold a new item.
+        self.draw_inventory_marks(batch, ox, oy);
         self.draw_sort_buttons(batch, ox, oy);
         self.draw_recipe_book(batch);
         if let Some(slot) = self.slot_at(batch, self.cursor.0, self.cursor.1) {
@@ -4903,17 +4933,22 @@ impl Game<'_> {
                 16.0,
                 rgba(255, 255, 255, 128),
             );
+            // The player looked at the slot: a new item's mark is gone.
+            self.clear_highlight(slot);
         }
         self.draw_carried(batch);
         self.draw_slot_tooltip(batch);
         if self.container.is_none() && self.craft_size == 2 && !self.mount_active() {
             self.draw_inventory_effects(batch, (ox, oy), 176);
         }
+        self.draw_item_browser(batch);
+        self.draw_mod_overlays(batch);
     }
     pub(super) fn close_container(&mut self) {
         self.close_station();
         self.mount_closed();
         self.recipe_ui.reset_screen();
+        self.item_browser_close();
         if self.remote.is_some() {
             return self.remote_close_container();
         }
@@ -5433,6 +5468,9 @@ impl Game<'_> {
     fn inventory_press(&mut self, right: bool) {
         use horizon_client::container_screen::Target;
         use horizon_client::menu::Input;
+        if self.item_browser_press(right) {
+            return;
+        }
         if !right && self.sort_press() {
             return;
         }
@@ -5799,6 +5837,11 @@ impl Game<'_> {
             let mut crafted = 0;
             while let Some((recipe, result)) = self.craft_recipe() {
                 let made = (result.item.clone(), result.count);
+                // The Item Highlighter extra: a crafted item is not new.
+                self.highlighter.note_crafted(
+                    &result.item,
+                    self.started.elapsed().as_millis() as u64,
+                );
                 let cells = self.craft_size * self.craft_size;
                 let remainders = self.res.recipes().remainders(
                     &recipe,
@@ -6895,6 +6938,9 @@ impl Game<'_> {
         self.streaming = streaming;
         self.world = world;
         self.inventory = inventory;
+        // The Item Highlighter extra: the items a world comes with are not new.
+        self.highlighter
+            .reset(self.started.elapsed().as_millis() as u64);
         self.save = save;
         self.level = level;
         // ServerRecipeBook.loadUntrusted: recipes the manager does not have are dropped.
@@ -7030,6 +7076,10 @@ impl Game<'_> {
         streaming.smooth_lighting = self.settings.smooth_lighting;
         streaming.cutout_leaves = self.settings.cutout_leaves;
         streaming.cull_leaves = self.settings.horizon.cull_leaves;
+        horizon_client::ctm::ENABLED.store(
+            self.settings.extras.connected_textures,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         streaming.biome_zoom = BiomeZoom::new(obfuscate_seed(seed));
         streaming.sky_light = dim != Dim::Nether;
         streaming.nether_shading = dim == Dim::Nether;
@@ -8389,6 +8439,10 @@ impl Game<'_> {
         self.streaming.smooth_lighting = self.settings.smooth_lighting;
         self.streaming.cutout_leaves = self.settings.cutout_leaves;
         self.streaming.cull_leaves = self.settings.horizon.cull_leaves;
+        // The connected-textures extra changes the tiles faces draw.
+        let ctm = self.settings.extras.connected_textures;
+        let remesh = remesh || ctm != horizon_client::ctm::enabled();
+        horizon_client::ctm::ENABLED.store(ctm, std::sync::atomic::Ordering::Relaxed);
         if remesh {
             self.all_sections_changed();
         }
@@ -8786,6 +8840,8 @@ impl Game<'_> {
                 0.0625,
             );
             self.draw_inventory_slots(batch, ox, oy);
+            // The Item Highlighter extra: the slots that hold a new item.
+            self.draw_inventory_marks(batch, ox, oy);
             if Self::creative_trash_hovered(batch, self.cursor) {
                 let (x, y) = Creative::TRASH_POSITION;
                 batch.fill(
@@ -8807,6 +8863,8 @@ impl Game<'_> {
                     16.0,
                     rgba(255, 255, 255, 128),
                 );
+                // The player looked at the slot: a new item's mark is gone.
+                self.clear_highlight(slot);
             }
         } else {
             let items = self.creative_screen.items(&self.pack.names);
@@ -8842,6 +8900,8 @@ impl Game<'_> {
                     hovered = Some(stack);
                 }
             }
+            // The Item Highlighter extra: the hotbar's row with a new item.
+            self.draw_creative_hotbar_marks(batch, ox, oy);
             let scrollable = self.creative_screen.rows(&self.pack.names) > 5;
             let scroller = if scrollable {
                 "gui/sprites/container/creative_inventory/scroller"
@@ -8875,8 +8935,7 @@ impl Game<'_> {
         } else if self.carried.is_none()
             && let Some(item) = hovered
         {
-            let lines = self.stack_tooltip(&item);
-            self.draw_tooltip_lines(batch, &lines, self.cursor.0, self.cursor.1);
+            self.draw_stack_tooltip(batch, &item);
         }
         self.draw_inventory_effects(batch, (ox, oy), Creative::WIDTH as i32);
     }
@@ -9320,6 +9379,11 @@ impl Game<'_> {
             .then(|| self.border_draw(camera.to_array(), alpha as f32))
             .flatten();
         let see_through = std::mem::take(&mut self.see_through_vertices);
+        let dynamic_lights = if title {
+            Vec::new()
+        } else {
+            self.dynamic_lights(camera, alpha, f64::from(distance))
+        };
         let frame = Frame {
             shader: self.shader_inputs(camera, alpha as f32),
             nether_lighting: self.dim == Dim::Nether,
@@ -9390,6 +9454,7 @@ impl Game<'_> {
             border,
             game_time: self.world.game_time as f32,
             shader_game_time: ((self.world.game_time % 24000) as f32 + alpha as f32) / 24000.0,
+            dynamic_lights: &dynamic_lights,
             crumbling_sprite: self
                 .mining
                 .as_ref()
@@ -9550,6 +9615,9 @@ impl Game<'_> {
         if self.sort_key_press(key) {
             return Ok(());
         }
+        if self.item_browser_key(key) {
+            return Ok(());
+        }
         if self.remote.is_some() && self.remote_key(key)? {
             return Ok(());
         }
@@ -9578,6 +9646,7 @@ impl Game<'_> {
                 Screen::Advancements => self.close_advancements(),
                 Screen::WorldOptions => self.world_options_escape(),
                 Screen::CommandBlock => self.close_command_block(),
+                Screen::ModOwned => self.close_mod_screen(),
                 Screen::Chat => self.close_chat(),
             },
             KeyCode::Digit1
@@ -9960,7 +10029,9 @@ impl ApplicationHandler for Game<'_> {
         self.fullscreen = horizon_client::window::FullscreenState::new(fullscreen);
         let attributes = Window::default_attributes()
             .with_title("Horizon")
-            .with_window_icon(horizon_client::window::icon());
+            .with_window_icon(horizon_client::window::icon())
+            .with_visible(!background())
+            .with_active(!background());
         // Wayland names the window by its app id, which the horizon.desktop entry matches.
         #[cfg(target_os = "linux")]
         let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
@@ -10091,6 +10162,8 @@ impl ApplicationHandler for Game<'_> {
                     }
                     self.observe_fullscreen();
                 }
+                // A hidden window's focus changes are the OS's, not the player's.
+                WindowEvent::Focused(_) if background() => {}
                 WindowEvent::Focused(focused) => {
                     self.focused = focused;
                     if !focused && self.control.is_none() {
@@ -10137,7 +10210,33 @@ impl ApplicationHandler for Game<'_> {
                             let _ = b;
                             self.options_drag()?;
                         }
+                        if self.screen == Screen::ModOwned {
+                            self.mod_screen_move();
+                        }
+                        self.mod_overlay_move();
                     }
+                }
+                // A panel a mod painted over the inventory takes the mouse in its area.
+                WindowEvent::MouseInput { state, button, .. }
+                    if self.mod_overlay_mouse(button, state == ElementState::Pressed) => {}
+                WindowEvent::MouseWheel { delta, .. }
+                    if self.mod_overlay_wheel(match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => (p.y / 30.0) as f32,
+                    }) => {}
+                WindowEvent::KeyboardInput { event, .. }
+                    if matches!(event.physical_key, PhysicalKey::Code(code)
+                        if self.mod_overlay_key(
+                            code,
+                            event.text.as_deref(),
+                            event.state == ElementState::Pressed,
+                        )) => {}
+                WindowEvent::MouseWheel { delta, .. } if self.screen == Screen::ModOwned => {
+                    let steps = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => (p.y / 30.0) as f32,
+                    };
+                    self.mod_screen_wheel(steps);
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
                     let (raw_x, raw_y) = match delta {
@@ -10201,6 +10300,7 @@ impl ApplicationHandler for Game<'_> {
                     }
                     if self.screen == Screen::Inventory
                         && d != 0.0
+                        && !self.item_browser_scroll(d)
                         && !self.tweak_scroll(d, self.inventory_target().0)
                     {
                         self.station_scroll(d);
@@ -10396,7 +10496,19 @@ impl ApplicationHandler for Game<'_> {
                                 .map_or([1, 1], |r| [r.config.width, r.config.height]);
                             self.stats_click(size);
                         }
+                        Screen::ModOwned => {
+                            self.mod_screen_mouse(button, pressed);
+                        }
                         _ => {}
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. } if self.screen == Screen::ModOwned => {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        self.mod_screen_key(
+                            code,
+                            event.text.as_deref(),
+                            event.state == ElementState::Pressed,
+                        );
                     }
                 }
                 WindowEvent::KeyboardInput { event, .. }
@@ -10437,6 +10549,13 @@ impl ApplicationHandler for Game<'_> {
                 {
                     // The recipe book's search box takes every key but Escape.
                     self.recipe_key(&event);
+                }
+                WindowEvent::KeyboardInput { event, .. }
+                    if self.item_browser_typing()
+                        && event.state == ElementState::Pressed
+                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+                {
+                    self.item_browser_type(&event);
                 }
                 WindowEvent::KeyboardInput { event, .. }
                     if self.station_typing()
@@ -10523,6 +10642,8 @@ impl ApplicationHandler for Game<'_> {
                         return Ok(());
                     };
                     self.extras_key(key, event.state == ElementState::Pressed, event.repeat);
+                    // The mods' own key bindings (API 0.1.4).
+                    self.mod_key(key, event.state == ElementState::Pressed, event.repeat);
                     // key.smoothCamera toggles the cinematic camera.
                     if self.screen == Screen::Playing
                         && event.state == ElementState::Pressed
@@ -10747,8 +10868,16 @@ impl ApplicationHandler for Game<'_> {
             event_loop.exit();
             return;
         }
+        // AppKit draws a window once per display refresh, so with VSync off
+        // (Mailbox) a Mac draws frames itself, uncapped like vanilla's swap
+        // interval 0; the frame limiter still paces them.
+        let uncapped = cfg!(target_os = "macos")
+            && self
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.config.present_mode == wgpu::PresentMode::Mailbox);
         if let Some(w) = &self.window {
-            if self.options.offscreen {
+            if self.options.offscreen || uncapped {
                 // Offscreen frames don't wait for the window to be drawn: an
                 // occluded window (a locked macOS session) gets no redraws.
                 let id = w.id();
@@ -10865,6 +10994,8 @@ impl<'a> Game<'a> {
             craft_size: 2,
             inv_drag: None,
             tweaks: Default::default(),
+            highlighter: Default::default(),
+            item_browser: Default::default(),
             inv_clicks: Default::default(),
             last_inv_click: None,
             last_quick_moved: None,
@@ -10909,6 +11040,7 @@ impl<'a> Game<'a> {
             last_input: now,
             pad: Default::default(),
             frames: 0,
+            dynamic_light_sources: Vec::new(),
             world_frames: 0,
             fps: 0.0,
             fps_frames: 0,
@@ -11703,6 +11835,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         shader_game_time: 0.0,
         end_portal_sprites: [[0.0; 4]; 2],
         crumbling_sprite: [0.0; 4],
+        dynamic_lights: &[],
         ticks: 0,
         darkness: (0.0, 0.0),
         night_vision: 0.0,
@@ -11860,8 +11993,29 @@ fn write_report(game: &Game<'_>) -> Result<()> {
     Ok(())
 }
 
+/// `HORIZON_BACKGROUND`: a test run beside someone working. The window stays
+/// hidden and never takes focus or the pointer, frames render offscreen and
+/// the sound stays off (audio.rs), as on a `vscreen`.
+fn background() -> bool {
+    std::env::var_os("HORIZON_BACKGROUND").is_some()
+}
+
+/// The event loop; in the background, macOS never activates the app.
+fn event_loop() -> std::result::Result<EventLoop<()>, winit::error::EventLoopError> {
+    #[allow(unused_mut)]
+    let mut builder = EventLoop::builder();
+    #[cfg(target_os = "macos")]
+    if background() {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        builder
+            .with_activation_policy(ActivationPolicy::Prohibited)
+            .with_activate_ignoring_other_apps(false);
+    }
+    builder.build()
+}
+
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
-    EventLoop::new()?.run_app(&mut game)?;
+    event_loop()?.run_app(&mut game)?;
     write_report(&game)?;
     if let Some(e) = game.error.take() {
         return Err(e);
@@ -11898,7 +12052,9 @@ impl Loading {
         self.fullscreen = horizon_client::window::FullscreenState::new(fullscreen);
         let attributes = Window::default_attributes()
             .with_title("Horizon")
-            .with_window_icon(horizon_client::window::icon());
+            .with_window_icon(horizon_client::window::icon())
+            .with_visible(!background())
+            .with_active(!background());
         // Wayland names the window by its app id, which the horizon.desktop entry matches.
         #[cfg(target_os = "linux")]
         let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
@@ -12193,7 +12349,7 @@ fn run_loading(
         error: None,
     };
     let mut app = App::Loading(Box::new(loading));
-    EventLoop::new()?.run_app(&mut app)?;
+    event_loop()?.run_app(&mut app)?;
     match app {
         App::Ready(mut game) => {
             write_report(&game)?;

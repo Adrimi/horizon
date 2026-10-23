@@ -280,6 +280,31 @@ impl Loader {
             }
             "minecraft:hole" => MaterialCondition::Hole,
             "minecraft:steep" => MaterialCondition::Steep,
+            // The slope condition of the world generation library Tectonic
+            // uses: the height difference between the column and its
+            // neighbours, on either axis, without a sign.
+            "lithostitched:slope" => {
+                let difference = optional(&object, "height_difference");
+                let (min, max) = match difference {
+                    Some(raw) => {
+                        let bounds: Object = serde_json::from_str(raw.get())?;
+                        let min = optional(&bounds, "min_inclusive")
+                            .map(integer)
+                            .transpose()?
+                            .unwrap_or(4);
+                        let max = optional(&bounds, "max_inclusive")
+                            .map(integer)
+                            .transpose()?
+                            .unwrap_or(i32::MAX);
+                        (min, max)
+                    }
+                    None => (4, i32::MAX),
+                };
+                if max < min {
+                    return Err(DecodeError::Field("slope range"));
+                }
+                MaterialCondition::Slope { min, max }
+            }
             "minecraft:y_above" => MaterialCondition::YAbove {
                 anchor: anchor("anchor")?,
                 surface_depth_multiplier: multiplier()?,
@@ -401,6 +426,9 @@ impl MaterialCondition {
             }
             Self::Hole => serde_json::json!({"type":"minecraft:hole"}),
             Self::Steep => serde_json::json!({"type":"minecraft:steep"}),
+            Self::Slope { min, max } => {
+                serde_json::json!({"type":"lithostitched:slope","height_difference":{"min_inclusive":min,"max_inclusive":max}})
+            }
             Self::YAbove {
                 anchor: a,
                 surface_depth_multiplier,

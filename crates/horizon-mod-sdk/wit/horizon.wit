@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.0;
+package horizon:mods@0.1.5;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -40,6 +40,17 @@ interface game {
     /// None on the title screen.
     get-player: func() -> option<player>;
     get-clock: func() -> option<clock>;
+    /// Hunger as `FoodData` keeps it (API 0.1.2).
+    record food-stats {
+        /// 0 to 20, as `player.food`.
+        food: u32,
+        /// 0 to `food`: what is spent before hunger drops.
+        saturation: f32,
+        /// 0 to 40; every 4 takes one saturation (or food) point.
+        exhaustion: f32,
+    }
+    /// None on the title screen (API 0.1.2).
+    get-food-stats: func() -> option<food-stats>;
 }
 
 /// Capability `chat`: messages only the local player sees.
@@ -64,6 +75,570 @@ interface hud {
     }
     set-panel: func(corner: corner, lines: list<line>);
     clear: func();
+}
+
+/// Capability `target`: the block the player looks at, and the one they
+/// are breaking (API 0.1.1).
+interface target {
+    record block {
+        x: s32,
+        y: s32,
+        z: s32,
+        /// `minecraft:stone`, ...
+        id: string,
+        /// Vanilla's destroy time; -1 for a block that cannot be broken.
+        hardness: f32,
+        /// Drops only when broken with the correct tool.
+        requires-tool: bool,
+        /// Every block tag it is in: `minecraft:mineable/pickaxe`,
+        /// `minecraft:needs_iron_tool`, `minecraft:leaves`, ...
+        tags: list<string>,
+    }
+    /// The block under the crosshair within reach; none on air, an entity
+    /// or the title screen.
+    get-block: func() -> option<block>;
+    /// The block the player is breaking (the attack button held on it in
+    /// survival or adventure), from its first tick to its last.
+    get-breaking: func() -> option<block>;
+    /// How far that block is broken, 0 to 1; none when none is (API 0.1.2).
+    get-breaking-progress: func() -> option<f32>;
+    /// The looked-at block's name in the game's language (`Block.getName`),
+    /// its id when the language has none; none as `get-block` (API 0.1.2).
+    get-block-name: func() -> option<string>;
+    /// A living entity under the crosshair (API 0.1.2).
+    record entity {
+        /// Its id in the world this tick.
+        id: u32,
+        /// `minecraft:zombie`, ...
+        type-id: string,
+        /// Its custom name, else its type's name in the game's language.
+        name: string,
+        health: f32,
+        max-health: f32,
+    }
+    /// The mob the attack button would hit (`EntityHitResult`) within
+    /// reach, before any block; none otherwise (API 0.1.2).
+    get-entity: func() -> option<entity>;
+}
+
+/// Capability `inventory-read`: the player's hotbar (API 0.1.1).
+interface inventory {
+    record stack {
+        /// `minecraft:iron_pickaxe`, ...
+        id: string,
+        count: u32,
+        damage: u32,
+        /// 0 for an item that does not wear out.
+        max-damage: u32,
+        /// Its Efficiency level, 0 without.
+        efficiency: u32,
+        /// How fast it breaks the targeted block (the one being broken,
+        /// else the one looked at): `Tool.getMiningSpeed` plus Efficiency's
+        /// `mining_efficiency`, as `Player.getDestroySpeed` adds it. 1 for a
+        /// hand, or with no block targeted.
+        mining-speed: f32,
+        /// `Tool.isCorrectForDrops` for that block.
+        correct-for-drops: bool,
+    }
+    /// Slots 0 to 8; none for an empty slot.
+    get-hotbar: func() -> list<option<stack>>;
+    /// The selected slot, 0 to 8.
+    get-selected: func() -> u32;
+    /// What eating a stack gives: its `minecraft:food` component (API 0.1.2).
+    record food {
+        nutrition: u32,
+        /// Added to saturation, as `FoodData.eat` adds it.
+        saturation: f32,
+    }
+    /// The food in hotbar slot 0 to 8; none for an empty slot, an item
+    /// that is not food or another slot (API 0.1.2).
+    get-food: func(slot: u32) -> option<food>;
+    /// Every item tag `id` is in, as full names without `#`:
+    /// `minecraft:axes`, `minecraft:pickaxes`, `minecraft:swords`, ...
+    /// Nested tags are already expanded, as vanilla's `TagLoader` does.
+    /// Empty for an unknown id (API 0.1.3).
+    item-tags: func(id: string) -> list<string>;
+    /// Every item tag the item in hotbar slot 0 to 8 is in (API 0.1.3);
+    /// empty for an empty slot, another slot or an unknown item.
+    get-tags: func(slot: u8) -> list<string>;
+    /// Capability `inventory-edit` (API 0.1.5): gives the player `count` of
+    /// the item `id`, as the creative inventory does: the stack goes into
+    /// the inventory, and what does not fit is dropped. False (and nothing
+    /// happens) without the capability, for an unknown id, a count of 0,
+    /// when the player is not in creative, or in a world another game runs.
+    give: func(id: string, count: u32) -> bool;
+}
+
+/// Capability `hotbar`: changing the selected slot, as the number keys do
+/// (API 0.1.1).
+interface hotbar {
+    /// Selects slot 0 to 8 before the game's next tick; other values are
+    /// ignored. The last call in a tick wins.
+    select: func(slot: u32);
+}
+
+/// Capability `keys`: the mod's own key bindings, shown in Controls
+/// (API 0.1.4). The mod names its actions; the player rebinds them.
+interface keys {
+    /// A key event since the last `poll`.
+    record key-event {
+        /// The mod's action (`map`, `waypoint`, ...), as it was bound.
+        action: string,
+        /// Pressed (true) or released (false).
+        pressed: bool,
+        /// The key repeats itself while it is held.
+        repeat: bool,
+    }
+    /// Binds the mod's `action` to a key (`key.keyboard.m`); the player may
+    /// rebind it in Controls. Binding an action twice replaces the old key.
+    bind: func(action: string, default-key: string) -> result<_, string>;
+    /// The key bound to the mod's `action` now (`key.keyboard.m`); none when
+    /// the action is not bound or unbound by the player.
+    get: func(action: string) -> option<string>;
+    /// The key events since the last call; empty when nothing happened.
+    poll: func() -> list<key-event>;
+}
+
+/// Capability `storage`: the mod's own files (API 0.1.4). They live in a
+/// folder of the mod's own, beside the game's settings, and survive a
+/// restart. The mod has no other way to keep anything.
+interface storage {
+    /// The bytes of the file `name`; none when there is none.
+    read: func(name: string) -> option<list<u8>>;
+    /// Writes the file `name`, replacing it. The mod's folder has a quota
+    /// (32 MiB); writing past it fails and changes nothing.
+    write: func(name: string, data: list<u8>) -> result<_, string>;
+    /// Removes the file `name`; true when it was there.
+    remove: func(name: string) -> bool;
+    /// The mod's file names, sorted.
+    files: func() -> list<string>;
+}
+
+/// Capability `screen`: a screen the mod draws and handles itself
+/// (API 0.1.4). The game draws it over the world, without the mouse
+/// grabbed, and gives it the player's input while it is open.
+interface screen {
+    /// The screen's size in GUI pixels.
+    record size {
+        width: f32,
+        height: f32,
+    }
+    /// What to draw.
+    variant shape {
+        /// A filled rectangle.
+        rect(rect-shape),
+        /// A line of text.
+        text(text-shape),
+        /// An uploaded image, scaled into the rectangle.
+        image(image-shape),
+    }
+    /// A filled rectangle.
+    record rect-shape {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        /// 0xRRGGBB.
+        color: u32,
+    }
+    /// A line of text; (x, y) is its top left corner.
+    record text-shape {
+        x: f32,
+        y: f32,
+        text: string,
+        /// 0xRRGGBB.
+        color: u32,
+        /// The text's shadow.
+        shadow: bool,
+    }
+    /// An uploaded image, scaled into the rectangle.
+    record image-shape {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        /// The image's id, from `upload-texture`.
+        texture: u32,
+    }
+    /// What the player did while the screen was open.
+    variant event {
+        /// A key.
+        key(key-press),
+        /// The mouse moved.
+        mouse-move(mouse-move),
+        /// A mouse button.
+        mouse-button(mouse-press),
+        /// The wheel.
+        wheel(wheel-turn),
+        /// The screen was closed.
+        closed,
+    }
+    /// A key; `text` is the character it typed.
+    record key-press {
+        /// The key's name, as the game's (`key.keyboard.m`).
+        key: string,
+        /// Pressed (true) or released (false).
+        pressed: bool,
+        /// The character the key typed, when it typed one.
+        text: option<string>,
+    }
+    /// The mouse moved; the place is in GUI pixels.
+    record mouse-move {
+        x: f32,
+        y: f32,
+    }
+    /// A mouse button: 0 left, 1 right, 2 middle.
+    record mouse-press {
+        button: u32,
+        /// Pressed (true) or released (false).
+        pressed: bool,
+        x: f32,
+        y: f32,
+    }
+    /// The wheel; positive is up.
+    record wheel-turn {
+        steps: f32,
+        x: f32,
+        y: f32,
+    }
+    /// A point in GUI pixels (API 0.1.5).
+    record point {
+        x: f32,
+        y: f32,
+    }
+    /// A rectangle in GUI pixels (API 0.1.5).
+    record area {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    }
+    /// The modifier keys held now (API 0.1.5).
+    record modifiers {
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+    }
+    /// The screen of the game itself that is open (API 0.1.5).
+    enum game-screen {
+        /// None: the world is being played.
+        none,
+        /// The player's inventory, with its 2x2 crafting grid.
+        inventory,
+        /// A crafting table.
+        crafting,
+        /// A container: a chest, a barrel, a furnace, a brewing stand, a
+        /// crafter, a hopper, a dispenser.
+        container,
+        /// A workstation: an enchanting table, an anvil, a grindstone, a
+        /// smithing table, a stonecutter, a beacon, a cartography table, a
+        /// loom, a villager's trades.
+        station,
+        /// A mount's inventory (a horse, a donkey, a llama).
+        mount,
+        /// The creative inventory.
+        creative,
+        /// The chat.
+        chat,
+        /// The options.
+        options,
+        /// Every other screen of the game.
+        other,
+    }
+    /// A line of a tooltip.
+    record tip-line {
+        text: string,
+        /// 0xAARRGGBB.
+        color: u32,
+    }
+    /// What to paint (API 0.1.5): everything `shape` draws and what a port
+    /// of a Java mod's interface needs. Colours are 0xAARRGGBB.
+    variant element {
+        /// A rectangle, flat or a vertical gradient.
+        fill(fill-element),
+        /// A line of text.
+        label(label-element),
+        /// A sprite of the game's GUI atlas (a heart, a hunger shank, a
+        /// button, an icon of the game's own), stretched into a rectangle.
+        sprite(sprite-element),
+        /// A part of an uploaded image.
+        picture(picture-element),
+        /// An item's icon, with its count and durability bar, as the
+        /// inventory draws it.
+        item(item-element),
+        /// The game's own tooltip of an item.
+        tooltip(tooltip-element),
+        /// A tooltip box of the mod's own lines.
+        tip(tip-element),
+    }
+    /// A rectangle; `top` and `bottom` are the colours of its top and
+    /// bottom edges (equal: flat).
+    record fill-element {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        top: u32,
+        bottom: u32,
+    }
+    /// A line of text; (x, y) is its top left corner.
+    record label-element {
+        x: f32,
+        y: f32,
+        text: string,
+        /// 0xAARRGGBB.
+        color: u32,
+        shadow: bool,
+        /// 1.0 is the game's size; the text grows from (x, y).
+        scale: f32,
+    }
+    /// A sprite of the GUI atlas by name (`hud/heart/full`,
+    /// `container/slot`, ...: the names of the game's GUI sprites without
+    /// the folder `gui/sprites/` and the `.png`), stretched into the
+    /// rectangle. An unknown name draws nothing.
+    record sprite-element {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        name: string,
+        /// Multiplies the sprite's colour: 0xFFFFFFFF leaves it as it is,
+        /// the alpha makes it translucent (the blinking of a bar).
+        tint: u32,
+    }
+    /// A part of an image from `upload-texture` (in the full screen), in
+    /// the image's own pixels, drawn into the rectangle.
+    record picture-element {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        texture: u32,
+        u: f32,
+        v: f32,
+        u-width: f32,
+        v-height: f32,
+        tint: u32,
+    }
+    /// An item's icon (16 by 16 GUI pixels) at (x, y).
+    record item-element {
+        x: f32,
+        y: f32,
+        /// `minecraft:oak_planks`, ...; an unknown id draws nothing.
+        id: string,
+        /// Drawn in the corner when above 1.
+        count: u32,
+    }
+    /// The game's own tooltip of an item, as the inventory shows it (name,
+    /// stats, modifiers), its corner at (x, y), kept inside the screen;
+    /// `extra` are the lines under it.
+    record tooltip-element {
+        x: f32,
+        y: f32,
+        id: string,
+        count: u32,
+        extra: list<tip-line>,
+    }
+    /// A tooltip box of lines, its corner at (x, y), kept inside the screen.
+    record tip-element {
+        x: f32,
+        y: f32,
+        lines: list<tip-line>,
+    }
+    /// What to paint in the next frame (API 0.1.5), after what `draw`
+    /// gave; the elements of the last frame stay until the mod paints
+    /// again.
+    paint: func(id: u32, elements: list<element>);
+    /// The width of the text in GUI pixels at the game's font (API 0.1.5);
+    /// letters the game's bitmap fonts do not have count as 8.
+    get-text-width: func(text: string) -> f32;
+    /// Opens a panel over the game's own screen (API 0.1.5): the
+    /// inventory, a container, a crafting table. The game keeps drawing
+    /// and running that screen; the panel is painted over it, and the
+    /// mouse is the mod's inside `area`, the game's outside. A panel is
+    /// not the mod's screen: a mod may have both. It is painted only while
+    /// the game has the inventory, a container, a crafting table or a
+    /// station open. `keys` are the keys the mod takes instead of the game
+    /// (`key.keyboard.r`, ...); `*` is every key. The mod reads the panel's
+    /// input with `get-input`, like the screen's.
+    open-panel: func(title: string, area: area, keys: list<string>) -> result<u32, string>;
+    /// Moves or resizes the panel and changes its keys. An area of width
+    /// or height 0 hides the panel.
+    set-panel-area: func(id: u32, area: area, keys: list<string>);
+    /// Which screen of the game is open (API 0.1.5).
+    get-game-screen: func() -> game-screen;
+    /// The top left corner of the open screen's menu (the inventory's,
+    /// the container's), in GUI pixels; none when there is no menu
+    /// (API 0.1.5).
+    get-menu-origin: func() -> option<point>;
+    /// The item in the slot of the open screen under that point, none over
+    /// no slot or an empty one (API 0.1.5).
+    get-item-at: func(x: f32, y: f32) -> option<string>;
+    /// Where the mouse is now, in GUI pixels (API 0.1.5).
+    get-cursor: func() -> point;
+    /// The modifier keys held now (API 0.1.5).
+    get-modifiers: func() -> modifiers;
+    /// Opens the mod's screen and returns its id; the title is shown above
+    /// it. A mod has one screen: opening another closes the first.
+    open: func(title: string) -> result<u32, string>;
+    /// The screen's size in GUI pixels; none when it is closed.
+    get-size: func(id: u32) -> option<size>;
+    /// What to draw in the next frame; the shapes of the last frame stay
+    /// until the mod draws again.
+    draw: func(id: u32, shapes: list<shape>);
+    /// What the player did since the last call; empty when nothing
+    /// happened. A closed screen keeps its last events, so the mod can read
+    /// the `closed` one.
+    get-input: func(id: u32) -> list<event>;
+    /// Closes the screen; the mod gets the `closed` event.
+    close: func(id: u32);
+    /// Uploads an RGBA image (`width * height * 4` bytes) under the id
+    /// `id` (0 to 7); the mod draws it with an `image` shape. Uploading
+    /// under the same id again replaces the image. At most 8 images of
+    /// 256x256 pixels each.
+    upload-texture: func(id: u32, width: u32, height: u32, rgba: list<u8>) -> result<_, string>;
+}
+
+/// Capability `world-read`: blocks of the loaded world by position, and the
+/// ones broken since the last tick (API 0.1.2). With capability
+/// `world-edit` as well, breaking blocks and wearing the held item, in a
+/// world this game runs (single player, or one it opened to LAN); in
+/// another's world the edits do nothing and return false or none.
+interface %world {
+    record block-pos {
+        x: s32,
+        y: s32,
+        z: s32,
+    }
+    record world-block {
+        pos: block-pos,
+        /// `minecraft:oak_log`, ...
+        id: string,
+        /// The state's properties: `axis`=`y`, `distance`=`7`,
+        /// `persistent`=`false`, ...
+        properties: list<tuple<string, string>>,
+        /// Every block tag it is in: `minecraft:logs`, `minecraft:leaves`, ...
+        tags: list<string>,
+    }
+    record block-broken {
+        pos: block-pos,
+        /// The block as it was before it broke.
+        block: world-block,
+        /// Broken by the player's hand or tool; false for a block a mod
+        /// broke.
+        by-player: bool,
+        /// What the player broke it with (`minecraft:iron_axe`, ...); none
+        /// for a bare hand or a block a mod broke.
+        tool: option<string>,
+        /// The player was sneaking as they broke it.
+        sneaking: bool,
+    }
+    /// The block at `pos`; none where no chunk is loaded (and outside a
+    /// world). Air is `minecraft:air`.
+    get-block: func(pos: block-pos) -> option<world-block>;
+    /// The blocks broken since the previous tick, oldest first: the
+    /// player's and those mods broke. The same list for every mod, read
+    /// during `tick`.
+    broken-blocks: func() -> list<block-broken>;
+    /// `world-edit`: breaks the block as `Level.destroyBlock` does (its
+    /// particles and sound), with its drops (its loot table without a tool)
+    /// when `drops`. True when a breakable block was there. The block
+    /// breaks after the call returns: until then `get-block` still sees it.
+    break-block: func(pos: block-pos, drops: bool) -> bool;
+    /// `world-edit`: as `break-block` with drops, the loot rolled with the
+    /// item in the player's hand (Fortune, Silk Touch, the correct tool),
+    /// which is not worn by it.
+    break-block-with-held: func(pos: block-pos) -> bool;
+    /// `world-edit`: wears the item in the player's main hand by `amount`
+    /// uses (Unbreaking may spare some, as in vanilla); it may break. The
+    /// durability left after the full `amount`, none when the hand holds
+    /// nothing that wears or the player is in creative.
+    damage-held: func(amount: u32) -> option<u32>;
+    /// The surface of one chunk: what a map shows of its columns
+    /// (API 0.1.4). The lists hold 256 values, in the order `z * 16 + x`.
+    record chunk-surface {
+        /// Each column's map colour (`MapColor`, 0 = none), as in
+        /// `get-map-colors`.
+        color: list<u8>,
+        /// Each column's height: the Y of the topmost coloured block.
+        y: list<s32>,
+        /// Each column's water (or lava) depth over the surface.
+        depth: list<u8>,
+        /// Each column's biome, as an index in `get-biome-names`.
+        biome: list<u16>,
+    }
+    /// The surface of the loaded chunk (cx, cz); none when the chunk is not
+    /// loaded. The scan is the game's, as the minimap's is.
+    get-chunk-surface: func(cx: s32, cz: s32) -> option<chunk-surface>;
+    /// The world's biome names, in the order of their indexes (the ones
+    /// `get-chunk-surface` gives); empty outside a world.
+    get-biome-names: func() -> list<string>;
+    /// The colours of the map (`MapColor`) by id, as 0xRRGGBB; the id is
+    /// the one `get-chunk-surface` gives. Empty outside a world.
+    get-map-colors: func() -> list<u32>;
+}
+
+/// Capability `items-read`: the items of the game, vanilla's and the content
+/// mods' (API 0.1.5).
+interface items {
+    record item {
+        /// `minecraft:oak_planks`, ...
+        id: string,
+        /// Its name in the game's language; the id when it has none.
+        name: string,
+        /// The stack size: 64 for most items, 1 for tools and armour.
+        max-stack: u32,
+        /// Every tag it is in, as full names without `#`.
+        tags: list<string>,
+    }
+    /// Every item of the game, in the order of the creative inventory's
+    /// search tab.
+    %list: func() -> list<item>;
+    /// One item by id; none for an unknown id.
+    get: func(id: string) -> option<item>;
+}
+
+/// Capability `recipes-read`: the recipes of the game, vanilla's and the
+/// content mods' (API 0.1.5). The recipes that run code (dyeing, copying a
+/// map) have no fixed slots and are not listed.
+interface recipes {
+    enum kind {
+        crafting-shaped,
+        crafting-shapeless,
+        smelting,
+        blasting,
+        smoking,
+        campfire-cooking,
+        stonecutting,
+        smithing-transform,
+        smithing-trim,
+    }
+    record recipe {
+        kind: kind,
+        /// The block it is made at, as an item id: `minecraft:crafting_table`,
+        /// `minecraft:furnace`, ...
+        station: string,
+        /// The slots that take items, one list per slot: the items it
+        /// accepts (one item, or the items of a tag or a list). A crafting
+        /// recipe's are the grid's cells in row order, the empty ones as
+        /// empty lists (shapeless: 2 wide for up to 4 ingredients, else 3
+        /// wide); cooking and stonecutting have one slot, smithing three
+        /// (template, base, addition).
+        inputs: list<list<string>>,
+        /// The item made (the recipe's result); none for a trim, which keeps
+        /// its base.
+        output: option<string>,
+        /// How many of the result it makes.
+        count: u32,
+        /// A crafting recipe's grid; 0 for the other kinds.
+        width: u32,
+        height: u32,
+        /// A cooking recipe's time in ticks and the experience it gives.
+        time: u32,
+        experience: f32,
+    }
+    /// Every recipe of the game.
+    %list: func() -> list<recipe>;
 }
 
 /// What the game calls. Only the hooks `init` asks for are ever called.
@@ -93,5 +668,14 @@ world horizon-mod {
     import game;
     import chat;
     import hud;
+    import target;
+    import inventory;
+    import hotbar;
+    import keys;
+    import storage;
+    import screen;
+    import items;
+    import recipes;
+    import %world;
     export events;
 }

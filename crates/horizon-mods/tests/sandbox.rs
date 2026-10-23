@@ -1,7 +1,8 @@
 //! Loads real mods built with the SDK: the coords-hud example and a guest
 //! that misbehaves on command. Needs `rustup target add wasm32-unknown-unknown`.
 use horizon_mods::{
-    Clock, Corner, Mods, Output, Package, Player, Snapshot, Status, manifest::componentize,
+    Block, BlockBroken, BlockPos, Clock, Corner, Entity, Food, FoodStats, ItemTags, Mods, Output,
+    Package, Player, Snapshot, Stack, Status, WorldAccess, WorldBlock, manifest::componentize,
 };
 use std::{
     path::{Path, PathBuf},
@@ -15,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -78,6 +79,7 @@ fn player() -> Snapshot {
             game_time: 100,
             day_time: 24000 + 6000,
         }),
+        ..Snapshot::default()
     }
 }
 
@@ -133,12 +135,211 @@ fn undeclared_capabilities_are_refused() {
         .unwrap()
         .wasm
         .expect("the guest has code");
-    let manifest = GUEST_MANIFEST.replace("[\"chat\"]", "[]");
+    let manifest = GUEST_MANIFEST.replace("\"chat\", ", "");
     std::fs::write(dir.join("horizon-mod.toml"), manifest).unwrap();
     std::fs::write(dir.join("mod.wasm"), wasm).unwrap();
     let mods = Mods::load(&[dir], |_| true, |_| false);
     let refused = Status::Failed("uses capability chat, missing from horizon-mod.toml".into());
     assert_eq!(mods.entries()[0].status, refused);
+}
+
+fn stack(id: &str, mining_speed: f32, correct_for_drops: bool) -> Option<Stack> {
+    Some(Stack {
+        id: id.into(),
+        count: 1,
+        damage: 3,
+        max_damage: 250,
+        efficiency: 0,
+        mining_speed,
+        correct_for_drops,
+    })
+}
+
+#[test]
+fn the_hotbar_api_reads_the_target_and_selects_a_slot() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let stone = Block {
+        x: 1,
+        y: 60,
+        z: -2,
+        id: "minecraft:stone".into(),
+        hardness: 1.5,
+        requires_tool: true,
+        tags: vec!["minecraft:mineable/pickaxe".into()],
+    };
+    let mut hotbar = vec![None; 9];
+    hotbar[0] = stack("minecraft:wooden_shovel", 1.0, false);
+    hotbar[2] = stack("minecraft:iron_pickaxe", 6.0, true);
+    hotbar[5] = stack("minecraft:stone_pickaxe", 4.0, true);
+    mods.set_snapshot(Snapshot {
+        block: Some(stone),
+        hotbar,
+        selected: 7,
+        ..player()
+    });
+    assert!(mods.command("tool"));
+    let feedback = Output::Feedback {
+        text: "minecraft:stone at 1 60 -2: slot 2 minecraft:iron_pickaxe x1 (3/250, efficiency 0, speed 6, drops) of 9, was 7, tags minecraft:mineable/pickaxe".into(),
+        error: false,
+    };
+    assert_eq!(mods.drain(), [Output::Select { slot: 2 }, feedback]);
+    // The last slot asked for in a call wins; out of range is ignored.
+    assert!(mods.command("select 3 12 5"));
+    assert_eq!(mods.drain(), [Output::Select { slot: 5 }]);
+    assert!(mods.command("select 9"));
+    assert_eq!(mods.drain(), []);
+    // Nothing targeted: the mod says so.
+    mods.set_snapshot(player());
+    assert!(mods.command("tool"));
+    let none = Output::Feedback {
+        text: "no block".into(),
+        error: true,
+    };
+    assert_eq!(mods.drain(), [none]);
+}
+
+#[test]
+fn the_food_api_reads_hunger_and_the_hotbar_food() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let mut hotbar_food = vec![None; 9];
+    hotbar_food[4] = Some(Food {
+        nutrition: 8,
+        saturation: 12.8,
+    });
+    mods.set_snapshot(Snapshot {
+        food: Some(FoodStats {
+            food: 14,
+            saturation: 2.5,
+            exhaustion: 1.25,
+        }),
+        hotbar_food,
+        selected: 4,
+        ..player()
+    });
+    assert!(mods.command("food"));
+    let feedback = Output::Feedback {
+        text: "food 14 saturation 2.5 exhaustion 1.25, held +8 +12.8, slot 9 None".into(),
+        error: false,
+    };
+    assert_eq!(mods.drain(), [feedback]);
+    // A slot that is not food, and the title screen.
+    mods.set_snapshot(Snapshot {
+        food: Some(FoodStats {
+            food: 20,
+            saturation: 5.0,
+            exhaustion: 0.0,
+        }),
+        ..player()
+    });
+    assert!(mods.command("food"));
+    let not_food = Output::Feedback {
+        text: "food 20 saturation 5 exhaustion 0, held not food, slot 9 None".into(),
+        error: false,
+    };
+    assert_eq!(mods.drain(), [not_food]);
+    mods.set_snapshot(Snapshot::default());
+    assert!(mods.command("food"));
+    let none = Output::Feedback {
+        text: "no player".into(),
+        error: true,
+    };
+    assert_eq!(mods.drain(), [none]);
+}
+
+#[test]
+fn the_item_tags_api_reads_tags_by_item_and_by_slot() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let mut hotbar = vec![None; 9];
+    hotbar[3] = Some(Stack {
+        id: "minecraft:iron_axe".into(),
+        count: 1,
+        damage: 0,
+        max_damage: 250,
+        efficiency: 0,
+        mining_speed: 6.0,
+        correct_for_drops: true,
+    });
+    // `minecraft:tools` nests `minecraft:axes` in vanilla; the game hands the
+    // runtime every tag already expanded, so each list is complete.
+    let tags = ItemTags::new([
+        (
+            "minecraft:axes".to_string(),
+            vec![
+                "minecraft:diamond_axe".to_string(),
+                "minecraft:iron_axe".to_string(),
+            ],
+        ),
+        (
+            "minecraft:tools".to_string(),
+            vec![
+                "minecraft:iron_axe".to_string(),
+                "minecraft:iron_pickaxe".to_string(),
+            ],
+        ),
+    ]);
+    mods.set_snapshot(Snapshot {
+        hotbar,
+        item_tags: Some(std::sync::Arc::new(tags)),
+        ..player()
+    });
+    assert!(mods.command("tags minecraft:iron_axe 3"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "minecraft:iron_axe: minecraft:axes minecraft:tools, slot 3 minecraft:axes minecraft:tools"
+        )]
+    );
+    // An unknown id and an empty slot are empty lists, not errors.
+    assert!(mods.command("tags minecraft:bedrock 4"));
+    assert_eq!(mods.drain(), [feedback("minecraft:bedrock: , slot 4 ")]);
+    // Nothing shared without a running mod reading the inventory.
+    mods.set_snapshot(Snapshot {
+        hotbar: vec![
+            Some(Stack {
+                id: "minecraft:iron_axe".into(),
+                count: 1,
+                damage: 0,
+                max_damage: 250,
+                efficiency: 0,
+                mining_speed: 6.0,
+                correct_for_drops: true,
+            });
+            9
+        ],
+        ..player()
+    });
+    assert!(mods.command("tags minecraft:iron_axe 3"));
+    assert_eq!(mods.drain(), [feedback("minecraft:iron_axe: , slot 3 ")]);
+}
+
+#[test]
+fn the_target_api_names_the_block_its_progress_and_the_mob() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(Snapshot {
+        block_name: Some("Stone".into()),
+        breaking_progress: Some(0.25),
+        entity: Some(Entity {
+            id: 41,
+            type_id: "minecraft:zombie".into(),
+            name: "Zombie".into(),
+            health: 12.5,
+            max_health: 20.0,
+        }),
+        ..player()
+    });
+    assert!(mods.command("look"));
+    let feedback = Output::Feedback {
+        text: "Stone, 0.25, 41 minecraft:zombie Zombie 12.5/20".into(),
+        error: false,
+    };
+    assert_eq!(mods.drain(), [feedback]);
+    mods.set_snapshot(player());
+    assert!(mods.command("look"));
+    let none = Output::Feedback {
+        text: "no block, not breaking, no entity".into(),
+        error: false,
+    };
+    assert_eq!(mods.drain(), [none]);
 }
 
 #[test]
@@ -272,4 +473,369 @@ capabilities = ["registries"]
     assert!(matches!(&mods.entries()[1].status, Status::Failed(e) if e.contains("own namespace")));
     // Content has no hooks: the game's per-tick mod work stays skipped.
     assert!(!mods.is_running());
+}
+
+/// A few blocks: an oak log at 0 64 0, bedrock at 0 0 0; the hand holds a
+/// tool at 10 of 59 damage.
+struct FakeWorld;
+impl horizon_mods::WorldAccess for FakeWorld {
+    fn block(&self, pos: &BlockPos) -> Option<WorldBlock> {
+        let (id, properties, tags) = match (pos.x, pos.y, pos.z) {
+            (0, 64, 0) => (
+                "minecraft:oak_log",
+                vec![("axis".into(), "y".into())],
+                vec!["minecraft:logs".into()],
+            ),
+            (0, 0, 0) => ("minecraft:bedrock", Vec::new(), Vec::new()),
+            (x, _, z) if x.abs() < 16 && z.abs() < 16 => ("minecraft:air", Vec::new(), Vec::new()),
+            _ => return None,
+        };
+        Some(WorldBlock {
+            pos: *pos,
+            id: id.into(),
+            properties,
+            tags,
+        })
+    }
+    fn breakable(&self, pos: &BlockPos) -> bool {
+        self.block(pos)
+            .is_some_and(|b| b.id != "minecraft:air" && b.id != "minecraft:bedrock")
+    }
+    fn held_wear(&self) -> Option<(u32, u32)> {
+        Some((10, 59))
+    }
+    fn chunk_surface(&self, cx: i32, cz: i32) -> Option<horizon_mods::ChunkSurface> {
+        if cx != 0 || cz != 0 {
+            return None;
+        }
+        Some(horizon_mods::ChunkSurface {
+            color: vec![4; 256],
+            y: vec![64; 256],
+            depth: vec![0; 256],
+            biome: vec![1; 256],
+        })
+    }
+    fn biome_names(&self) -> Vec<String> {
+        vec!["minecraft:plains".into(), "minecraft:forest".into()]
+    }
+    fn map_colors(&self) -> Vec<u32> {
+        vec![0, 0x8B8B8B]
+    }
+}
+
+fn feedback(text: &str) -> Output {
+    Output::Feedback {
+        text: text.into(),
+        error: false,
+    }
+}
+
+#[test]
+fn the_world_api_reads_blocks_and_queues_edits() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    assert!(mods.command("block 0 64 0"));
+    let log = r#"minecraft:oak_log [("axis", "y")] tags minecraft:logs"#;
+    assert_eq!(mods.drain(), [feedback(log)]);
+    assert!(mods.command("block 100 0 100"));
+    assert_eq!(mods.drain(), [feedback("unloaded")]);
+    // A block breaks once per call, after it; bedrock and air never.
+    assert!(mods.command("break 0 64 0"));
+    let broken = Output::Break {
+        pos: [0, 64, 0],
+        drops: true,
+        with_held: false,
+    };
+    assert_eq!(mods.drain(), [broken, feedback("true false")]);
+    assert!(mods.command("breakheld 0 64 0"));
+    let held = Output::Break {
+        pos: [0, 64, 0],
+        drops: true,
+        with_held: true,
+    };
+    assert_eq!(mods.drain(), [held, feedback("true")]);
+    assert!(mods.command("break 0 0 0"));
+    assert!(mods.command("break 1 64 1"));
+    assert_eq!(
+        mods.drain(),
+        [feedback("false false"), feedback("false false")]
+    );
+    // Wear adds up within a call: 59 - 10 - 1, then - 1 more.
+    assert!(mods.command("wear 1"));
+    let worn = Output::DamageHeld { amount: 1 };
+    assert_eq!(
+        mods.drain(),
+        [worn.clone(), worn, feedback("Some(48) Some(47)")]
+    );
+    // The broken blocks come with the snapshot.
+    mods.set_snapshot(Snapshot {
+        broken: vec![BlockBroken {
+            pos: BlockPos { x: 0, y: 65, z: 0 },
+            block: FakeWorld.block(&BlockPos { x: 0, y: 64, z: 0 }).unwrap(),
+            by_player: true,
+            tool: Some("minecraft:iron_axe".into()),
+            sneaking: false,
+        }],
+        ..player()
+    });
+    assert!(mods.command("broken"));
+    assert_eq!(
+        mods.drain(),
+        [feedback("minecraft:oak_log at 0 65 0 by player true")]
+    );
+    // Taken back: nothing to read.
+    mods.set_world(None);
+    assert!(mods.command("block 0 64 0"));
+    assert_eq!(mods.drain(), [feedback("unloaded")]);
+}
+
+#[test]
+fn world_edits_need_world_edit() {
+    let dir = mods_dir().join("read-only");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wasm = Package::read(&mods_dir().join("horizon_mods_test_guest.hmod"))
+        .unwrap()
+        .wasm
+        .expect("the guest has code");
+    let manifest = GUEST_MANIFEST.replace(", \"world-edit\"", "");
+    std::fs::write(dir.join("horizon-mod.toml"), manifest).unwrap();
+    std::fs::write(dir.join("mod.wasm"), wasm).unwrap();
+    let mut mods = Mods::load(&[dir], |_| true, |_| false);
+    assert_eq!(mods.entries()[0].status, Status::Running);
+    mods.set_snapshot(player());
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    assert!(mods.command("break 0 64 0"));
+    assert!(mods.command("wear 1"));
+    assert!(mods.command("block 0 64 0"));
+    let log = r#"minecraft:oak_log [("axis", "y")] tags minecraft:logs"#;
+    assert_eq!(
+        mods.drain(),
+        [
+            feedback("false false"),
+            feedback("None None"),
+            feedback(log)
+        ]
+    );
+}
+
+#[test]
+fn the_world_api_reads_the_chunk_surface_and_the_biomes() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    mods.set_world(Some(std::sync::Arc::new(FakeWorld)));
+    assert!(mods.command("surface 0 0"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "surface 256 colors, 256 heights, 256 depths, 256 biomes"
+        )]
+    );
+    assert!(mods.command("surface 5 5"));
+    assert_eq!(mods.drain(), [feedback("no surface")]);
+    assert!(mods.command("biomes"));
+    assert_eq!(mods.drain(), [feedback("biomes 2")]);
+    assert!(mods.command("colors"));
+    assert_eq!(mods.drain(), [feedback("colors 2")]);
+    // Without a world there is nothing to read.
+    mods.set_world(None);
+    assert!(mods.command("surface 0 0"));
+    assert_eq!(mods.drain(), [feedback("no surface")]);
+    assert!(mods.command("biomes"));
+    assert_eq!(mods.drain(), [feedback("biomes 0")]);
+}
+
+#[test]
+fn the_storage_api_keeps_the_mods_own_files() {
+    let dir = std::env::temp_dir().join(format!("horizon-mods-storage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_storage(Some(dir.clone()));
+    assert!(mods.command("store notes hello"));
+    assert_eq!(mods.drain(), [feedback("wrote notes")]);
+    assert!(mods.command("read notes"));
+    assert_eq!(mods.drain(), [feedback("read hello")]);
+    assert!(mods.command("read nothing"));
+    assert_eq!(mods.drain(), [feedback("nothing")]);
+    assert!(mods.command("files"));
+    assert_eq!(mods.drain(), [feedback("files notes")]);
+    // A name with a path in it is refused.
+    assert!(mods.command("store ../escape x"));
+    let out = mods.drain();
+    assert!(
+        matches!(&out[0], Output::Feedback { error: true, text } if text.contains("not a file name")),
+        "{out:?}"
+    );
+    assert!(mods.command("rm notes"));
+    assert_eq!(mods.drain(), [feedback("removed true")]);
+    assert!(mods.command("rm notes"));
+    assert_eq!(mods.drain(), [feedback("removed false")]);
+    assert!(mods.command("files"));
+    assert_eq!(mods.drain(), [feedback("files ")]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_keys_api_binds_and_polls() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    assert!(mods.command("key"));
+    assert_eq!(mods.drain(), [feedback("key key.keyboard.m events ")]);
+    // The binding is the mod's, and the game may change it.
+    let binds = mods.key_binds("test_guest");
+    assert_eq!(binds.len(), 1);
+    assert_eq!(binds[0].action, "map");
+    assert_eq!(binds[0].key, "key.keyboard.m");
+    assert!(mods.set_key("test_guest", "map", "key.keyboard.b"));
+    assert_eq!(mods.key_binds("test_guest")[0].key, "key.keyboard.b");
+    // A key event reaches the mod.
+    mods.push_key_event(
+        "test_guest",
+        horizon_mods::KeyEvent {
+            action: "map".into(),
+            pressed: true,
+            repeat: false,
+        },
+    );
+    assert!(mods.command("key"));
+    assert_eq!(
+        mods.drain(),
+        [feedback("key key.keyboard.m events map true false")]
+    );
+}
+
+#[test]
+fn the_screen_api_draws_and_takes_input() {
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(player());
+    mods.set_screen_size(320.0, 240.0);
+    assert!(mods.command("screen"));
+    assert_eq!(mods.drain(), [feedback("screen 1 sized true events ")]);
+    // The screen is open, and the game can see it.
+    let (id, name, screen) = mods.open_screen().expect("the screen is open");
+    assert_eq!(id, "test_guest");
+    assert_eq!(name, "Test Guest");
+    assert_eq!(screen.shapes.len(), 3);
+    assert_eq!(screen.textures.len(), 1);
+    assert_eq!(screen.textures[0].width, 2);
+    // The player's input reaches the mod.
+    mods.push_screen_input(
+        "test_guest",
+        horizon_mods::ScreenEvent::MouseMove(horizon_mods::MouseMove { x: 3.0, y: 4.0 }),
+    );
+    assert!(mods.command("screen"));
+    let out = mods.drain();
+    assert!(
+        matches!(&out[0], Output::Feedback { text, .. } if text.contains("events move")),
+        "{out:?}"
+    );
+    // Escape closes it: the mod gets the `closed` event.
+    mods.close_screen("test_guest");
+    assert!(mods.open_screen().is_none());
+    assert!(mods.command("screen"));
+    let out = mods.drain();
+    assert!(
+        matches!(&out[0], Output::Feedback { text, .. } if text.contains("events closed")),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn the_browser_api_paints_a_panel_and_reads_items_recipes_and_gives() {
+    use horizon_mods::{Area, GameScreen, Item, Modifiers, Point, Recipe, RecipeKind, Ui};
+    use std::sync::Arc;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let item = |id: &str| Item {
+        id: id.into(),
+        name: id.into(),
+        max_stack: 64,
+        tags: vec![],
+    };
+    mods.set_snapshot(Snapshot {
+        items: Some(Arc::new(vec![
+            item("minecraft:oak_planks"),
+            item("minecraft:stick"),
+        ])),
+        recipes: Some(Arc::new(vec![Recipe {
+            kind: RecipeKind::CraftingShapeless,
+            station: "minecraft:crafting_table".into(),
+            inputs: vec![vec!["minecraft:oak_log".into()], vec![]],
+            output: Some("minecraft:oak_planks".into()),
+            count: 4,
+            width: 2,
+            height: 1,
+            time: 0,
+            experience: 0.0,
+        }])),
+        ..player()
+    });
+    mods.set_ui(Ui {
+        screen: GameScreen::Inventory,
+        menu_origin: Some(Point { x: 40.0, y: 20.0 }),
+        cursor: Point { x: 21.0, y: 22.0 },
+        modifiers: Modifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        },
+        slots: vec![([16.0, 16.0, 18.0, 18.0], "minecraft:stick".into())],
+        text_widths: Some(Arc::new(vec![6.0; 512])),
+        can_give: true,
+    });
+    assert!(mods.command("browser"));
+    let out = mods.drain();
+    assert_eq!(
+        out,
+        [feedback(
+            "browser items 2 known true recipes 1 width 12 screen GameScreen::Inventory cursor 21,22 origin Some(40.0) shift true at Some(\"minecraft:stick\") events "
+        )]
+    );
+    // The panel is the mod's, apart from its screen, and the game paints it.
+    assert!(mods.open_screen().is_none());
+    let (id, _, panel) = mods.overlays().next().expect("a panel is open");
+    assert_eq!(id, "test_guest");
+    assert_eq!(panel.elements.len(), 5);
+    let overlay = panel.overlay.as_ref().expect("an area");
+    let Area {
+        x,
+        y,
+        width,
+        height,
+    } = overlay.area;
+    assert_eq!((x, y, width, height), (200.0, 10.0, 100.0, 200.0));
+    assert!(overlay.contains(250.0, 100.0) && !overlay.contains(20.0, 100.0));
+    assert!(overlay.takes("key.keyboard.r") && !overlay.takes("key.keyboard.e"));
+    // A click and a key reach the mod through the panel's input.
+    mods.push_overlay_input(
+        "test_guest",
+        horizon_mods::ScreenEvent::MouseButton(horizon_mods::MousePress {
+            button: 1,
+            pressed: true,
+            x: 210.0,
+            y: 50.0,
+        }),
+    );
+    assert!(mods.command("browser"));
+    let out = mods.drain();
+    assert!(
+        matches!(&out[0], Output::Feedback { text, .. } if text.ends_with("events button 1")),
+        "{out:?}"
+    );
+    // `give` needs the capability, a known item, and creative in this game's world.
+    assert!(mods.command("giveitem minecraft:stick"));
+    assert_eq!(
+        mods.drain(),
+        [
+            Output::Give {
+                id: "minecraft:stick".into(),
+                count: 3
+            },
+            feedback("give true"),
+        ]
+    );
+    assert!(mods.command("giveitem nope:nothing"));
+    assert_eq!(mods.drain(), [feedback("give false")]);
+    mods.set_ui(Ui::default());
+    assert!(mods.command("giveitem minecraft:stick"));
+    assert_eq!(mods.drain(), [feedback("give false")]);
 }

@@ -13,7 +13,8 @@ const HELP: &[&str] = &[
     "status                         game, player, streaming and renderer state",
     "key KEY down|up|tap|repeat     press, release or auto-repeat a key (w a s d space shift ctrl e q esc f3 1-9 arrows ...)",
     "release                        release every key and mouse button",
-    "mouse left|right|middle down|up|click",
+    "mouse left|right|middle down|up|click   (with the inventory open: only on a mod's panel)",
+    "cursor X Y                     put the mouse at X Y in GUI pixels (a screen is open)",
     "look YAW PITCH                 set the view direction in degrees",
     "turn DYAW DPITCH               rotate the view",
     "tp X Y Z                       teleport the player",
@@ -267,16 +268,22 @@ impl Game<'_> {
                     "up" => {
                         self.keys.remove(&key);
                         self.physical_keys.remove(&key);
+                        // The mods' own key bindings (API 0.1.4).
+                        self.mod_key(key, false, false);
+                        self.mod_overlay_key(key, None, false);
                     }
                     // The system's auto-repeat while the key is held.
                     "repeat" => {
                         self.physical_keys.insert(physical);
+                        self.mod_key(key, true, true);
                         self.mapped_key(key, true, true)?;
                     }
                     "tap" => {
                         self.control_key_down(key)?;
                         self.keys.remove(&key);
                         self.physical_keys.remove(&physical);
+                        self.mod_key(key, false, false);
+                        self.mod_overlay_key(key, None, false);
                         self.debug_key(physical, horizon_client::debug_keys::KeyAction::Release);
                     }
                     other => {
@@ -303,6 +310,20 @@ impl Game<'_> {
                     other => return Err(format!("unknown mouse button {other}").into()),
                 };
                 self.require_world()?;
+                if self.screen == Screen::Inventory {
+                    // A panel a mod painted over the inventory (API 0.1.5).
+                    let taken = match arg(2)? {
+                        "down" => self.mod_overlay_mouse(button, true),
+                        "up" => self.mod_overlay_mouse(button, false),
+                        "click" => {
+                            self.mod_overlay_mouse(button, true) && self.mod_overlay_mouse(button, false)
+                        }
+                        _ => false,
+                    };
+                    if taken {
+                        return ok();
+                    }
+                }
                 if self.screen != Screen::Playing {
                     return Err(format!(
                         "mouse needs the playing screen, not {}",
@@ -331,6 +352,14 @@ impl Game<'_> {
                         );
                     }
                 }
+                ok()
+            }
+            "cursor" => {
+                let number = |i: usize| -> Result<f32> {
+                    arg(i)?.parse::<f32>().map_err(|e| e.to_string().into())
+                };
+                self.cursor = (number(1)?, number(2)?);
+                self.mod_overlay_move();
                 ok()
             }
             "look" => {
@@ -492,6 +521,13 @@ impl Game<'_> {
                     Screen::WorldOptions => self.world_options_text(Some(text)),
                     Screen::Inventory if self.recipe_search_focused() => {
                         self.recipe_text(Some(text), false)
+                    }
+                    Screen::Inventory if self.mod_overlay_typing() => self.mod_overlay_text(text),
+                    Screen::Inventory if self.item_browser_typing() && text == "\\b" => {
+                        self.item_browser_text(None, true)
+                    }
+                    Screen::Inventory if self.item_browser_typing() => {
+                        self.item_browser_text(Some(text), false)
                     }
                     Screen::Creative if self.creative_screen.tab().search => {
                         // As typed: replaces a selected query, keeps the length limit.
@@ -666,12 +702,22 @@ impl Game<'_> {
 
     fn control_key_down(&mut self, key: KeyCode) -> Result<()> {
         self.physical_keys.insert(key);
+        // The mods' own key bindings (API 0.1.4).
+        self.mod_key(key, true, false);
+        if self.mod_overlay_key(key, None, true) {
+            return Ok(());
+        }
         if self.screen == Screen::Chat {
             self.chat_key_code(key, None);
             return Ok(());
         }
         if self.screen == Screen::Options {
             return self.options_key(key, None);
+        }
+        if self.screen == Screen::ModOwned {
+            // The mod's screen takes the key (API 0.1.4).
+            self.mod_screen_key(key, None, true);
+            return Ok(());
         }
         if self.keys.insert(key) {
             self.key_pressed(key)?;
@@ -696,6 +742,7 @@ impl Game<'_> {
             Screen::Advancements => "advancements",
             Screen::WorldOptions => "world-options",
             Screen::CommandBlock => "command-block",
+            Screen::ModOwned => "mod-screen",
         }
     }
 

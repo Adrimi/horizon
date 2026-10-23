@@ -24,6 +24,7 @@ use std::{collections::BTreeSet, sync::Arc};
 mod lithostitched;
 mod pillars;
 mod sea_level;
+mod yung;
 
 /// The draws processors make from StructurePlaceSettings' random.
 pub trait ProcessorRandom {
@@ -325,6 +326,21 @@ pub enum Processor {
     Waterlog,
     /// `horizon:keep_world_block` (Better Ocean Monuments' structure void).
     KeepWorldBlock(Box<sea_level::KeepWorldBlock>),
+    /// `horizon:yung_replace` (YUNG's API's block randomizer): a placeholder
+    /// block becomes one of the states the randomizer draws.
+    YungReplace(Box<yung::Replace>),
+    /// `horizon:yung_brew` (Better Witch Huts' brewing stand).
+    YungBrew(Box<yung::Brew>),
+    /// `horizon:yung_dispenser` (Better Jungle Temples' dispensers).
+    YungDispenser(Box<yung::Dispenser>),
+    /// `horizon:yung_banner` (Better Strongholds' and Better Dungeons' banners).
+    YungBanner(Box<yung::Banner>),
+    /// `horizon:yung_torch` (Better Jungle Temples' torches).
+    YungTorch(Box<yung::Torch>),
+    /// `horizon:yung_carve` (Better Dungeons' walls and rubble).
+    YungCarve(Box<yung::Carve>),
+    /// `horizon:yung_leg` (Better Dungeons' legs).
+    YungLeg(Box<yung::Leg>),
 }
 #[derive(Clone, Debug, Default)]
 pub struct ProcessorList(pub Vec<Processor>);
@@ -823,6 +839,21 @@ impl Processor {
             "horizon:condition" => Self::Condition(Box::new(lithostitched::Conditional::decode(
                 value, resources, bindings,
             )?)),
+            "horizon:yung_replace" => {
+                Self::YungReplace(Box::new(yung::Replace::decode(value, &state)?))
+            }
+            "horizon:yung_brew" => Self::YungBrew(Box::new(yung::Brew::decode(value)?)),
+            "horizon:yung_dispenser" => {
+                Self::YungDispenser(Box::new(yung::Dispenser::decode(value)?))
+            }
+            "horizon:yung_banner" => Self::YungBanner(Box::new(yung::Banner::decode(value)?)),
+            "horizon:yung_torch" => {
+                Self::YungTorch(Box::new(yung::Torch::decode(value, resources)?))
+            }
+            "horizon:yung_carve" => {
+                Self::YungCarve(Box::new(yung::Carve::decode(value, resources.registry)?))
+            }
+            "horizon:yung_leg" => Self::YungLeg(Box::new(yung::Leg::decode(value, &state)?)),
             _ => return Err(DecodeError::Field("structure processor type")),
         })
     }
@@ -1199,6 +1230,27 @@ fn process_block<W: PlacementContext>(
         }
         Processor::KeepWorldBlock(p) => {
             return p.process(world, resources.registry, info, settings);
+        }
+        Processor::YungReplace(p) => {
+            return p.process(world, resources, info, settings);
+        }
+        Processor::YungBrew(p) => {
+            return p.process(world, resources, info, settings);
+        }
+        Processor::YungDispenser(p) => {
+            return p.process(world, resources, info, settings);
+        }
+        Processor::YungBanner(p) => {
+            return p.process(world, resources, info, settings);
+        }
+        Processor::YungTorch(p) => {
+            return p.process(world, resources, info, settings);
+        }
+        Processor::YungCarve(p) => {
+            return p.process(world, resources, info, settings);
+        }
+        Processor::YungLeg(p) => {
+            return p.process(world, resources, info, settings);
         }
         Processor::Pick(pick) => match name(info.state) == pick.block {
             true => {

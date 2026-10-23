@@ -21,8 +21,22 @@ struct Globals {
     // Atlas rect of the current destroy stage (read by entity.wgsl).
     crumbling_sprite: vec4<f32>,
     outline_params: vec4<f32>,
+    // x: how many dynamic_lights are set (0: the extra is off).
+    dynamic_count: vec4<f32>,
+    // Dynamic lights: camera-relative xyz and level (dynamic_lights.rs).
+    dynamic_lights: array<vec4<f32>, 16>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
+// The block light at camera-relative pos with the dynamic lights: one level
+// less per block from each, never below the light already there.
+fn dynamic_block_light(pos: vec3<f32>, block: f32) -> f32 {
+    var light = block;
+    for (var i = 0u; i < u32(globals.dynamic_count.x); i++) {
+        let s = globals.dynamic_lights[i];
+        light = max(light, s.w - distance(pos, s.xyz));
+    }
+    return light;
+}
 @group(0) @binding(1) var sprites: texture_2d_array<f32>;
 @group(0) @binding(2) var sprite_sampler: sampler;
 @group(0) @binding(3) var lightmap: texture_2d<f32>;
@@ -105,7 +119,8 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     out.clip = globals.view_proj * vec4(pos, 1.0);
     out.uv = uv;
     out.layer = layer;
-    out.color = color * sample_lightmap(f32(light.x) / 16.0, f32(light.y) / 16.0);
+    out.color = color * sample_lightmap(f32(light.x) / 16.0,
+        dynamic_block_light(pos, f32(light.y) / 16.0));
     out.spherical = length(pos);
     out.cylindrical = max(length(pos.xz), abs(pos.y));
     return out;

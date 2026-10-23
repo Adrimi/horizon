@@ -68,6 +68,7 @@ pub mod spring;
 pub mod state_provider;
 pub mod structure;
 pub mod tags;
+pub mod tectonic;
 pub mod terrain;
 pub mod tree;
 pub(crate) mod tree_blocks;

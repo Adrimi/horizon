@@ -267,12 +267,19 @@ impl Content {
             let own = namespace == id;
             let owned = own || manifest.namespaces.iter().any(|n| n == namespace);
             // Vanilla's own files stay vanilla's; a mod may only add to its
-            // tags, and to the convention tags mods share.
+            // tags, and to the convention tags mods share. A mod that declares
+            // `worldgen_overrides` may also replace vanilla's world generation
+            // (noise settings, density functions, biomes, the dimension's
+            // biome distribution), and nothing else of vanilla's.
             let shared = matches!(namespace, "minecraft" | "c");
-            let allowed = owned || (top == "data" && shared && rest.starts_with("tags/"));
+            let worldgen = rest.starts_with("worldgen/") || rest.starts_with("dimension/");
+            let allowed = owned
+                || (top == "data"
+                    && shared
+                    && (rest.starts_with("tags/") || (manifest.worldgen_overrides && worldgen)));
             if !allowed {
                 return Err(format!(
-                    "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces) or to vanilla and convention (c) tags"
+                    "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces) or to vanilla and convention (c) tags; replacing vanilla's world generation needs worldgen_overrides in {MANIFEST}"
                 ));
             }
             if !own && top == "data" && rest.starts_with("horizon/") {

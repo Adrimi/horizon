@@ -18,6 +18,8 @@ mod tests;
 
 /// GuiMessageTag.systemSinglePlayer's indicator colour.
 pub const SYSTEM_INDICATOR: u32 = 0xD0D0D0;
+/// The chat heads extra: an 8-pixel head and a 2-pixel gap before the text.
+pub const HEAD_WIDTH: i32 = 10;
 
 /// The chat options (doubles, as vanilla keeps them).
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +69,8 @@ struct Message {
     added: u64,
     content: Text,
     indicator: Option<u32>,
+    /// The player who sent it (the chat heads extra).
+    sender: Option<u128>,
 }
 /// A wrapped line (`GuiMessage.Line`).
 #[derive(Clone, Debug)]
@@ -74,6 +78,11 @@ struct Line {
     added: u64,
     content: Text,
     indicator: Option<u32>,
+    /// The sender whose head starts the line (a message's first line).
+    head: Option<u128>,
+    /// Where the text starts: [`HEAD_WIDTH`] for every line of a message
+    /// with a head, 0 otherwise.
+    indent: i32,
 }
 
 /// `ChatComponent.AlphaCalculator.timeBased`: opaque for 180 ticks, then
@@ -101,6 +110,11 @@ pub struct Chat {
     pub log: bool,
     /// Messages added since the start, for the control socket's events.
     pub received: u64,
+    /// The chat heads extra (off: drawn exactly as vanilla).
+    heads: bool,
+    /// Skin texture paths by player UUID; unknown players get their
+    /// default skin.
+    pub head_skins: std::collections::HashMap<u128, String>,
 }
 impl Chat {
     pub fn lines_per_page(&self, focused: bool) -> usize {
@@ -119,6 +133,18 @@ impl Chat {
         ticks: u64,
         focused: bool,
     ) {
+        self.add_from(atlas, content, indicator, None, ticks, focused);
+    }
+    /// [`Chat::add`] for a message `sender` (a player's UUID) wrote.
+    pub fn add_from(
+        &mut self,
+        atlas: &HudAtlas,
+        content: Text,
+        indicator: Option<u32>,
+        sender: Option<u128>,
+        ticks: u64,
+        focused: bool,
+    ) {
         // ChatComponent.logChatMessage: every message is in the log.
         crate::logging::write_only(log::Level::Info, &format!("[CHAT] {}", content.plain()));
         if self.log {
@@ -128,15 +154,19 @@ impl Chat {
             added: ticks,
             content,
             indicator,
+            sender,
         };
-        self.add_lines(atlas, &message, focused);
+        self.add_lines(&atlas.font, &message, focused);
         self.messages.insert(0, message);
         self.messages.truncate(100);
         self.received += 1;
     }
-    fn add_lines(&mut self, atlas: &HudAtlas, message: &Message, focused: bool) {
-        let width = self.max_width();
-        for line in atlas.font.wrap_components(&message.content, width) {
+    fn add_lines(&mut self, font: &crate::font::Font, message: &Message, focused: bool) {
+        let head = message.sender.filter(|_| self.heads);
+        let indent = if head.is_some() { HEAD_WIDTH } else { 0 };
+        let width = self.max_width() - indent;
+        let wrapped = font.wrap_components(&message.content, width);
+        for (i, line) in wrapped.into_iter().enumerate() {
             if focused && self.scroll > 0 {
                 self.new_since_scroll = true;
                 self.scroll_by(1, focused);
@@ -147,6 +177,8 @@ impl Chat {
                     added: message.added,
                     content: line,
                     indicator: message.indicator,
+                    head: head.filter(|_| i == 0),
+                    indent,
                 },
             );
         }
@@ -159,7 +191,14 @@ impl Chat {
         self.lines.clear();
         let messages: Vec<Message> = self.messages.iter().rev().cloned().collect();
         for m in &messages {
-            self.add_lines(atlas, m, false);
+            self.add_lines(&atlas.font, m, false);
+        }
+    }
+    /// Turns the chat heads extra on or off, wrapping the chat again.
+    pub fn set_heads(&mut self, atlas: &HudAtlas, heads: bool) {
+        if self.heads != heads {
+            self.heads = heads;
+            self.rescale(atlas);
         }
     }
     pub fn clear(&mut self) {
@@ -243,9 +282,25 @@ impl Chat {
             let opacity = alpha * text_opacity;
             let color = hud_layout::white(opacity);
             if color >> 24 != 0 {
+                if let Some(uuid) = line.head {
+                    let skin = self
+                        .head_skins
+                        .get(&uuid)
+                        .map_or_else(|| crate::tab_list::default_skin(uuid), String::as_str);
+                    crate::tab_list::face_tinted(
+                        &mut out,
+                        skin,
+                        0,
+                        bottom - bottom_to_text,
+                        8,
+                        true,
+                        false,
+                        color,
+                    );
+                }
                 out.push(GuiDraw::Text {
                     text: line.content.clone(),
-                    x: 0,
+                    x: line.indent,
                     y: bottom - bottom_to_text,
                     color,
                     shadow: true,
@@ -320,6 +375,10 @@ impl Chat {
             return None;
         }
         let line = self.lines.get(self.scroll + row)?;
+        x -= f64::from(line.indent);
+        if x < 0.0 {
+            return None;
+        }
         let content = line.content.resolve_legacy();
         for (c, style) in content.chars() {
             x -= f64::from(font.advance(c, style));

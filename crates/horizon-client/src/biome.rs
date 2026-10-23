@@ -78,25 +78,55 @@ fn sample(map: &[u32], temperature: f32, downfall: f32, fallback: u32) -> u32 {
     let index = (y << 8 | x) as usize;
     map.get(index).copied().unwrap_or(fallback)
 }
+/// Every `*.json` under `dir`, as (`<namespace>:<relative path without
+/// .json>`, path). Overlay roots link vanilla's files, so links are followed.
+fn biome_files(dir: &Path, namespace: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            biome_files(&path, namespace, out);
+        } else if meta.is_file() && path.extension().is_some_and(|e| e == "json") {
+            let rel = match path.strip_prefix(dir).ok().and_then(|p| p.to_str()) {
+                Some(rel) => match rel.strip_suffix(".json") {
+                    Some(rel) => rel,
+                    None => continue,
+                },
+                None => continue,
+            };
+            out.push((format!("{namespace}:{rel}"), path));
+        }
+    }
+}
 impl Biomes {
     pub fn load(root: &Path) -> Result<Self> {
         let grass = colormap(root, "grass")?;
         let foliage = colormap(root, "foliage")?;
         let dry = colormap(root, "dry_foliage")?;
         let mut list = Vec::new();
-        let mut names: Vec<_> = fs::read_dir(root.join("data/minecraft/worldgen/biome"))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
-            .collect();
-        names.sort();
-        for path in names {
-            let name = format!(
-                "minecraft:{}",
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .ok_or("bad biome")?
+        // Vanilla's biomes, then a content mod's (`data/<ns>/worldgen/biome`,
+        // with `cave/deep_caves.json` the id `<ns>:cave/deep_caves`). A world
+        // stores biomes by name, so their order here is the client's alone.
+        let mut names: Vec<(String, std::path::PathBuf)> = Vec::new();
+        biome_files(
+            &root.join("data/minecraft/worldgen/biome"),
+            "minecraft",
+            &mut names,
+        );
+        for ns in crate::mod_content::namespaces(root) {
+            biome_files(
+                &root.join(format!("data/{ns}/worldgen/biome")),
+                &ns,
+                &mut names,
             );
+        }
+        names.sort();
+        for (name, path) in names {
             let v: Value = serde_json::from_slice(&fs::read(&path)?)?;
             let effects = &v["effects"];
             let attributes = &v["attributes"];

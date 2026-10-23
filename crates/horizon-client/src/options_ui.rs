@@ -727,6 +727,10 @@ enum Act {
     Key(&'static str),
     ResetKey(&'static str),
     ResetKeys,
+    /// A mod's own key binding (API 0.1.4): the mod's id and the action.
+    ModKey(String, String),
+    /// Puts a mod's key binding back to the mod's default.
+    ResetModKey(String, String),
     /// Controller binds: wait for a button, reset one, reset all.
     PadKey(&'static str),
     ResetPadKey(&'static str),
@@ -819,6 +823,8 @@ pub struct OptionsUi {
     pub(crate) hdragging: Option<crate::graphics_ui::Item>,
     /// Key Binds: the mapping waiting for a key.
     pub selected_key: Option<&'static str>,
+    /// Key Binds: the mod's binding waiting for a key (API 0.1.4).
+    pub selected_mod_key: Option<(String, String)>,
     /// Controller Binds: the action waiting for a pad button.
     pub selected_pad_action: Option<&'static str>,
     /// The glyphs the binds list shows (the setting, else the pad's family).
@@ -858,6 +864,7 @@ impl Default for OptionsUi {
             hscroll: 0.0,
             hdragging: None,
             selected_key: None,
+            selected_mod_key: None,
             selected_pad_action: None,
             pad_style: GlyphStyle::Xbox,
             languages: Vec::new(),
@@ -1441,6 +1448,69 @@ impl OptionsUi {
                         reset
                     });
                     y += 20.0;
+                }
+                // The mods' own bindings (API 0.1.4).
+                if !s.mods.binds.is_empty() {
+                    out.push(Widget {
+                        x: 0.0,
+                        y: y + 7.0,
+                        w,
+                        h: 9.0,
+                        kind: WKind::Text {
+                            text: Text::literal("Mods").with_style(&Style {
+                                bold: Some(true),
+                                underlined: Some(true),
+                                ..Style::default()
+                            }),
+                            color: u32::MAX,
+                            centered: true,
+                        },
+                        list: false,
+                    });
+                    y += 20.0;
+                    for ((id, action), bind) in &s.mods.binds {
+                        out.push(Widget {
+                            x: row_left + 2.0,
+                            y: y + 6.0,
+                            w: 200.0,
+                            h: 9.0,
+                            kind: WKind::Text {
+                                text: Text::literal(format!("{id}: {action}")),
+                                color: u32::MAX,
+                                centered: false,
+                            },
+                            list: false,
+                        });
+                        let mut message = keybinds::display_name(&bind.key);
+                        if self.selected_mod_key.as_ref() == Some(&(id.clone(), action.clone())) {
+                            message = Text::literal("> ")
+                                .append(message.with_color(text::WHITE))
+                                .append(" <")
+                                .with_color(text::YELLOW);
+                        }
+                        let reset_x = scrollbar_x - 50.0 - 10.0;
+                        let change_x = reset_x - 5.0 - 75.0;
+                        out.push(button(
+                            change_x,
+                            y,
+                            75.0,
+                            message,
+                            Act::ModKey(id.clone(), action.clone()),
+                        ));
+                        let reset = button(
+                            reset_x,
+                            y,
+                            50.0,
+                            tr("controls.reset"),
+                            Act::ResetModKey(id.clone(), action.clone()),
+                        );
+                        out.push(if bind.key == bind.default_key {
+                            inactive(reset)
+                        } else {
+                            reset
+                        });
+                        y += 20.0;
+                    }
                 }
                 content = y + self.scroll - top + 2.0;
                 out[list_start..].iter_mut().for_each(|w| w.list = true);
@@ -2156,6 +2226,16 @@ impl OptionsUi {
                             s.keys.reset_all();
                             events.push(Event::Changed);
                         }
+                        Act::ModKey(id, action) => {
+                            self.selected_mod_key = Some((id, action));
+                        }
+                        Act::ResetModKey(id, action) => {
+                            if let Some(bind) = s.mods.binds.get(&(id.clone(), action.clone())) {
+                                let default = bind.default_key.clone();
+                                s.mods.set_key(&id, &action, &default);
+                                events.push(Event::Changed);
+                            }
+                        }
                         Act::PadKey(action) => self.selected_pad_action = Some(action),
                         Act::ResetPadKey(action) => {
                             s.controller
@@ -2441,6 +2521,18 @@ impl OptionsUi {
                     .to_owned()
             };
             return self.bind_key(s, value);
+        }
+        if let Some((id, action)) = self.selected_mod_key.take() {
+            // A mod's own binding (API 0.1.4): Escape unbinds it.
+            let value = if key == K::Escape {
+                "key.keyboard.unknown".to_owned()
+            } else {
+                keybinds::key_name(key)
+                    .unwrap_or("key.keyboard.unknown")
+                    .to_owned()
+            };
+            s.mods.set_key(&id, &action, &value);
+            return vec![Event::Changed];
         }
         if key == K::Escape {
             return self.back(s);

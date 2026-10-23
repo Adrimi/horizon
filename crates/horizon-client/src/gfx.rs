@@ -111,6 +111,10 @@ struct Globals {
     crumbling_sprite: [f32; 4],
     /// Framebuffer size, selection stroke width, perspective layering scale.
     outline_params: [f32; 4],
+    /// x: how many of `dynamic_lights` are set (0 with the extra off).
+    dynamic_count: [f32; 4],
+    /// Camera-relative position and level of each dynamic light (`crate::dynamic_lights`).
+    dynamic_lights: [[f32; 4]; crate::dynamic_lights::MAX_LIGHTS],
 }
 pub type SectionKey = (i32, i32, i32);
 struct SectionGpu {
@@ -208,6 +212,8 @@ pub struct Frame<'a> {
     pub end_portal_sprites: [[f32; 4]; 2],
     /// Current destroy-stage sprite: projected UVs repeat inside this atlas rect.
     pub crumbling_sprite: [f32; 4],
+    /// Dynamic lights (`crate::dynamic_lights::pack`), empty with the extra off.
+    pub dynamic_lights: &'a [[f32; 4]],
     pub ticks: u64,
     /// The darkness effect on the lightmap: the brightness it takes off the
     /// gamma option and the pulsing scale subtracted from the light.
@@ -2816,6 +2822,22 @@ impl Renderer {
                 0.0,
             ],
             outline_params: outline_params(self.config.width, self.config.height),
+            dynamic_count: [
+                frame
+                    .dynamic_lights
+                    .len()
+                    .min(crate::dynamic_lights::MAX_LIGHTS) as f32,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            dynamic_lights: {
+                let mut lights = [[0.0; 4]; crate::dynamic_lights::MAX_LIGHTS];
+                for (slot, light) in lights.iter_mut().zip(frame.dynamic_lights) {
+                    *slot = *light;
+                }
+                lights
+            },
         };
         self.uploads
             .buffer(&mut encoder, &self.globals, 0, bytemuck::bytes_of(&globals));

@@ -42,6 +42,15 @@ pub struct Manifest {
     /// that are on may share one (`content::clash`).
     #[serde(default)]
     pub namespaces: Vec<String>,
+    /// This mod replaces vanilla's world generation data: files under
+    /// `data/minecraft/worldgen/` and `data/minecraft/dimension/`, such as
+    /// the overworld's noise settings, density functions, surface rules,
+    /// biomes and the dimension's biome distribution. Off by default: a mod
+    /// otherwise adds files only in its own namespaces and in tags. A mod
+    /// that sets it changes every world generated with it on, so the game
+    /// names it on the Mods page (docs/mods.md).
+    #[serde(default)]
+    pub worldgen_overrides: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
@@ -64,15 +73,50 @@ pub enum Capability {
     GameRead,
     Chat,
     Hud,
+    /// The block under the crosshair and the one being broken (API 0.1.1).
+    Target,
+    /// The hotbar's stacks and the selected slot (API 0.1.1).
+    InventoryRead,
+    /// Changing the selected hotbar slot (API 0.1.1).
+    Hotbar,
+    /// Blocks of the loaded world and the ones broken each tick (API 0.1.2).
+    WorldRead,
+    /// Breaking blocks and wearing the held item (API 0.1.2): no interface
+    /// of its own, `world`'s edits do nothing without it.
+    WorldEdit,
+    /// The mod's own key bindings (API 0.1.4).
+    Keys,
+    /// The mod's own files (API 0.1.4).
+    Storage,
+    /// A screen the mod draws and handles itself (API 0.1.4).
+    Screen,
+    /// The items of the game (API 0.1.5).
+    ItemsRead,
+    /// The recipes of the game (API 0.1.5).
+    RecipesRead,
+    /// Giving the player items (API 0.1.5): no interface of its own,
+    /// `inventory.give` does nothing without it.
+    InventoryEdit,
     /// New blocks and items from the mod's `data/` (API 0.2): no WIT
     /// interface, the game reads them before the world loads.
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 4] = [
+    pub const ALL: [Capability; 15] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
+        Capability::Target,
+        Capability::InventoryRead,
+        Capability::Hotbar,
+        Capability::WorldRead,
+        Capability::WorldEdit,
+        Capability::Keys,
+        Capability::Storage,
+        Capability::Screen,
+        Capability::ItemsRead,
+        Capability::RecipesRead,
+        Capability::InventoryEdit,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -81,6 +125,17 @@ impl Capability {
             Capability::GameRead => "game",
             Capability::Chat => "chat",
             Capability::Hud => "hud",
+            Capability::Target => "target",
+            Capability::InventoryRead => "inventory",
+            Capability::Hotbar => "hotbar",
+            Capability::WorldRead => "world",
+            Capability::WorldEdit => "world",
+            Capability::Keys => "keys",
+            Capability::Storage => "storage",
+            Capability::Screen => "screen",
+            Capability::ItemsRead => "items",
+            Capability::RecipesRead => "recipes",
+            Capability::InventoryEdit => "inventory",
             Capability::Registries => "registries",
         }
     }
@@ -90,6 +145,17 @@ impl Capability {
             Capability::GameRead => "see your position, health and the time",
             Capability::Chat => "show you chat messages",
             Capability::Hud => "draw text on your screen",
+            Capability::Target => "see the block you look at and the one you break",
+            Capability::InventoryRead => "see your hotbar",
+            Capability::Hotbar => "change your selected hotbar slot",
+            Capability::WorldRead => "see the blocks around you and the ones that break",
+            Capability::WorldEdit => "break blocks and wear the item in your hand",
+            Capability::Keys => "add keys you can press",
+            Capability::Storage => "keep files of its own",
+            Capability::Screen => "draw a screen of its own",
+            Capability::ItemsRead => "see the items of the game",
+            Capability::RecipesRead => "see the recipes of the game",
+            Capability::InventoryEdit => "give you items",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -107,7 +173,12 @@ impl Capability {
         }
         Capability::ALL
             .into_iter()
-            .filter(|c| *c != Capability::Registries)
+            .filter(|c| {
+                !matches!(
+                    c,
+                    Capability::Registries | Capability::WorldEdit | Capability::InventoryEdit
+                )
+            })
             .find(|c| c.interface() == interface)
             .map(Some)
             .ok_or_else(unknown)
@@ -119,6 +190,17 @@ impl fmt::Display for Capability {
             Capability::GameRead => "game-read",
             Capability::Chat => "chat",
             Capability::Hud => "hud",
+            Capability::Target => "target",
+            Capability::InventoryRead => "inventory-read",
+            Capability::Hotbar => "hotbar",
+            Capability::WorldRead => "world-read",
+            Capability::WorldEdit => "world-edit",
+            Capability::Keys => "keys",
+            Capability::Storage => "storage",
+            Capability::Screen => "screen",
+            Capability::ItemsRead => "items-read",
+            Capability::RecipesRead => "recipes-read",
+            Capability::InventoryEdit => "inventory-edit",
             Capability::Registries => "registries",
         };
         f.write_str(name)
@@ -153,6 +235,11 @@ impl Manifest {
         if !m.namespaces.is_empty() && !m.capabilities.contains(&Capability::Registries) {
             return Err(format!(
                 "{MANIFEST}: namespaces are for content, which needs capability registries"
+            ));
+        }
+        if m.worldgen_overrides && !m.capabilities.contains(&Capability::Registries) {
+            return Err(format!(
+                "{MANIFEST}: worldgen_overrides replaces world generation data, which needs capability registries"
             ));
         }
         for (i, ns) in m.namespaces.iter().enumerate() {
@@ -338,6 +425,68 @@ capabilities = ["game-read", "hud"]
         );
         assert!(m.check_imports(["wasi:filesystem/types@0.2.0"]).is_err());
         assert!(m.check_imports(["horizon:mods/game@0.2.0"]).is_err());
+    }
+
+    #[test]
+    fn the_hotbar_capabilities_of_api_0_1_1() {
+        let tool = EXAMPLE.replace(
+            "[\"game-read\", \"hud\"]",
+            "[\"target\", \"inventory-read\", \"hotbar\"]",
+        );
+        let m = Manifest::parse(&tool).unwrap();
+        assert_eq!(
+            m.capabilities,
+            [
+                Capability::Target,
+                Capability::InventoryRead,
+                Capability::Hotbar
+            ]
+        );
+        let imports = [
+            "horizon:mods/target@0.1.1",
+            "horizon:mods/inventory@0.1.1",
+            "horizon:mods/hotbar@0.1.1",
+        ];
+        assert_eq!(m.check_imports(imports), Ok(()));
+        let without = EXAMPLE.replace("\"hud\"", "\"hud\", \"inventory-read\"");
+        assert_eq!(
+            Manifest::parse(&without)
+                .unwrap()
+                .check_imports(["horizon:mods/hotbar@0.1.1"]),
+            Err("uses capability hotbar, missing from horizon-mod.toml".into())
+        );
+    }
+
+    #[test]
+    fn the_new_capabilities_of_api_0_1_4() {
+        let m = Manifest::parse(
+            r#"
+id = "world_map"
+name = "World Map"
+version = "0.1.0"
+api = "0.1"
+capabilities = ["keys", "storage", "screen"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            m.capabilities,
+            [Capability::Keys, Capability::Storage, Capability::Screen]
+        );
+        for (interface, capability) in [
+            ("keys", Capability::Keys),
+            ("storage", Capability::Storage),
+            ("screen", Capability::Screen),
+        ] {
+            assert_eq!(capability.interface(), interface);
+            assert_eq!(
+                m.check_imports([format!("horizon:mods/{interface}@0.1.4").as_str()]),
+                Ok(())
+            );
+        }
+        // A mod without them may not import them.
+        let plain = Manifest::parse(EXAMPLE).unwrap();
+        assert!(plain.check_imports(["horizon:mods/screen@0.1.4"]).is_err());
     }
 
     #[test]

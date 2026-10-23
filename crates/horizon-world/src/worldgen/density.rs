@@ -11,6 +11,8 @@ use horizon_core::{
 };
 use std::{collections::BTreeSet, sync::Arc};
 
+use super::tectonic;
+
 pub(super) fn identifier(name: &str) -> Result<String, DecodeError> {
     let (namespace, path) = name.split_once(':').unwrap_or(("minecraft", name));
     let namespace = if namespace.is_empty() {
@@ -454,6 +456,62 @@ impl Loader {
                 }
                 "minecraft:spline" => {
                     GraphNode::Spline(self.spline(required(&object, "spline")?, depth + 1)?)
+                }
+                // Tectonic's own density functions ask its configuration for
+                // their numbers. They are read only when a mod brings them.
+                "tectonic:config_constant" => {
+                    let key = string(required(&object, "key")?)?;
+                    GraphNode::Constant(tectonic::constant(&key))
+                }
+                "tectonic:config_noise" => {
+                    let key = string(required(&object, "key")?)?;
+                    let state = tectonic::noise_state(&key)
+                        .ok_or(DecodeError::Field("tectonic noise scale"))?;
+                    let noise = self.noise(&object)?;
+                    let shift_x = self.optional_input(&object, "shift_x", 0.0, depth)?;
+                    let shift_z = self.optional_input(&object, "shift_z", 0.0, depth)?;
+                    let zero = self.graph.insert(GraphNode::Constant(0.0))?;
+                    // The mod scales the noise's X and Z, never its height,
+                    // and shifts it by the two shifts it names. It scales in
+                    // single precision, Horizon in double: the two agree to
+                    // within the noise's own precision.
+                    let id = self.graph.insert(GraphNode::Noise {
+                        noise,
+                        xz_scale: f64::from(state.scale),
+                        y_scale: 0.0,
+                        shift_x,
+                        shift_y: zero,
+                        shift_z,
+                    })?;
+                    if state.multiplier == 1.0 && state.offset == 0.0 {
+                        return Ok(id);
+                    }
+                    // The mod multiplies the noise's value and offsets it.
+                    let factor = self.graph.insert(GraphNode::Constant(state.multiplier))?;
+                    let scaled = self.graph.insert(GraphNode::Binary {
+                        kind: GraphBinary::Multiply,
+                        left: id,
+                        right: factor,
+                    })?;
+                    let offset = self.graph.insert(GraphNode::Constant(state.offset))?;
+                    return Ok(self.graph.insert(GraphNode::Binary {
+                        kind: GraphBinary::Add,
+                        left: scaled,
+                        right: offset,
+                    })?);
+                }
+                "tectonic:config_clamp" => {
+                    let input = self.input(&object, "input", depth)?;
+                    let low = self.input(&object, "min", depth)?;
+                    let high = self.input(&object, "max", depth)?;
+                    // The mod clamps to the highest value its lower bound can
+                    // take and the lowest value its upper bound can take.
+                    let min = self.graph.range(low)?.max();
+                    let max = self.graph.range(high)?.min();
+                    if max < min {
+                        return Err(DecodeError::Field("clamp bounds"));
+                    }
+                    GraphNode::Clamp { input, min, max }
                 }
                 _ => {
                     return Err(DecodeError::Registry(format!(

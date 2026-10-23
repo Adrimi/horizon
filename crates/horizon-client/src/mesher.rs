@@ -694,6 +694,8 @@ impl Mesher<'_> {
             [center.x, center.z, base_y],
         );
         let info = &self.tables.info;
+        // Connected textures (an extra): only with resource packs that have them.
+        let ctm = Some(&*self.render.ctm).filter(|c| !c.is_empty() && crate::ctm::enabled());
         for y in 0..16 {
             for z in 0..16 {
                 for x in 0..16 {
@@ -767,6 +769,15 @@ impl Mesher<'_> {
                             if face.quad.cull.is_some_and(|d| !visible[d as usize]) {
                                 continue;
                             }
+                            let tile = ctm.map_or(crate::ctm::Resolved::Keep, |c| {
+                                c.resolve(
+                                    id,
+                                    face.layer,
+                                    Direction::ALL[face.quad.facing as usize],
+                                    [world.x, world.y, world.z],
+                                    |[dx, dy, dz]| pad.blocks[pi(x + dx, y + dy, z + dz)],
+                                )
+                            });
                             self.face(
                                 &pad,
                                 &mut tints,
@@ -776,6 +787,7 @@ impl Mesher<'_> {
                                 face,
                                 ao,
                                 state,
+                                tile,
                             );
                         }
                     }
@@ -815,6 +827,7 @@ impl Mesher<'_> {
         face: &BakedFace,
         ao: bool,
         state: &Info,
+        tile: crate::ctm::Resolved,
     ) {
         let q = &face.quad;
         let shade_face = q.shade_direction_override.unwrap_or(q.facing);
@@ -839,26 +852,133 @@ impl Mesher<'_> {
         } else {
             &mut out.solid
         };
-        for i in 0..4 {
+        // Opaque leaves (forceOpaque) draw in the solid layer: no alpha cutout.
+        let flags = |layer: u16| {
+            if !self.cutout_leaves && state.leaves {
+                layer | OPAQUE_LAYER
+            } else {
+                layer
+            }
+        };
+        let layer = match tile {
+            crate::ctm::Resolved::Layer(l) => l,
+            _ => face.layer as u16,
+        };
+        let vertices: [TerrainVertex; 4] = std::array::from_fn(|i| {
             let g = gray[i] as u32;
             let rgb = match tint {
                 Some(t) => [16, 8, 0].map(|shift| g * (t >> shift & 255) / 255),
                 None => [g; 3],
             };
             let p = q.positions[i];
-            target.push(TerrainVertex::new(
+            TerrainVertex::new(
                 [p[0] + origin[0], p[1] + origin[1], p[2] + origin[2]],
                 q.uv[i],
-                // Opaque leaves (forceOpaque) draw in the solid layer: no alpha cutout.
-                if !self.cutout_leaves && state.leaves {
-                    face.layer as u16 | OPAQUE_LAYER
-                } else {
-                    face.layer as u16
-                },
+                flags(layer),
                 pack_rgb(rgb),
                 pack_coords(lighting::with_emission(coords[i], q.light_emission)),
-            ));
+            )
+        });
+        if let crate::ctm::Resolved::Quarters(tiles) = tile
+            && let Some(quarters) = quarters(&vertices, tiles.map(flags))
+        {
+            target.extend(quarters);
+            return;
         }
+        target.extend(vertices);
+    }
+}
+/// A full face (UVs on the sprite's corners) split into four quarters, each
+/// showing its quarter of its own `ctm_compact` tile; `None` for other faces.
+fn quarters(face: &[TerrainVertex; 4], layers: [u16; 4]) -> Option<Vec<TerrainVertex>> {
+    let corner = |u: f32, v: f32| {
+        face.iter()
+            .position(|f| (f.uv()[0] - u).abs() < 1e-4 && (f.uv()[1] - v).abs() < 1e-4)
+    };
+    // The face's corners in UV order: (0,0), (1,0), (1,1), (0,1).
+    let order = [
+        corner(0.0, 0.0)?,
+        corner(1.0, 0.0)?,
+        corner(1.0, 1.0)?,
+        corner(0.0, 1.0)?,
+    ];
+    let [a, b, c, d] = order.map(|i| &face[i]);
+    let lerp = |x: f32, y: f32, t: f32| x + (y - x) * t;
+    let channel = |value: u32, shift: u32| (value >> shift & 255) as f32;
+    // Bilinear over the face: position, colour and both light levels.
+    let at = |u: f32, v: f32, layer: u16| {
+        let mix = |get: &dyn Fn(&TerrainVertex) -> f32| {
+            lerp(lerp(get(a), get(b), u), lerp(get(d), get(c), u), v)
+        };
+        let pos = std::array::from_fn(|k| mix(&|f| f.pos[k]));
+        let color = [0, 8, 16, 24]
+            .map(|s| mix(&|f| channel(f.color, s)).round() as u32)
+            .iter()
+            .zip([0, 8, 16, 24])
+            .fold(0, |acc, (c, s)| acc | c << s);
+        let light = [0, 8]
+            .map(|s| mix(&|f| channel(u32::from(f.light), s)).round() as u16)
+            .iter()
+            .zip([0, 8])
+            .fold(0, |acc, (l, s)| acc | l << s);
+        TerrainVertex::new(pos, [u, v], layer, color, light)
+    };
+    let mut out = Vec::with_capacity(16);
+    for (i, layer) in layers.into_iter().enumerate() {
+        let (u0, v0) = ((i % 2) as f32 * 0.5, (i / 2) as f32 * 0.5);
+        // Each vertex keeps its corner's place in the winding; only its
+        // position, UVs, colour and light move into the quarter.
+        let mut quad = [at(u0, v0, layer); 4];
+        for (k, [u, v]) in [[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]]
+            .into_iter()
+            .enumerate()
+        {
+            quad[order[k]] = at(u0 + u, v0 + v, layer);
+        }
+        out.extend(quad);
+    }
+    Some(out)
+}
+#[cfg(test)]
+mod quarter_tests {
+    use super::{TerrainVertex, quarters};
+    #[test]
+    fn a_full_face_splits_into_four_quarters_of_their_tiles() {
+        let corner = |x: f32, y: f32, light: u16| {
+            TerrainVertex::new(
+                [x, y, 1.0],
+                [x, 1.0 - y],
+                0,
+                0xFF00_0000 | (x * 255.0) as u32,
+                light,
+            )
+        };
+        // A south face: u along x, v down from y = 1.
+        let face = [
+            corner(0.0, 1.0, 0),
+            corner(0.0, 0.0, 0),
+            corner(1.0, 0.0, 16),
+            corner(1.0, 1.0, 16),
+        ];
+        let out = quarters(&face, [10, 11, 12, 13]).unwrap();
+        assert_eq!(out.len(), 16);
+        // Top-left quarter: layer 10, x in [0, 0.5], y in [0.5, 1], UVs in the quarter.
+        let top_left = &out[..4];
+        assert!(top_left.iter().all(|v| v.layer == 10));
+        assert!(top_left.iter().all(|v| v.pos[0] <= 0.5 && v.pos[1] >= 0.5));
+        assert!(
+            top_left
+                .iter()
+                .all(|v| v.uv()[0] <= 0.5 && v.uv()[1] <= 0.5)
+        );
+        // Light and colour blend across the face.
+        let mid = out.iter().find(|v| v.pos[0] == 0.5).unwrap();
+        assert_eq!(mid.light, 8);
+        assert_eq!(mid.color & 255, 128);
+        // A face that is not the whole sprite stays whole.
+        let mut part = face;
+        part[2] = corner(0.5, 0.0, 16);
+        assert!(quarters(&part, [10, 11, 12, 13]).is_none());
     }
 }
 /// Snapshot of the 3x3 chunk neighbourhood used by a worker job.

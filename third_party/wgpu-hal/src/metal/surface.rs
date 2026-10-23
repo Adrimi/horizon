@@ -1,6 +1,8 @@
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
-use alloc::borrow::ToOwned as _;
+use alloc::{borrow::ToOwned as _, sync::Arc};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use objc2::{
     available,
@@ -11,7 +13,9 @@ use objc2::{
 use objc2_core_foundation::{CFString, CGSize};
 use objc2_core_graphics::CGColorSpace;
 use objc2_foundation::NSObjectProtocol;
-use objc2_metal::MTLTextureType;
+use objc2_metal::{
+    MTLDevice, MTLDrawable, MTLStorageMode, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use parking_lot::{Mutex, RwLock};
 
@@ -40,6 +44,10 @@ impl super::Surface {
             render_layer: Mutex::new(layer),
             swapchain_format: RwLock::new(None),
             extent: RwLock::new(wgt::Extent3d::default()),
+            mailbox_target: Mutex::new(None),
+            drawables_queued: Arc::new(AtomicUsize::new(0)),
+            maximum_drawables: AtomicUsize::new(3),
+            last_drawable: Mutex::new(None),
         }
     }
 
@@ -258,9 +266,12 @@ impl crate::Surface for super::Surface {
 
         let render_layer = self.render_layer.lock();
         let framebuffer_only = config.usage == wgt::TextureUses::COLOR_TARGET;
-        let display_sync = match config.present_mode {
-            wgt::PresentMode::Fifo => true,
-            wgt::PresentMode::Immediate => false,
+        // Display sync stays on: turning it off (Immediate) can panic macOS on Apple Silicon
+        // driving several high-resolution displays (AMCC errors with the display engines
+        // flagged). Mailbox draws uncapped and drops the frames the display can't take.
+        let mailbox = match config.present_mode {
+            wgt::PresentMode::Fifo => false,
+            wgt::PresentMode::Mailbox => true,
             m => unreachable!("Unsupported present mode: {m:?}"),
         };
         // CGFloat is f64 on 64-bit, f32 on 32-bit (arm64_32/ILP32)
@@ -334,8 +345,29 @@ impl crate::Surface for super::Surface {
             render_layer.setAllowsNextDrawableTimeout(false);
         }
         if OsFeatures::display_sync() {
-            render_layer.setDisplaySyncEnabled(display_sync);
+            render_layer.setDisplaySyncEnabled(true);
         }
+        self.maximum_drawables
+            .store(config.maximum_frame_latency as usize + 1, Ordering::Relaxed);
+        *self.mailbox_target.lock() = if mailbox {
+            let descriptor = MTLTextureDescriptor::new();
+            descriptor.setTextureType(MTLTextureType::Type2D);
+            unsafe { descriptor.setWidth(config.extent.width as usize) };
+            unsafe { descriptor.setHeight(config.extent.height as usize) };
+            descriptor.setPixelFormat(caps.map_format(config.format));
+            descriptor.setUsage(
+                super::conv::map_texture_usage(config.format, config.usage)
+                    | MTLTextureUsage::PixelFormatView,
+            );
+            descriptor.setStorageMode(MTLStorageMode::Private);
+            Some(
+                device_raw
+                    .newTextureWithDescriptor(&descriptor)
+                    .ok_or(crate::SurfaceError::Outdated)?,
+            )
+        } else {
+            None
+        };
 
         Ok(())
     }
@@ -346,7 +378,7 @@ impl crate::Surface for super::Surface {
 
     unsafe fn acquire_texture(
         &self,
-        _timeout: Option<core::time::Duration>, // TODO
+        _timeout: Option<Duration>, // TODO
         _fence: &super::Fence,
     ) -> Result<crate::AcquiredSurfaceTexture<super::Api>, crate::SurfaceError> {
         let render_layer = self.render_layer.lock();
@@ -367,6 +399,41 @@ impl crate::Surface for super::Surface {
                 if occlusion_state & NS_WINDOW_OCCLUSION_STATE_VISIBLE == 0 {
                     return Err(crate::SurfaceError::Occluded);
                 }
+            }
+        }
+
+        // Mailbox: with every drawable but the one on screen queued, nextDrawable would wait
+        // for the display; draw into the spare target instead and drop that frame. A real
+        // drawable is still taken every 50 ms in case a presented handler never ran.
+        if let Some(target) = self.mailbox_target.lock().clone() {
+            let maximum = self.maximum_drawables.load(Ordering::Relaxed);
+            let recent = self
+                .last_drawable
+                .lock()
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(50));
+            if recent && self.drawables_queued.load(Ordering::Acquire) + 1 >= maximum {
+                let swapchain_format = self.swapchain_format.read().unwrap();
+                let extent = self.extent.read();
+                return Ok(crate::AcquiredSurfaceTexture {
+                    texture: super::SurfaceTexture {
+                        texture: super::Texture {
+                            raw: target,
+                            format: swapchain_format,
+                            raw_type: MTLTextureType::Type2D,
+                            array_layers: 1,
+                            mip_levels: 1,
+                            copy_size: crate::CopyExtent {
+                                width: extent.width,
+                                height: extent.height,
+                                depth: 1,
+                            },
+                            _drop_guard: None,
+                        },
+                        drawable: None,
+                        present_with_transaction: false,
+                    },
+                    suboptimal: false,
+                });
             }
         }
 
@@ -395,9 +462,19 @@ impl crate::Surface for super::Surface {
                 },
                 _drop_guard: None,
             },
-            drawable: ProtocolObject::from_retained(drawable),
+            drawable: Some(ProtocolObject::from_retained(drawable)),
             present_with_transaction: render_layer.presentsWithTransaction(),
         };
+        if let Some(drawable) = &suf_texture.drawable {
+            *self.last_drawable.lock() = Some(Instant::now());
+            self.drawables_queued.fetch_add(1, Ordering::AcqRel);
+            let queued = Arc::clone(&self.drawables_queued);
+            let block = block2::RcBlock::new(move |_drawable| {
+                let _ =
+                    queued.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+            });
+            unsafe { drawable.addPresentedHandler(block2::RcBlock::as_ptr(&block)) };
+        }
 
         Ok(crate::AcquiredSurfaceTexture {
             texture: suf_texture,

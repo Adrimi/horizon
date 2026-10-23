@@ -35,6 +35,7 @@ pub enum Layer {
 }
 
 /// What the scan needs of each block state.
+#[derive(Default)]
 pub struct Palette {
     /// Map colour id, 0 for none.
     color: Vec<u8>,
@@ -65,6 +66,14 @@ impl Palette {
             flags.push(b);
         }
         Self { color, flags }
+    }
+    /// A palette with no colours: the scan finds nothing (before the
+    /// resources load).
+    pub fn empty() -> Self {
+        Self {
+            color: Vec::new(),
+            flags: Vec::new(),
+        }
     }
     /// A palette from (colour, flags) per state id (tests).
     #[cfg(test)]
@@ -391,7 +400,7 @@ impl Minimap {
     }
 }
 /// Chunk offsets at Chebyshev distance `ring`.
-fn ring_offsets(ring: i32) -> impl Iterator<Item = (i32, i32)> {
+pub fn ring_offsets(ring: i32) -> impl Iterator<Item = (i32, i32)> {
     (-ring..=ring).flat_map(move |dz| {
         (-ring..=ring)
             .filter(move |&dx| dx.abs() == ring || dz.abs() == ring)

@@ -170,9 +170,20 @@ impl Sprites {
             }
         }
     }
+    /// The layer of the image at `path`, kept under `name` (connected-texture
+    /// tiles live outside `textures/`). A file that does not load is an error.
+    pub fn insert_file(&mut self, name: &str, path: &Path) -> Result<u32> {
+        if let Some(layer) = self.layers.get(name) {
+            return Ok(*layer);
+        }
+        self.load_path(name, path.to_path_buf())
+    }
     fn load(&mut self, root: &Path, name: &str) -> Result<u32> {
         let (namespace, path) = name.split_once(':').ok_or("invalid sprite identifier")?;
         let path = root.join(format!("assets/{namespace}/textures/{path}.png"));
+        self.load_path(name, path)
+    }
+    fn load_path(&mut self, name: &str, path: std::path::PathBuf) -> Result<u32> {
         let metadata = match fs::read_to_string(path.with_extension("png.mcmeta")) {
             Ok(text) => Some(serde_json::from_str::<
                 BTreeMap<String, Box<serde_json::value::RawValue>>,

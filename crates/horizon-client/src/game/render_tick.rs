@@ -3,7 +3,7 @@
 use super::{Dim, Game};
 use horizon_client::fog::{FogData, FogInputs, FogType, fog_type, update_rain_fog};
 use horizon_client::{
-    animate_tick::{AnimateContext, animate_tick, campfire_particles},
+    animate_tick::{AnimateContext, animate_tick, campfire_particles, falling_leaves_multiplier},
     biome::Biomes,
     blocks::{BlockFacts, Fluid},
     chunk::{HEIGHT, MIN_Y},
@@ -79,7 +79,7 @@ impl Game<'_> {
         } else {
             self.res.fog()
         };
-        horizon_client::fog::setup_fog(
+        let mut fog = horizon_client::fog::setup_fog(
             tables,
             &self.fog,
             &FogInputs {
@@ -106,7 +106,25 @@ impl Game<'_> {
                 darkness: self.darkness_fog(),
                 boss_world_fog: self.dragon_bar_shown(),
             },
-        )
+        );
+        // Horizon's particle rain: the storm's own haze. The fog closes in a
+        // little and takes the colour of the weather.
+        if self.settings.extras.particle_rain && rain > 0.0 {
+            let spawn = horizon_client::rain::Spawn {
+                world: &self.world,
+                facts: self.res.facts(),
+                biomes: self.res.biomes(),
+                eye: at,
+                rain,
+                thunder,
+            };
+            if let Some(haze) = horizon_client::rain::haze(&spawn) {
+                let k = haze.amount;
+                fog.environmental_end *= 1.0 - 0.4 * k;
+                fog.color = horizon_client::rain::mix_fog(fog.color, haze.color, k * 0.7);
+            }
+        }
+        fog
     }
     /// What a shader pack's `Frame` uniform reads of the game this frame.
     pub(super) fn shader_inputs(
@@ -285,7 +303,7 @@ impl Game<'_> {
         if let Some(e) = eye {
             self.particles.camera = e;
         }
-        let (rain, _) = if self.dim == Dim::Overworld {
+        let (rain, thunder) = if self.dim == Dim::Overworld {
             self.world.weather.levels(1.0)
         } else {
             (0.0, 0.0)
@@ -306,6 +324,11 @@ impl Game<'_> {
             biomes,
             registry: self.pack.assets.registry,
             raining_at: &raining_at,
+            falling_leaves: falling_leaves_multiplier(
+                self.settings.extras.falling_leaves,
+                self.settings.extras.falling_leaves_amount,
+                self.settings.particles,
+            ),
         };
         if let Some(e) = eye {
             let block = [
@@ -363,6 +386,28 @@ impl Game<'_> {
                     self.particles
                         .add(&ParticleOptions::simple(ty), p, [0.0; 3]);
                 }
+            }
+            // Horizon's particle rain: drops of rain, flakes of snow and the
+            // sand of a desert storm.
+            if self.settings.extras.particle_rain && rain > 0.0 {
+                let mut random = LegacyRandom::new(self.world.game_time.wrapping_mul(31_987_231));
+                horizon_client::rain::tick(
+                    &mut self.particles,
+                    &horizon_client::rain::Spawn {
+                        world,
+                        facts,
+                        biomes,
+                        eye: e,
+                        rain,
+                        thunder,
+                    },
+                    horizon_client::rain::Density {
+                        amount: self.settings.extras.particle_rain_amount,
+                        particles: self.settings.particles,
+                    },
+                    self.world.game_time,
+                    &mut random,
+                );
             }
         }
         if let Some(r) = &self.renderer {

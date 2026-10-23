@@ -429,6 +429,9 @@ fn output_disabled(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<S
     if var("HORIZON_NO_AUDIO").is_some() {
         return Some("audio off: HORIZON_NO_AUDIO is set".into());
     }
+    if var("HORIZON_BACKGROUND").is_some() {
+        return Some("audio off: HORIZON_BACKGROUND is set".into());
+    }
     if var("HORIZON_AUDIO").is_some_and(|v| v == "1") {
         return None;
     }

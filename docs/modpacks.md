@@ -247,8 +247,16 @@ How the game loads them, without touching vanilla's path:
 - **Worldgen.** Mods' structures, structure sets, template pools, processor lists, configured and
   placed features join the `worldgen/*.json` bundles. Their structure templates go under
   `worldgen/structure/<ns>/`. Their biome tags are merged into `worldgen/biome_tags.json`, minus
-  the biomes and tags Horizon does not have. Mod biomes, noise and density functions are not
-  carried yet.
+  the biomes and tags Horizon does not have. Their own biomes, noise settings, density functions,
+  noises, surface rules, carvers, block state providers and world presets join the bundles too,
+  and the client reads the mod's biomes (their colours, sounds and spawns). A mod that replaces
+  vanilla's world generation (Terralith, Tectonic) declares `worldgen_overrides = true` in its
+  manifest; only then are its files under `data/minecraft/worldgen/` and `data/minecraft/dimension/`
+  read, and they replace vanilla's of the same name (the Overworld's noise settings, density
+  functions, surface rules, biomes and biome distribution). The fence refuses them without the
+  declaration. The biome distribution comes from the mod's
+  `multi_noise_biome_source_parameter_list/<name>.json`, read as the quantized table the biome
+  source uses; the dimension's type and generator replace the world preset's entry for it.
 - **Limits.** Chunk sections size their global palette to the registry: 16 bits for vanilla's
   35,723 states (the same chunks, saves and packets as before), one more bit each time content
   mods double it, up to 2^20 states (1,048,576). Past that the content root is refused with the
@@ -489,6 +497,15 @@ Two cases the oracle fills in:
     `horizon:close_off_fluid_sources`, and YUNG's pillars (Better Fortresses, Better Jungle
     Temples) and Better Fortresses' stair supports `horizon:yung_pillar` and
     `horizon:stair_pillar`. They write only in the chunk being generated, as the mods do.
+    YUNG's API's own processors are the game's `horizon:yung_*`
+    (`horizon_world::worldgen::structure::processor::yung`): `horizon:yung_replace` is a
+    placeholder block becoming a draw from YUNG's `BlockStateRandomizer` (one `nextFloat`
+    and the entries' shares of `[0, 1)`), with the input's `facing`, `half` and
+    `waterlogged` copied when the mod asks for it; `horizon:yung_brew` puts a potion and
+    its ingredient in a brewing stand, `horizon:yung_dispenser` the items in a dispenser,
+    `horizon:yung_banner` the pattern and the colour in a wall banner, `horizon:yung_torch`
+    takes torches away with a chance. The tables the mods hold in their Java code (the
+    randomizers, the banner list, the brewing recipes) are carried as data.
     Dropped processors went from 570 to 456 in Repurposed Structures (its pillars, bottom
     pillars and fluid fixes: 242 lists), 14 to 1 in Moog's, 10 to 5 in Better Fortresses and
     52 to 50 in Better Jungle Temples; the structure starts are the same (382 starts, 37,451

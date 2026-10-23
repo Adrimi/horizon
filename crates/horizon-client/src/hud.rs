@@ -30,6 +30,14 @@ pub struct HudAtlas {
 }
 /// Atlas rows reserved for glyphs rasterized at run time.
 pub const GLYPH_ROWS: u32 = 512;
+/// Atlas rows reserved for the images mods draw on their screens
+/// (API 0.1.4). They are the bottom rows of the atlas, so the atlas does
+/// not grow for them.
+pub const MOD_TEXTURE_ROWS: u32 = 256;
+/// The side of a mod's screen image, in atlas pixels.
+pub const MOD_TEXTURE_SIDE: u32 = 256;
+/// How many mod images fit in the reserved rows.
+pub const MOD_TEXTURE_SLOTS: usize = 16;
 /// 128x128 atlas slots for map textures.
 pub const MAP_SLOTS: usize = 16;
 /// The atlas slot the minimap extra draws into.
@@ -255,6 +263,35 @@ impl HudAtlas {
             edition.3 = pixels;
         }
         images.push(("horizon/white".into(), 4, 4, vec![255; 64]));
+        // Horizon's own leaf texture for its falling leaves (`particles`).
+        let (side, pixels) = crate::particles::horizon_leaf_texture();
+        images.push((
+            crate::particles::HORIZON_LEAF_SPRITE.into(),
+            side,
+            side,
+            pixels,
+        ));
+        // Horizon's own textures for its particle rain (`particles`).
+        for (name, (side, pixels)) in [
+            (
+                crate::particles::HORIZON_RAIN_SPRITE,
+                crate::particles::horizon_rain_texture(),
+            ),
+            (
+                crate::particles::HORIZON_SNOW_SPRITE,
+                crate::particles::horizon_snow_texture(),
+            ),
+            (
+                crate::particles::HORIZON_SAND_SPRITE,
+                crate::particles::horizon_sand_texture(),
+            ),
+            (
+                crate::particles::HORIZON_RING_SPRITE,
+                crate::particles::horizon_ring_texture(),
+            ),
+        ] {
+            images.push((name.into(), side, side, pixels));
+        }
         if full {
             Self::slots(&mut images);
         }
@@ -324,12 +361,34 @@ impl HudAtlas {
             }
         }
         let white = sprites["horizon/white"];
+        // The mods' screen images: the bottom rows of the atlas, written at
+        // run time (the game's mod screen, API 0.1.4).
+        for i in 0..MOD_TEXTURE_SLOTS {
+            let px = (i as u32) * MOD_TEXTURE_SIDE;
+            let py = height - MOD_TEXTURE_ROWS;
+            sprites.insert(
+                format!("horizon/mod-texture{i}"),
+                Rect {
+                    u0: px as f32 / width as f32,
+                    v0: py as f32 / height as f32,
+                    u1: (px + MOD_TEXTURE_SIDE) as f32 / width as f32,
+                    v1: (py + MOD_TEXTURE_SIDE) as f32 / height as f32,
+                    w: MOD_TEXTURE_SIDE,
+                    h: MOD_TEXTURE_SIDE,
+                },
+            );
+        }
         let font = crate::font::Font::load(
             root,
             &sprites,
             &pixels,
             (width, height),
-            (glyph_region, height - glyph_region),
+            (
+                glyph_region,
+                height
+                    .saturating_sub(glyph_region)
+                    .saturating_sub(MOD_TEXTURE_ROWS),
+            ),
             white,
         );
         Ok(Self {

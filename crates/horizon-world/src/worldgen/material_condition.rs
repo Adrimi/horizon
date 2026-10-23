@@ -143,6 +143,12 @@ impl<P: PositionalRandom> MaterialSurfaceQueries for MaterialSurface<P> {
 pub enum MaterialCondition {
     Hole,
     Steep,
+    /// The surface's slope: the height difference between neighbouring
+    /// columns, in blocks. The range is inclusive.
+    Slope {
+        min: i32,
+        max: i32,
+    },
     Biome(Vec<String>),
     BiomeTag(MaterialBiomeTag),
     Temperature,
@@ -319,7 +325,7 @@ impl<R: RandomSource> Compiled<R> {
         }
         let column = matches!(
             condition,
-            MaterialCondition::Hole | MaterialCondition::Steep
+            MaterialCondition::Hole | MaterialCondition::Steep | MaterialCondition::Slope { .. }
         );
         let kind = match condition {
             MaterialCondition::BiomeTag(tag) => {
@@ -415,7 +421,11 @@ impl<R: RandomSource> Compiled<R> {
         }
         let column = matches!(
             self.kind,
-            Kind::Simple(MaterialCondition::Hole | MaterialCondition::Steep)
+            Kind::Simple(
+                MaterialCondition::Hole
+                    | MaterialCondition::Steep
+                    | MaterialCondition::Slope { .. }
+            )
         );
         let revision = if column {
             context.column_revision
@@ -438,6 +448,15 @@ impl<R: RandomSource> Compiled<R> {
             Kind::Simple(MaterialCondition::Hole) => context.depth <= 0,
             Kind::Simple(MaterialCondition::Steep) => {
                 context.gradient[0] <= -4 || context.gradient[1] >= 4
+            }
+            Kind::Simple(MaterialCondition::Slope { min, max }) => {
+                // The slope is the height difference between the column and
+                // its neighbours, on either axis, without a sign.
+                let steep = |value: i32| {
+                    let difference = value.unsigned_abs();
+                    difference >= *min as u32 && difference <= *max as u32
+                };
+                steep(context.gradient[0]) || steep(context.gradient[1])
             }
             Kind::Simple(MaterialCondition::YAbove {
                 anchor,
