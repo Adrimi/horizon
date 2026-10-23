@@ -184,6 +184,7 @@ impl Server {
             equipment: Default::default(),
             health: 20.0,
             attributes: Vec::new(),
+            bed: None,
             living_flags: 0,
         };
         let mut ctx = TickCtx {
@@ -197,6 +198,7 @@ impl Server {
             clock_rate: 1.0,
             tick_rate: 20.0,
             tick_frozen: false,
+            tick_steps: (0, 0),
             collision: None,
         };
         let events = self.hub.tick(&mut ctx);
@@ -431,6 +433,7 @@ fn guests_see_each_other_and_the_world_entities() {
         equipment: Vec::new(),
         attributes: Vec::new(),
         precise: false,
+        needs_sync: false,
     };
     let first = thread::spawn(move || {
         let mut bot = connect(port, "Alex", false)?;

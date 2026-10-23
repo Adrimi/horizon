@@ -6,9 +6,9 @@
 //! the world's options) with [`Integrated::call`], as vanilla's client calls
 //! into its `IntegratedServer`.
 //!
-//! Opt-in for now (`--server-thread` or `HORIZON_SERVER_THREAD=1`): the
-//! player joins as a network player, and the server side of a network player
-//! does not do everything single player does yet.
+//! On by default. `--no-server-thread` or `HORIZON_SERVER_THREAD=0` runs
+//! the world in the frame instead (the escape hatch while the network
+//! player's side catches up with the in-frame one).
 use super::{
     Game, Options, PackResources, Resources, UiResources,
     lan::{LanSettings, Owner},
@@ -362,13 +362,16 @@ impl Game<'_> {
         let mut next = Instant::now();
         while !flags.stop.load(Ordering::Relaxed) {
             self.run_tasks();
-            if flags.paused.load(Ordering::Relaxed) {
+            let paused = flags.paused.load(Ordering::Relaxed);
+            if paused {
                 // Only the connections run.
                 self.tick_server_timed(true)?;
             } else {
                 self.follow_distances(&flags);
                 let started = Instant::now();
                 self.tick_server_timed(false)?;
+                // MinecraftServer.tickServer's tick times, for /tick query.
+                self.clock.record(started.elapsed());
                 self.debug_charts.log_tick(started, started.elapsed());
                 flags.smoothed_tick_ms.store(
                     self.debug_charts.smoothed_tick_ms.to_bits(),
@@ -376,14 +379,7 @@ impl Game<'_> {
                 );
             }
             self.apply_publish();
-            let rate = self.clock.rate().max(1.0);
-            next += Duration::from_secs_f64(1.0 / f64::from(rate));
-            let now = Instant::now();
-            if next > now {
-                std::thread::sleep(next - now);
-            } else if now - next > Duration::from_secs(2) {
-                next = now;
-            }
+            self.wait_for_next_server_tick(&mut next, paused);
         }
         self.stop_integrated()
     }
@@ -455,18 +451,23 @@ impl Game<'_> {
             // Commands.performCommand runs in the player's level.
             let (back, theirs) = (self.dim, super::Dim::from_id(&g.dimension));
             let entered = theirs == back || self.enter_level(Some(&mut host), theirs).is_ok();
-            if entered {
+            if entered && let Some(swap) = self.enter_guest(&mut host, conn) {
                 let command = command.trim_start_matches('/').to_owned();
-                let lines = self.as_guest(&mut host, conn, |g| {
-                    g.as_console(|g| {
-                        g.chat_capture = Some(Vec::new());
-                        g.run_command(&command);
-                        g.chat_capture.take().unwrap_or_default()
-                    })
+                // The hub is back in place while the command runs, as for a
+                // guest's own (`run_guest_commands`): selectors see every
+                // player (`team join … @a`), and `defaultgamemode` reaches it.
+                self.lan = Some(host);
+                let lines = self.as_console(|g| {
+                    g.chat_capture = Some(Vec::new());
+                    g.run_command(&command);
+                    g.chat_capture.take().unwrap_or_default()
                 });
+                host = self.lan.take().expect("a command puts the hub back");
+                self.leave_guest(&mut host, swap);
+                host.hub.sync_all_effects();
                 // A teleport into another level happens before its feedback is sent.
                 self.run_level_teleports(&mut host);
-                for line in lines.unwrap_or_default() {
+                for line in lines {
                     out.push(line.plain());
                     host.hub.send_to(
                         conn,

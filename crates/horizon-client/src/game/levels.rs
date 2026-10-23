@@ -24,7 +24,11 @@ use horizon_client::{
     ticket_levels::ChunkTickets, world::World,
 };
 use horizon_world::level::{LevelEvent, Ticks};
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// Server ticks a level other than the Overworld stays loaded with no player
 /// in it, before it is saved and closed (vanilla unloads a level's chunks
@@ -249,6 +253,24 @@ impl Game<'_> {
         Ok(())
     }
 
+    /// Put `dim`'s level in place for a command whose source is there
+    /// (`execute in`, `execute at` a player in another level), opening it if
+    /// nobody is in it; returns the level to put back afterwards. Only a
+    /// server holds other levels.
+    pub(super) fn enter_command_level(&mut self, dim: Dim) -> Option<Dim> {
+        if self.options.dedicated.is_none() || dim == self.dim {
+            return None;
+        }
+        let back = self.dim;
+        match self.enter_level(None, dim) {
+            Ok(()) => Some(back),
+            Err(e) => {
+                log::error!("could not open {}: {e}", dim.id());
+                None
+            }
+        }
+    }
+
     /// One server tick (`MinecraftServer.tickServer`): each level with
     /// players in turn (`tickChildren`), its chunks streamed and loaded and
     /// its world ticked. The first pass reads the network and runs the
@@ -308,18 +330,42 @@ impl Game<'_> {
                 .map_or_else(String::new, |(end, start)| {
                     format!(", cpu {:.1} ms", (end - start).as_secs_f32() * 1000.0)
                 });
-            let list: Vec<String> = spans
-                .iter()
-                .filter(|(_, ms)| *ms >= 0.5)
-                .map(|(n, ms)| format!("{n} {ms:.1}"))
-                .collect();
             log::info!(
                 "Horizon: slow tick {wall:.1} ms{cpu} ({} mobs): {}",
                 self.mobs.len(),
-                list.join(", ")
+                horizon_client::spans::describe(&spans)
             );
         }
         result
+    }
+
+    /// The end of `MinecraftServer.runServer`'s loop for a server thread: a
+    /// finished `/tick sprint` reports to the operators as the server, then
+    /// the next tick starts one tick length after this one, or straight away
+    /// while the sprint runs (`checkShouldSprintThisTick`).
+    pub(super) fn wait_for_next_server_tick(&mut self, next: &mut Instant, paused: bool) {
+        if let Some(report) = self.clock.take_sprint_report() {
+            // ServerTickRateManager.finishTickSprint: the server's sendSuccess.
+            self.console_broadcast = Some(true);
+            self.sprint_report(&report);
+            self.console_broadcast = None;
+            if let Some(mut host) = self.lan.take() {
+                self.send_admin_feedback(&mut host, None);
+                self.lan = Some(host);
+            }
+            self.admin_feedback.clear();
+        }
+        let now = Instant::now();
+        if !paused && self.clock.sprinting() {
+            *next = now;
+            return;
+        }
+        *next += self.clock.tick_duration();
+        if *next > now {
+            std::thread::sleep(*next - now);
+        } else if now - *next > Duration::from_secs(2) {
+            *next = now;
+        }
     }
 
     /// The levels this server tick runs, in `MinecraftServer.levels` order

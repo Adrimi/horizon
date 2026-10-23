@@ -57,6 +57,9 @@ impl SpriteAnimation {
     pub fn pixels(&self, frame: usize) -> &[u8] {
         &self.frames[frame]
     }
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
 }
 
 #[derive(Default)]
@@ -87,7 +90,7 @@ pub const SPRITE_SIZE: u32 = 16;
 /// with bigger textures are sampled down to fit.
 const MAX_ARRAY_BYTES: u64 = 256 << 20;
 /// Nearest-resample a square RGBA frame to another square size.
-fn resample(frame: &[u8], from: u32, to: u32) -> Vec<u8> {
+pub(crate) fn resample(frame: &[u8], from: u32, to: u32) -> Vec<u8> {
     if from == to {
         return frame.to_vec();
     }
@@ -141,7 +144,11 @@ impl Sprites {
         match self.load(root, name) {
             Ok(layer) => Ok(layer),
             Err(e) => {
-                log::warn!("Horizon: using the missing texture for {name}: {e}");
+                // `MissingTextureAtlasSprite.getLocation()`: vanilla models name the
+                // missing texture on purpose (block/air.json's particle), #853.
+                if name != "minecraft:missingno" {
+                    log::warn!("Horizon: using the missing texture for {name}: {e}");
+                }
                 // MissingTextureAtlasSprite.generateMissingImage: 16x16,
                 // magenta and black quarters.
                 let frame: Vec<u8> = (0..SPRITE_SIZE * SPRITE_SIZE)
@@ -337,11 +344,15 @@ pub(crate) fn test_clip(size: u32, layer: u32, metadata: &str) -> SpriteAnimatio
             .flat_map(|i| [(i % size) as u8, (i / size) as u8, blue, 255])
             .collect()
     };
+    test_frames(layer, vec![frame(0), frame(99)], metadata)
+}
+#[cfg(test)]
+pub(crate) fn test_frames(layer: u32, frames: Vec<Vec<u8>>, metadata: &str) -> SpriteAnimation {
     let metadata = AnimationMetadata::from_json(metadata).unwrap();
     SpriteAnimation {
         layer,
-        frames: Arc::new(vec![frame(0), frame(99)]),
-        clip: Arc::new(metadata.clip(2).unwrap().unwrap()),
+        clip: Arc::new(metadata.clip(frames.len() as u32).unwrap().unwrap()),
+        frames: Arc::new(frames),
     }
 }
 

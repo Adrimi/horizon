@@ -61,16 +61,24 @@ pub fn apply(guest: &mut Guest, level: &Level) {
     guest.head_yaw = guest.yaw;
     guest.on_ground = level.on_ground;
     guest.health = level.health;
+    guest.saved_absorption = Some(level.absorption);
     guest.food = level.food;
     guest.saturation = level.saturation;
     guest.xp_level = level.xp_level;
     guest.xp_progress = level.xp_progress;
     guest.xp_total = level.xp_total;
+    guest.xp_seed = level.xp_seed;
     guest.effects = crate::effects::PlayerEffects::from_saved(&level.active_effects);
     guest.game_mode = level.mode();
     guest.flying = level.flying;
     guest.selected = (level.selected_slot.max(0) as usize).min(8);
-    guest.spawn = level.spawn.map(|s| [s[0] + 0.5, s[1], s[2] + 0.5]);
+    // A point that is the world spawn is none of the player's own: it
+    // respawns wherever the world spawn is then (`setworldspawn`).
+    guest.spawn = level
+        .spawn
+        .filter(|s| Some(s.map(|v| v.floor() as i32)) != level.world_spawn)
+        .map(|s| [s[0] + 0.5, s[1], s[2] + 0.5]);
+    guest.respawn_elsewhere = level.respawn_elsewhere.clone();
     guest.saved = level.player_extra.clone();
     guest.recipe_book = level.recipe_book.clone();
     guest.dimension = match level.dimension.as_str() {
@@ -122,17 +130,25 @@ pub fn store(guest: &Guest, level: &mut Level) {
     level.dimension = guest.dimension.clone();
     level.rotation = [guest.yaw, guest.pitch];
     level.health = guest.health;
+    level.absorption = guest
+        .motion
+        .as_ref()
+        .map_or(guest.saved_absorption.unwrap_or(0.0), |m| {
+            m.health.absorption()
+        });
     level.food = guest.food;
     level.saturation = guest.saturation;
     level.xp_level = guest.xp_level;
     level.xp_progress = guest.xp_progress;
     level.xp_total = guest.xp_total;
+    level.xp_seed = guest.xp_seed;
     level.active_effects = guest.effects.saved();
     level.game_mode = guest.game_mode;
     level.creative = guest.game_mode == 1;
     level.flying = guest.flying;
     level.selected_slot = guest.selected as i32;
     level.spawn = guest.spawn.map(|s| [s[0] - 0.5, s[1], s[2] - 0.5]);
+    level.respawn_elsewhere = guest.respawn_elsewhere.clone();
     level.on_ground = guest.on_ground;
     level.player_extra = guest.saved.clone();
     level.recipe_book = guest.recipe_book.clone();

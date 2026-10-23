@@ -17,7 +17,8 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | Runtime | `crates/horizon-mods` | wasmtime 36 LTS, component model |
 | Authoring tool | `crates/cargo-horizon-mod` | `cargo horizon-mod new / build / run` |
 | In the game | `crates/horizon-client/src/game/mods.rs`, Options > Mods | client mods |
-| Launcher mod browser, signing, server mods, registries | this page, [Roadmap](#roadmap) | planned |
+| Launcher mod browser (Modrinth, CurseForge with a key) | [mod-browser.md](mod-browser.md) | resource packs, shader packs, modpacks |
+| `.hmod` index, signing, server mods, registries | this page, [Roadmap](#roadmap) | planned |
 
 ## Design goals
 
@@ -197,7 +198,7 @@ loading. Ordered by what the first native ports need ([research](research/java-m
 | `target` | block state properties and NBT summary, non-mob entities (0.1.2 has the block, its tags and name, the one being broken and its progress, the mob in the crosshair) | Jade/WTHIT-style tooltips |
 | `inventory-read` | the whole inventory, offhand, armour, open container (0.1.2 has the hotbar and its food, 0.1.3 the item tags) | AppleSkin, recipe viewers |
 | `recipes` | the recipe registry and lookups | JEI/EMI-style viewers |
-| `ui` | widgets: text, item icons, lists, a settings page in Options > Mods (0.1.4 has `screen`: a screen the mod draws and handles itself) | built on `ui_theme` so it matches the menus |
+| `ui` | widgets: text, item icons, lists, a screen the mod owns, a settings page in Options > Mods (0.1.4 has `screen`: a screen the mod draws and handles itself) | built from vanilla's widgets (`ui`) so it matches the menus |
 | `world-read` | blocks and biomes around the player, within the render distance (0.1.4 has the chunk surface, the biomes and the map colours) | minimaps, schematics |
 | `render` | world-space lines, boxes and ghost blocks in a per-frame budget | Litematica-style placement, waypoints |
 | `storage` | a per-mod folder of key/value files, quota'd | 0.1.4 |

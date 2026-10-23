@@ -25,6 +25,7 @@ const HELP: &[&str] = &[
     "time TICKS                     set the time of day",
     "summon KIND [X Y Z] [baby]     spawn a mob (in front of the player without a position)",
     "mobs [RADIUS]                  list mobs near the player with their AI state",
+    "hurtlog                        the hurts taken and melee attacks made since the last call, per player (host and guests)",
     "fill X1 Y1 Z1 X2 Y2 Z2 BLOCK   set a box of loaded blocks",
     "resume                         leave the pause menu",
     "screenshot PATH                write the next frame as PNG",
@@ -42,6 +43,7 @@ const HELP: &[&str] = &[
     "chat MESSAGE                   send chat or a /command to the server",
     "disconnect                     leave the server for the server list",
     "respawn                        respawn after death on a server",
+    "credits [poem] [SCROLL]        roll the credits (with the end poem), or hold them SCROLL pixels in",
     "quit                           save and exit",
 ];
 
@@ -117,6 +119,7 @@ impl Game<'_> {
             self.answer(request, event_loop);
         }
         while let Some(request) = self.control.as_ref().and_then(|c| c.try_recv()) {
+            self.agent_command_seen();
             self.answer(request, event_loop);
             if self.pending_save.is_some() {
                 break;
@@ -124,6 +127,11 @@ impl Game<'_> {
         }
         if self.control.is_some() {
             self.watch_events();
+        }
+        if self.screen == Screen::Options
+            && self.ui.options.page() == horizon_client::options_ui::Page::Agent
+        {
+            self.ui.options.agent_status = self.agent_status_lines();
         }
     }
 
@@ -165,6 +173,9 @@ impl Game<'_> {
         if let Some(value) = self.events_command(&words, reply)? {
             return Ok(value);
         }
+        if let Some(value) = self.saves_control(&words, line, reply)? {
+            return Ok(value);
+        }
         if let Some(value) = self.options_control(&words, line)? {
             return Ok(Some(value));
         }
@@ -192,6 +203,7 @@ impl Game<'_> {
                 .chain(super::ui_control::HELP)
                 .chain(super::options::CONTROL_HELP)
                 .chain(super::events::HELP)
+                .chain(super::saves_control::HELP)
                 .chain(super::pad::HELP)
                 .collect::<Vec<_>>() }))),
             "setblock" | "fill" | "particle" | "signedit" => self.render_command(&words),
@@ -221,6 +233,25 @@ impl Game<'_> {
             "key" => {
                 let key = key_code(arg(1)?).ok_or_else(|| format!("unknown key {}", words[1]))?;
                 self.require_world()?;
+                // A held edit modifier (`key super down`) and A/C/V/X: the
+                // open book's Select All, Copy, Paste or Cut.
+                if self.book.is_some() && arg(2)? != "up" {
+                    let held = |k: [KeyCode; 2]| k.iter().any(|k| self.keys.contains(k));
+                    let edit = if cfg!(target_os = "macos") {
+                        held([KeyCode::SuperLeft, KeyCode::SuperRight])
+                    } else {
+                        held([KeyCode::ControlLeft, KeyCode::ControlRight])
+                    };
+                    let name = arg(1)?;
+                    let letter = name.chars().next().filter(|_| name.len() == 1);
+                    let shift = held([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+                    if let Some(shortcut) =
+                        horizon_client::clipboard::edit_shortcut(letter, edit, shift, false)
+                    {
+                        self.book_shortcut(shortcut);
+                        return ok();
+                    }
+                }
                 // KeyboardHandler.keyPress: the debug keys see the physical key first.
                 let physical = key;
                 {
@@ -525,6 +556,10 @@ impl Game<'_> {
                 let radius: f64 = words.get(1).map_or(Ok(64.0), |r| r.parse())?;
                 Ok(Some(self.control_mobs(radius)))
             }
+            "hurtlog" => {
+                self.require_world()?;
+                Ok(Some(self.control_hurt_log()))
+            }
             "resume" => {
                 if self.screen == Screen::Paused {
                     self.screen = Screen::Playing;
@@ -575,13 +610,22 @@ impl Game<'_> {
                         self.recipe_text(Some(text), false)
                     }
                     Screen::Inventory if self.mod_overlay_typing() => self.mod_overlay_text(text),
+                    // The anvil's rename box.
+                    Screen::Inventory
+                        if self
+                            .station
+                            .as_ref()
+                            .is_some_and(|s| s.kind == super::stations::Kind::Anvil) =>
+                    {
+                        self.station_text(Some(text), false)
+                    }
                     Screen::Creative if self.creative_screen.tab().search => {
                         // As typed: replaces a selected query, keeps the length limit.
                         self.creative_search_edit(Some(text), false)
                     }
                     _ => {
                         return Err(
-                            "type needs the chat screen (key t tap), the language search, the creative search or World Options".into(),
+                            "type needs the chat screen (key t tap), the language search, the creative search, the anvil or World Options".into(),
                         );
                     }
                 }
@@ -607,6 +651,10 @@ impl Game<'_> {
                     "graphics" => Page::Graphics,
                     "graphics-advanced" => Page::GraphicsAdvanced,
                     "extras" => Page::Extras,
+                    "credits" => Page::Credits,
+                    "horizon" => Page::Horizon,
+                    "agent" => Page::Agent,
+                    "shader-packs" => Page::ShaderPacks,
                     other => return Err(format!("unknown options page {other}").into()),
                 };
                 if self.screen == Screen::Playing && self.title.is_none() {
@@ -682,6 +730,25 @@ impl Game<'_> {
                 self.connect_server(arg(1)?, &name)?;
                 ok()
             }
+            "credits" => {
+                let poem = words.get(1) == Some(&"poem");
+                let hold = words
+                    .get(1 + usize::from(poem))
+                    .map(|s| s.parse::<f32>())
+                    .transpose()?;
+                if self.screen != Screen::Win {
+                    let finish = if self.screen == Screen::Options {
+                        super::win::Finish::Options
+                    } else {
+                        super::win::Finish::Closed
+                    };
+                    self.open_win_screen(poem, finish);
+                }
+                if let Some(scroll) = hold {
+                    self.hold_win_screen(scroll);
+                }
+                ok()
+            }
             "respawn" => {
                 if self.remote.is_none() || self.screen != Screen::Dead {
                     return Err("respawn needs the death screen on a server".into());
@@ -718,7 +785,7 @@ impl Game<'_> {
             "dragon-hurt" => {
                 // Test hook: damage the dragon's head as the player would.
                 let amount: f32 = arg(1)?.parse()?;
-                self.hit_special(super::dragon::SPECIAL, amount, true);
+                self.hit_special(super::dragon::SPECIAL, amount, true, false);
                 ok()
             }
             "quit" => {
@@ -774,6 +841,9 @@ impl Game<'_> {
     }
 
     fn screen_name(&self) -> &'static str {
+        if self.screen == Screen::Win {
+            return "win";
+        }
         if self.title.is_some() {
             return "title";
         }
@@ -789,9 +859,59 @@ impl Game<'_> {
             Screen::Stats => "stats",
             Screen::Advancements => "advancements",
             Screen::WorldOptions => "world-options",
+            Screen::Friends => "friends",
             Screen::CommandBlock => "command-block",
             Screen::ModOwned => "mod-screen",
+            Screen::Win => "win",
         }
+    }
+
+    /// The hurts and melee attacks each player logged since the last call
+    /// (`PlayerMotion::hurt_log`, `attack_log`), taken out.
+    fn control_hurt_log(&mut self) -> Value {
+        fn drain(
+            name: &str,
+            hurt_log: &mut Vec<horizon_client::health::HurtRecord>,
+            attack_log: &mut Vec<horizon_client::health::AttackRecord>,
+        ) -> Value {
+            let hurts: Vec<Value> = hurt_log
+                .drain(..)
+                .map(|r| {
+                    json!({
+                        "t": r.game_time, "source": r.source, "amount": r.amount,
+                        "blocked": r.blocked, "taken": r.taken, "hurt": r.hurt,
+                        "armor": r.armor, "toughness": r.toughness, "health": r.health,
+                        "fire_ticks": r.fire_ticks, "knockback": r.knockback,
+                    })
+                })
+                .collect();
+            let attacks: Vec<Value> = attack_log
+                .drain(..)
+                .map(|r| {
+                    json!({
+                        "t": r.game_time, "target": r.target, "id": r.id, "killed": r.killed, "amount": r.amount,
+                        "scale": r.scale, "crit": r.crit, "landed": r.landed, "dealt": r.dealt,
+                    })
+                })
+                .collect();
+            json!({ "name": name, "hurts": hurts, "attacks": attacks })
+        }
+        let mut players = Vec::new();
+        if let Some(p) = self.player.as_mut() {
+            players.push(drain("host", &mut p.hurt_log, &mut p.attack_log));
+        }
+        if let Some(host) = self.lan.as_mut() {
+            for g in &mut host.hub.guests {
+                let name = g.name.clone();
+                if let Some(m) = g.motion.as_mut() {
+                    players.push(drain(&name, &mut m.hurt_log, &mut m.attack_log));
+                } else if let Some((mut hurts, mut attacks)) = g.logs_kept.take() {
+                    // Dead, not yet respawned: what its last body logged.
+                    players.push(drain(&name, &mut hurts, &mut attacks));
+                }
+            }
+        }
+        json!({ "ok": true, "players": players })
     }
 
     fn control_status(&self) -> Value {
@@ -853,9 +973,17 @@ impl Game<'_> {
             "source_attempted": self.lod_source_attempted,
             "active_tiles": self.lod.as_ref().map_or(0, |lod| lod.stats().0),
             "cached_tiles": self.lod.as_ref().map_or(0, |lod| lod.stats().1),
+            "far_detail": self.settings.horizon.far_detail.name(),
+            "resident_quads": self.renderer.as_ref().map_or(0, |r| r.lod_quads()),
             "pending_observations": self.lod_observe.len(),
             "refined_samples": self.lod.as_ref().map_or(0, |lod| lod.refined_samples()),
         });
+        // The other players' cracks this client draws (LevelRenderer.destroyingBlocks).
+        let destroying: Vec<_> = self
+            .destroying
+            .iter()
+            .map(|(id, (pos, stage, _))| json!({ "id": id, "pos": pos, "stage": stage }))
+            .collect();
         let mut status = json!({
             "screen": self.screen_name(),
             "debug": {
@@ -888,20 +1016,22 @@ impl Game<'_> {
             "tridents": self.tridents.len(),
             "rockets": self.rockets.len(),
             "fight": self.dragon_status(),
-            "carts": self.carts.iter().map(|c| serde_json::json!({"kind": c.kind.id(), "position": [c.position.x, c.position.y, c.position.z], "velocity": [c.velocity.x, c.velocity.y, c.velocity.z]})).collect::<Vec<_>>(),
+            // A client of a server (single player's server thread) knows the
+            // carts it was sent.
+            "carts": self.remote_carts().unwrap_or_else(|| self.carts.iter().map(|c| serde_json::json!({"kind": c.kind.id(), "position": [c.position.x, c.position.y, c.position.z], "velocity": [c.velocity.x, c.velocity.y, c.velocity.z]})).collect::<Vec<_>>()),
             "riding": self.riding,
             "using": self.using,
             "render_distance": self.streaming.radius,
             "chunks": self.world.chunks.len(),
             "mobs": self.mobs.len(),
             "block_entities": self.world.block_entities.len(),
-            "pending_chunks": self.streaming.pending() + self.pending_uploads.len(),
+            "pending_chunks": self.streaming.pending() + self.pending_uploads.len() + self.remote_backlog(),
             "generated_chunks": self.streaming.generated_total,
             "meshed_sections": self.streaming.meshed_total,
             "streaming": self.streaming.stages().into_iter().map(|(k, v)| (k.to_string(), v.into())).collect::<serde_json::Map<_, _>>(),
             "dirty_light": self.world.dirty_light.len(),
             "renderer": renderer,
-            "display": self.window.as_ref().and_then(|w| w.current_monitor()).map(|m| json!({
+            "display": self.window.as_deref().and_then(horizon_client::telemetry::monitor).map(|m| json!({
                 "width": m.size().width,
                 "height": m.size().height,
                 "scale": m.scale_factor(),
@@ -919,9 +1049,13 @@ impl Game<'_> {
         status["lod"]["target_tiles"] = target.into();
         status["lod"]["sampled_target_tiles"] = sampled.into();
         status["pending_uploads"] = self.pending_uploads.len().into();
+        status["destroying"] = json!(destroying);
         status["physical_keys"] = json!(physical_keys);
+        status["heard"] = json!(self.audio.heard);
         // Boats, minecarts, armor stands, item frames and paintings.
         status["objects"] = json!(self.objects_status());
+        status["lightning"] = json!({"bolts": self.bolts.len(), "struck": self.lightning_seen[0],
+            "flashes": self.lightning_seen[1], "flash": self.flash});
         // Primed TNT, falling blocks, projectiles, tridents and end crystals.
         status["projectiles"] = json!(self.projectiles_status());
         status
@@ -996,6 +1130,8 @@ fn key_code(name: &str) -> Option<KeyCode> {
         "space" => KeyCode::Space,
         "shift" | "lshift" => KeyCode::ShiftLeft,
         "ctrl" | "control" | "lctrl" => KeyCode::ControlLeft,
+        // The edit modifier on macOS (Cmd+A selects all there).
+        "super" | "cmd" | "meta" => KeyCode::SuperLeft,
         "esc" | "escape" => KeyCode::Escape,
         "tab" => KeyCode::Tab,
         "enter" | "return" => KeyCode::Enter,
@@ -1004,6 +1140,7 @@ fn key_code(name: &str) -> Option<KeyCode> {
         "f3" => KeyCode::F3,
         "f4" => KeyCode::F4,
         "f5" => KeyCode::F5,
+        "f6" => KeyCode::F6,
         "f11" => KeyCode::F11,
         "slash" | "/" => KeyCode::Slash,
         "backspace" => KeyCode::Backspace,

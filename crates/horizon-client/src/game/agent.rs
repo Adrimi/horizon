@@ -403,8 +403,10 @@ impl Game<'_> {
             Screen::Stats => "stats",
             Screen::Advancements => "advancements",
             Screen::WorldOptions => "world-options",
+            Screen::Friends => "friends",
             Screen::CommandBlock => "command-block",
             Screen::ModOwned => "mod-screen",
+            Screen::Win => "win",
         }
     }
     pub(super) fn inventory_counts(&self) -> BTreeMap<String, i64> {
@@ -459,8 +461,11 @@ impl Game<'_> {
                 "sneaking": self.keys.contains(&KeyCode::ShiftLeft),
                 "sprinting": self.keys.contains(&KeyCode::ControlLeft),
                 "health": p.health.health(),
+                "absorption": p.health.absorption(),
+                "air": p.air,
                 "food": p.health.food.food,
                 "saturation": p.health.food.saturation,
+                "shield_cooldown": self.shield_cooldown,
                 "xp": { "level": self.experience.level, "progress": self.experience.progress, "total": self.experience.total },
                 "effects": self.potions.effects.list.iter().map(|e| json!({ "id": e.id, "duration_ticks": e.duration, "amplifier": e.amplifier })).collect::<Vec<_>>(),
             })
@@ -478,6 +483,8 @@ impl Game<'_> {
             "sleeping": self.sleeping,
             // The item in use: its slot and for how many ticks.
             "using": self.using.map(|(slot, ticks)| json!({ "slot": slot, "ticks": ticks })),
+            // The block being dug: how far along, after how many ticks.
+            "mining": self.mining.as_ref().map(|m| json!({ "pos": m.pos, "progress": m.progress, "ticks": m.ticks })),
             // The arm swings started (LivingEntity.swing).
             "swings": self.swings_started,
             "time": { "day_time": self.world.day_time, "day": self.world.day_time.div_euclid(24000), "time_of_day": self.world.day_time.rem_euclid(24000) },
@@ -1843,11 +1850,21 @@ impl Game<'_> {
                 if self.ticks < *report_tick && !timed_out {
                     return None;
                 }
-                let after = pos.map(|p| self.block_json(p));
                 let changed = match (*pos, *before) {
                     (Some(p), Some(b)) => self.world.block(p[0], p[1], p[2]) != b,
                     _ => false,
                 };
+                // A client of a server (single player's server thread, a LAN
+                // guest) sees the block once the server's answer comes.
+                if *place
+                    && !changed
+                    && self.remote.is_some()
+                    && self.ticks < *report_tick + 20
+                    && !timed_out
+                {
+                    return None;
+                }
+                let after = pos.map(|p| self.block_json(p));
                 let used = delta(inventory, &self.inventory_counts());
                 let mut v = json!({
                     "ok": !*place || changed,

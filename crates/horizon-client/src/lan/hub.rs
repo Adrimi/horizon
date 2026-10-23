@@ -85,6 +85,8 @@ pub struct HostState {
     pub attributes: Vec<play::AttributeSnapshot>,
     /// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (the item in use).
     pub living_flags: i8,
+    /// The bed the host sleeps in (`LivingEntity.SLEEPING_POS`).
+    pub bed: Option<[i32; 3]>,
 }
 
 /// Everything the hub needs from the game for one tick.
@@ -103,6 +105,9 @@ pub struct TickCtx<'a> {
     /// TickRateManager: the tick rate and whether the game is frozen.
     pub tick_rate: f32,
     pub tick_frozen: bool,
+    /// `/tick step`: a count that changes with each step started or
+    /// stopped, and the ticks the frozen game still runs (`FixedStep::step_state`).
+    pub tick_steps: (u32, i32),
     /// Block collisions, for ServerGamePacketListenerImpl's moved-wrongly
     /// check (none: moves are not checked against blocks).
     pub collision: Option<&'a BlockCollisionRegistry<'a>>,
@@ -145,6 +150,8 @@ pub struct Hub {
     last_clock: i64,
     last_rate: f32,
     ticking: (f32, bool),
+    /// The `tick_steps` count last broadcast.
+    stepping: u32,
     weather: (bool, f32, f32),
     /// The clock and weather last sent in the levels not in place, by
     /// dimension (`set_dimension` swaps them with the fields above).
@@ -235,6 +242,30 @@ fn tracked(cx: i32, cz: i32, r: i32, x: i32, z: i32) -> bool {
     dx * dx + dz * dz < i64::from(r) * i64::from(r)
 }
 
+/// The view's queue around a new centre: the queued chunks still tracked, then
+/// the tracked ones neither sent nor queued, closest first (a stable sort, so
+/// equally close chunks keep their order).
+fn requeue(
+    queue: &mut Vec<(i32, i32)>,
+    sent: &crate::fast_hash::FxHashSet<(i32, i32)>,
+    (cx, cz): (i32, i32),
+    r: i32,
+) {
+    queue.retain(|&(x, z)| tracked(cx, cz, r, x, z));
+    // A walking player changes chunk every few ticks with hundreds of chunks
+    // queued: a set, not a scan of the queue for each of the view's chunks.
+    let mut queued: crate::fast_hash::FxHashSet<(i32, i32)> = queue.iter().copied().collect();
+    for dz in -r - 2..=r + 2 {
+        for dx in -r - 2..=r + 2 {
+            let key = (cx + dx, cz + dz);
+            if tracked(cx, cz, r, key.0, key.1) && !sent.contains(&key) && queued.insert(key) {
+                queue.push(key);
+            }
+        }
+    }
+    queue.sort_by_key(|&(x, z)| i64::from(x - cx).pow(2) + i64::from(z - cz).pow(2));
+}
+
 /// What a level's players were last told of its clock and weather.
 #[derive(Clone, Copy)]
 struct LevelSync {
@@ -278,6 +309,7 @@ impl Hub {
             last_clock: i64::MIN,
             last_rate: 0.0,
             ticking: (20.0, false),
+            stepping: 0,
             ops: Default::default(),
             weather: (false, 0.0, 0.0),
             level_sync: Default::default(),
@@ -301,6 +333,11 @@ impl Hub {
     /// The network id of a name in a built-in or synchronized registry.
     pub fn registry_id(&self, registry: &str, name: &str) -> Option<i32> {
         self.sync.id(registry, name)
+    }
+
+    /// The name of a network id in a built-in registry.
+    pub fn registry_name(&self, registry: &str, id: i32) -> Option<&str> {
+        self.sync.builtin.get(registry)?.name(id)
     }
 
     pub fn item_id(&mut self, item: &Arc<str>) -> i32 {
@@ -805,6 +842,20 @@ impl Hub {
 
     /// ServerGamePacketListenerImpl.teleport: move the client and wait for its confirmation.
     pub fn teleport(&mut self, i: usize, position: Option<[f64; 3]>) {
+        self.teleport_relative(i, position, 0);
+    }
+
+    /// A teleport to `position` that keeps the player's motion and look
+    /// (`Relative.DELTA` and `Relative.ROTATION`: an End gateway's).
+    pub fn teleport_keeping_motion(&mut self, i: usize, position: [f64; 3]) {
+        use play::relative::{DELTA_X, DELTA_Y, DELTA_Z, ROTATE_DELTA, X_ROT, Y_ROT};
+        let relatives = Y_ROT | X_ROT | DELTA_X | DELTA_Y | DELTA_Z | ROTATE_DELTA;
+        self.teleport_relative(i, Some(position), relatives);
+    }
+
+    /// ServerGamePacketListenerImpl.teleport with `relatives`: the rotation
+    /// and motion they name are sent as zero changes.
+    fn teleport_relative(&mut self, i: usize, position: Option<[f64; 3]>, relatives: i32) {
         let ticks = self.ticks;
         let g = &mut self.guests[i];
         g.teleport_tick = ticks;
@@ -815,13 +866,14 @@ impl Hub {
         g.teleport_counter = (g.teleport_counter + 1) & 0x7FFF_FFFF;
         let id = g.teleport_counter;
         g.awaiting_teleport = Some((id, g.position));
+        let turn = relatives & (play::relative::Y_ROT | play::relative::X_ROT) != 0;
         g.send(&C::PlayerPosition(play::PlayerPosition {
             teleport: id,
             position: g.position,
             delta: [0.0; 3],
-            yaw: g.yaw,
-            pitch: g.pitch,
-            relatives: 0,
+            yaw: if turn { 0.0 } else { g.yaw },
+            pitch: if turn { 0.0 } else { g.pitch },
+            relatives,
         }));
     }
 
@@ -880,7 +932,9 @@ impl Hub {
         }));
         // TickRateManager.updateJoiningPlayer.
         g.send(&ticking_state(ctx.tick_rate, ctx.tick_frozen));
-        g.send(&raw(ids::TICKING_STEP, vec![0]));
+        g.send(&C::TickingStep(play::TickingStep {
+            steps: ctx.tick_steps.1,
+        }));
     }
 
     /// ServerClockManager.createFullSyncPacket: every clock. Horizon keeps the
@@ -1018,6 +1072,7 @@ impl Hub {
             // (`updateJoiningPlayer`).
             if !self.guests.iter().any(|g| g.placed) {
                 self.ticking = (ctx.tick_rate, ctx.tick_frozen);
+                self.stepping = ctx.tick_steps.0;
             }
             if !self
                 .guests
@@ -1146,6 +1201,13 @@ impl Hub {
             self.ticking = (ctx.tick_rate, ctx.tick_frozen);
             self.broadcast(&ticking_state(ctx.tick_rate, ctx.tick_frozen));
         }
+        // ServerTickRateManager.updateStepTicks: a step started or stopped.
+        if ctx.tick_steps.0 != self.stepping {
+            self.stepping = ctx.tick_steps.0;
+            self.broadcast(&C::TickingStep(play::TickingStep {
+                steps: ctx.tick_steps.1,
+            }));
+        }
         let w = &world.weather;
         let (raining, rain, thunder) = self.weather;
         if w.raining != raining {
@@ -1272,20 +1334,7 @@ impl Hub {
             g.sent_chunks.remove(&(x, z));
             g.send(&C::ForgetLevelChunk(play::ForgetLevelChunk { pos: [x, z] }));
         }
-        g.chunk_queue.retain(|&(x, z)| tracked(cx, cz, r, x, z));
-        for dz in -r - 2..=r + 2 {
-            for dx in -r - 2..=r + 2 {
-                let key = (cx + dx, cz + dz);
-                if tracked(cx, cz, r, key.0, key.1)
-                    && !g.sent_chunks.contains(&key)
-                    && !g.chunk_queue.contains(&key)
-                {
-                    g.chunk_queue.push(key);
-                }
-            }
-        }
-        g.chunk_queue
-            .sort_by_key(|&(x, z)| i64::from(x - cx).pow(2) + i64::from(z - cz).pow(2));
+        requeue(&mut g.chunk_queue, &g.sent_chunks, (cx, cz), r);
     }
 
     /// PlayerChunkSender.sendNextChunks' choice: ready chunks, closest first,
@@ -1451,6 +1500,7 @@ impl Hub {
         on_ground: bool,
         flags: (bool, bool, bool, bool),
         living_flags: i8,
+        bed: Option<[i32; 3]>,
         skin: u8,
         health: f32,
         equipment: Vec<(u8, Option<horizon_protocol::item::Stack>)>,
@@ -1486,6 +1536,11 @@ impl Hub {
         // Always there: the trackers send the entries that changed, and an
         // item no longer in use is a change back to 0.
         meta.push((8, serializer::BYTE, Value::Byte(living_flags)));
+        // LivingEntity.SLEEPING_POS: the others draw the player lying in it,
+        // a player paired later too.
+        if let Some(bed) = bed.filter(|_| sleeping) {
+            meta.push((14, serializer::OPTIONAL_BLOCK_POS, Value::OptPos(Some(bed))));
+        }
         if (health - 1.0).abs() > f32::EPSILON && health != 20.0 {
             meta.push((9, serializer::FLOAT, Value::Float(health)));
         }
@@ -1507,6 +1562,7 @@ impl Hub {
             equipment,
             attributes,
             precise: false,
+            needs_sync: false,
         }
     }
 
@@ -1549,8 +1605,9 @@ impl Hub {
                 h.position,
                 (h.yaw, h.pitch, h.head_yaw),
                 h.on_ground,
-                (h.sneaking, h.sprinting, false, false),
+                (h.sneaking, h.sprinting, false, h.bed.is_some()),
                 h.living_flags,
+                h.bed,
                 0x7F,
                 h.health,
                 equipment,
@@ -1582,6 +1639,7 @@ impl Hub {
                     g.on_ground,
                     (g.sneaking, g.sprinting, g.fall_flying, g.sleeping),
                     g.living_flags,
+                    g.bed,
                     g.info.model_customisation,
                     g.health,
                     equipment,
@@ -1708,6 +1766,27 @@ impl Hub {
             let values = super::attributes::take_dirty(&mut m.attributes);
             if !values.is_empty() {
                 g.send(&C::UpdateAttributes(play::UpdateAttributes {
+                    id: g.entity_id,
+                    values,
+                }));
+            }
+        }
+        // ServerEntity.sendDirtyEntityData: the air supply and the absorption
+        // amount the server's body changed go to the player, whose HUD draws
+        // them (bubbles, golden hearts).
+        let g = &mut self.guests[i];
+        if let Some(m) = g.motion.as_ref() {
+            let now = (m.air, m.health.absorption());
+            let mut values = Vec::new();
+            if now.0 != g.sent_air.0 {
+                values.push((1, serializer::INT, Value::Int(now.0)));
+            }
+            if now.1.to_bits() != g.sent_air.1.to_bits() {
+                values.push((17, serializer::FLOAT, Value::Float(now.1)));
+            }
+            if !values.is_empty() {
+                g.sent_air = now;
+                g.send(&C::SetEntityData(play::SetEntityData {
                     id: g.entity_id,
                     values,
                 }));
@@ -1846,6 +1925,7 @@ impl Hub {
             // (handlePlayerKnownMovement), PlayerInput once loaded.
             let acted = match &packet {
                 S::AcceptTeleportation(_)
+                | S::PlayerAbilities(_)
                 | S::MovePlayerStatus(_)
                 | S::MovePlayerRot(_)
                 | S::PlayerLoaded(_)
@@ -1882,6 +1962,11 @@ impl Hub {
                         let rot = (p.yaw, p.pitch);
                         self.position_change(i, [p.x, p.y, p.z], rot, 0, ctx, events);
                     }
+                }
+                // handlePlayerAbilities: the client flies only if it may.
+                S::PlayerAbilities(p) => {
+                    let g = &mut self.guests[i];
+                    g.flying = p.flags & 2 != 0 && (g.creative() || g.spectator());
                 }
                 S::MovePlayerPos(p) => {
                     self.move_player(i, Some([p.x, p.y, p.z]), None, p.flags, ctx, events);
@@ -1920,8 +2005,13 @@ impl Hub {
                     g.center = None;
                 }
                 S::PlayerInput(p) => {
+                    self.guests[i].input = p.flags;
                     self.guests[i].sneaking = p.flags & 32 != 0;
                     self.guests[i].sprinting = p.flags & 64 != 0 && p.flags & 1 != 0;
+                }
+                // OPEN_INVENTORY is the game's: the ridden mount's inventory.
+                S::PlayerCommand(p) if p.action == 5 => {
+                    events.push(HostEvent::Packet(conn, Box::new(S::PlayerCommand(p))));
                 }
                 S::PlayerCommand(p) => match p.action {
                     1 => self.guests[i].sprinting = true,
@@ -2002,6 +2092,11 @@ impl Hub {
             to[2].clamp(-3.0E7, 3.0E7),
         ];
         let (yaw, pitch) = (wrap_degrees(yaw), wrap_degrees(pitch));
+        // A passenger only turns: its vehicle carries it (absSnapTo where it is).
+        if g.vehicle.is_some() {
+            (g.yaw, g.pitch) = (yaw, pitch);
+            return;
+        }
         let d = [0, 1, 2].map(|k| to[k] - g.first_good[k]);
         let moved = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
         if g.sleeping {
@@ -2157,6 +2252,13 @@ impl Hub {
             return;
         };
         g.game_mode = mode;
+        // GameType.updatePlayerAbilities: a spectator flies, survival and
+        // adventure don't, creative keeps what it had.
+        if g.spectator() {
+            g.flying = true;
+        } else if !g.creative() {
+            g.flying = false;
+        }
         let uuid = g.uuid;
         g.send(&C::GameEvent(play::GameEvent {
             event: game_event::CHANGE_GAME_MODE,
@@ -2400,9 +2502,11 @@ impl Hub {
                 global: false,
             }));
         }
-        // lastSentExp, lastSentHealth and lastSentFood.
+        // lastSentExp, lastSentHealth and lastSentFood; the client's new
+        // player starts with the default air and no absorption.
         g.sent_health = None;
         g.sent_xp = None;
+        g.sent_air = (300, 0.0);
         let (cx, cz) = g.chunk();
         g.send(&C::SetChunkCacheCenter(play::SetChunkCacheCenter {
             x: cx,
@@ -2440,4 +2544,77 @@ fn ticking_state(rate: f32, frozen: bool) -> C {
     w.f32(rate);
     w.bool(frozen);
     raw(ids::TICKING_STATE, w.data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fast_hash::FxHashSet;
+
+    /// `requeue` as it was, scanning the queue for each chunk of the view.
+    fn requeue_scan(
+        queue: &mut Vec<(i32, i32)>,
+        sent: &FxHashSet<(i32, i32)>,
+        (cx, cz): (i32, i32),
+        r: i32,
+    ) {
+        queue.retain(|&(x, z)| tracked(cx, cz, r, x, z));
+        for dz in -r - 2..=r + 2 {
+            for dx in -r - 2..=r + 2 {
+                let key = (cx + dx, cz + dz);
+                if tracked(cx, cz, r, key.0, key.1) && !sent.contains(&key) && !queue.contains(&key)
+                {
+                    queue.push(key);
+                }
+            }
+        }
+        queue.sort_by_key(|&(x, z)| i64::from(x - cx).pow(2) + i64::from(z - cz).pow(2));
+    }
+
+    /// A player walking a loop, sending a few chunks a tick: the queue
+    /// after every move is the one the scan built.
+    #[test]
+    fn requeue_matches_the_scan() {
+        for r in [2, 5, 10, 12, 32] {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            let mut sent = FxHashSet::default();
+            for step in 0..60i32 {
+                let center = ((step % 17) - 8, (step * 3 % 11) - 5);
+                requeue(&mut a, &sent, center, r);
+                requeue_scan(&mut b, &sent, center, r);
+                assert_eq!(a, b, "radius {r}, step {step}");
+                for key in a.drain(..a.len().min(7)) {
+                    sent.insert(key);
+                }
+                b.drain(..b.len().min(7));
+                sent.retain(|&(x, z)| tracked(center.0, center.1, r, x, z));
+            }
+        }
+    }
+
+    /// cargo test --release -p horizon-client --lib lan::hub::tests::requeue_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn requeue_cost() {
+        for r in [10, 16, 32] {
+            for (name, f) in [
+                ("scan", requeue_scan as fn(&mut _, &_, _, _)),
+                ("set", requeue as fn(&mut _, &_, _, _)),
+            ] {
+                let sent = FxHashSet::default();
+                let mut queue = Vec::new();
+                let start = std::time::Instant::now();
+                let moves = 200;
+                for step in 0..moves {
+                    // Nothing sent yet (an explorer waiting on generation).
+                    f(&mut queue, &sent, (step, 0), r);
+                }
+                let per = start.elapsed().as_secs_f64() * 1e6 / f64::from(moves);
+                println!(
+                    "view {r}: {name} {per:.1} us per chunk crossed, {} queued",
+                    queue.len()
+                );
+            }
+        }
+    }
 }

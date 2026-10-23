@@ -242,8 +242,19 @@ pub struct PlayerMotion {
     /// Gliding (shared flag 7) and LivingEntity.fallFlyTicks.
     pub fall_flying: bool,
     pub fall_fly_ticks: i32,
+    /// The server saw the glide end last tick (`updateFallFlying`'s `canGlide`
+    /// failed): the cleared flag reaches the client at its next tick.
+    pub glide_ending: bool,
     /// Glider durability to take this tick (updateFallFlying).
     pub glider_wear: u32,
+    /// `LivingEntity.autoSpinAttackTicks` and `autoSpinAttackDmg`: Riptide's
+    /// spin. The damage stays until the game has dealt the hit.
+    pub auto_spin_attack_ticks: i32,
+    pub auto_spin_attack_dmg: f32,
+    /// The living entities the game put near a spinning player (id, box).
+    pub spin_targets: Vec<(u32, Aabb)>,
+    /// The entity the spin touched this tick (`doAutoAttackOnTouch`).
+    pub spin_hit: Option<u32>,
     pub sprinting: bool,
     pub sprint_input: crate::sprint::SprintState,
     pub shift_key_down: bool,
@@ -259,6 +270,10 @@ pub struct PlayerMotion {
     pub steps: MovementDistances,
     pub needs_sync: bool,
     pub sync_position: bool,
+    /// Moved by an ender pearl (`ServerPlayer.teleport`): a server sends the
+    /// position packet even when the player lands where they stood. The
+    /// server takes it at the end of a guest's turn.
+    pub teleported: bool,
     pub events: Vec<MotionEvent>,
     pub attributes: LiveAttributes<Box<dyn FnMut() -> i32>>,
     pub impulse: ImpulseContext,
@@ -287,6 +302,11 @@ pub struct PlayerMotion {
     /// The powder snow blocks this tick's movement went into: the game
     /// destroys them if the player is burning, then puts the fire out.
     pub powder_snow_entered: Vec<BlockPos>,
+    /// The last hurts taken (`hurt_blocking`), newest last, for tests and
+    /// the control socket's `hurtlog`.
+    pub hurt_log: Vec<crate::health::HurtRecord>,
+    /// The last melee attacks made on mobs, newest last.
+    pub attack_log: Vec<crate::health::AttackRecord>,
 }
 fn attribute_error(error: impl std::fmt::Debug) -> io::Error {
     io::Error::other(format!("movement attribute: {error:?}"))
@@ -318,6 +338,8 @@ impl PlayerMotion {
                 .and_then(|t| crate::save::number(t.get("Air")))
                 .unwrap_or(300) as i32;
             self.set_health(level.health, false)?;
+            // LivingEntity.readAdditionalSaveData: internalSetAbsorptionAmount.
+            self.internal_set_absorption(level.absorption)?;
             self.health.food.food = level.food;
             self.health.food.saturation = level.saturation;
             self.flying = level.flying;
@@ -399,7 +421,12 @@ impl PlayerMotion {
             pitch: 0.0,
             fall_flying: false,
             fall_fly_ticks: 0,
+            glide_ending: false,
             glider_wear: 0,
+            auto_spin_attack_ticks: 0,
+            auto_spin_attack_dmg: 0.0,
+            spin_targets: Vec::new(),
+            spin_hit: None,
             sprinting: false,
             sprint_input: crate::sprint::SprintState::default(),
             shift_key_down: false,
@@ -419,6 +446,7 @@ impl PlayerMotion {
             },
             needs_sync: false,
             sync_position: false,
+            teleported: false,
             events: Vec::new(),
             attributes,
             fluids: PlayerFluids::default(),
@@ -430,6 +458,8 @@ impl PlayerMotion {
             old_position: position,
             block_effects: true,
             powder_snow_entered: Vec::new(),
+            hurt_log: Vec::new(),
+            attack_log: Vec::new(),
         })
     }
     /// `Entity.getTicksRequiredToFreeze`.
@@ -688,7 +718,8 @@ impl MotionWorld<'_, '_, '_> {
             supporting_block: self.player.ground.supporting_block,
         }
     }
-    fn climbable(&mut self) -> Result<bool> {
+    /// `LivingEntity.onClimbable` at the player's feet (it remembers the block).
+    pub fn climbable(&mut self) -> Result<bool> {
         if self.player.spectator {
             return Ok(false);
         }
@@ -756,6 +787,13 @@ impl MotionWorld<'_, '_, '_> {
             }
         }
         let toggled = flying_before != self.player.flying;
+        // The server clears the glide flag from the position the client sent
+        // last tick, and the client applies it a tick later, before aiStep: a
+        // landing glide lasts one more tick on the ground, with no ground
+        // friction, so a jump then keeps the speed (the elytra hop).
+        if std::mem::take(&mut self.player.glide_ending) {
+            self.player.fall_flying = false;
+        }
         // Player.tryToStartFallFlying (canGlide: airborne, not flying, a glider;
         // never from inside a liquid).
         let can_glide = self.player.glider
@@ -768,11 +806,17 @@ impl MotionWorld<'_, '_, '_> {
         }
         // LivingEntity.tick fallFlyTicks, then updateFallFlying.
         if self.player.fall_flying {
+            // Entity.checkFallDistanceAccumulation: a glide that isn't diving
+            // (falling slower than 0.5 a tick) keeps the fall distance at 1, so
+            // landing from it hurts no more than a one-block drop.
+            if self.player.velocity.y > -0.5 && self.player.fall_distance > 1.0 {
+                self.player.fall_distance = 1.0;
+            }
             self.player.fall_fly_ticks += 1;
             // canGlide alone: water and lava don't end a glide.
             let still = self.player.glider && !self.player.ground.on_ground && !self.player.flying;
             if !still {
-                self.player.fall_flying = false;
+                self.player.glide_ending = true;
             } else if (self.player.fall_fly_ticks + 1) % 10 == 0
                 && ((self.player.fall_fly_ticks + 1) / 10) % 2 == 0
             {
@@ -895,6 +939,7 @@ impl MotionWorld<'_, '_, '_> {
             input.z = 0.0;
         }
         self.jump_phase()?;
+        let before_travel = self.player.bounds();
         // Player.travel: swim steering, then LivingEntity.travel (fluids
         // first, then gliding, then air), keeping 0.6 of the vertical speed
         // while flying.
@@ -949,7 +994,25 @@ impl MotionWorld<'_, '_, '_> {
         {
             self.freeze_damage()?;
         }
+        if self.player.auto_spin_attack_ticks > 0 {
+            self.player.auto_spin_attack_ticks -= 1;
+            self.check_auto_spin_attack(before_travel);
+        }
         Ok(())
+    }
+    /// `LivingEntity.checkAutoSpinAttack`: the first living entity in the
+    /// box swept this tick takes the hit and ends the spin, bouncing the
+    /// player back at a fifth of its speed; a wall ends it too.
+    fn check_auto_spin_attack(&mut self, before: Aabb) {
+        let swept = before.union_bounds(self.player.bounds());
+        let p = &mut self.player;
+        if let Some(&(id, _)) = p.spin_targets.iter().find(|(_, b)| b.intersects(swept)) {
+            p.spin_hit = Some(id);
+            p.auto_spin_attack_ticks = 0;
+            p.velocity = p.velocity.scale(-0.2);
+        } else if p.collision.horizontal {
+            p.auto_spin_attack_ticks = 0;
+        }
     }
     /// `hurtServer(damageSources().freeze(), 1)` for a fully frozen player.
     fn freeze_damage(&mut self) -> Result<()> {
@@ -968,9 +1031,22 @@ impl MotionWorld<'_, '_, '_> {
     }
     /// `Entity.applyEffectsFromBlocks` for the blocks Horizon's player reacts
     /// to inside its movement path: powder snow (`PowderSnowBlock.entityInside`
-    /// and the FREEZE / EXTINGUISH effects), cobwebs and sweet berry bushes. Pressure plates, tripwires and
-    /// rails are the world tick's scan.
+    /// and the FREEZE / EXTINGUISH effects), cobwebs, sweet berry bushes,
+    /// cactus and lit campfires, and the magma block it stands on
+    /// (`stepOn`). Pressure plates, tripwires and rails are the world tick's
+    /// scan.
     pub fn apply_effects_from_blocks(&mut self) -> Result<()> {
+        self.effects_from_blocks(false)
+    }
+    /// What `applyEffectsFromBlocks` does to a server's player along the
+    /// moves its client sent since `from` (in its history): the damage of
+    /// magma, cactus, lit campfires and grown sweet berry bushes. Its client
+    /// moves it, so the slowing and the rest are the client's.
+    pub fn server_block_damage(&mut self, from: Vec3) -> Result<()> {
+        self.player.old_position = from;
+        self.effects_from_blocks(true)
+    }
+    fn effects_from_blocks(&mut self, damage_only: bool) -> Result<()> {
         use horizon_world::entity_move::MovementRecord;
         let mut movements: Vec<MovementRecord> =
             self.player.history.records().iter().copied().collect();
@@ -994,6 +1070,19 @@ impl MotionWorld<'_, '_, '_> {
         // isAffectedByBlocks: no physics for spectators.
         if self.player.spectator {
             return Ok(());
+        }
+        // Block.stepOn for the block under an entity on the ground:
+        // MagmaBlock's hot floor hurts unless it steps carefully (sneaks).
+        if self.player.ground.on_ground {
+            let on = self.legacy_on_position()?;
+            let magma = self
+                .assets
+                .registry
+                .state(self.block(on))
+                .is_some_and(|s| s.name == "minecraft:magma_block");
+            if magma && !self.player.shift_key_down {
+                self.environment_hurt("minecraft:hot_floor", 1.0)?;
+            }
         }
         let mut visited = std::collections::HashSet::new();
         let mut entered = Vec::new();
@@ -1020,6 +1109,7 @@ impl MotionWorld<'_, '_, '_> {
                                 &mut visited,
                                 &mut entered,
                                 budget,
+                                damage_only,
                             )?;
                             from = to;
                         }
@@ -1032,11 +1122,19 @@ impl MotionWorld<'_, '_, '_> {
                         &mut visited,
                         &mut entered,
                         16,
+                        damage_only,
                     )?;
                 }
             }
             if budget <= 0 {
-                self.check_inside_blocks(movement.to, movement.to, &mut visited, &mut entered, 1)?;
+                self.check_inside_blocks(
+                    movement.to,
+                    movement.to,
+                    &mut visited,
+                    &mut entered,
+                    1,
+                    damage_only,
+                )?;
             }
         }
         // InsideBlockEffectApplier.StepBasedCollector: the blocks entered
@@ -1076,6 +1174,7 @@ impl MotionWorld<'_, '_, '_> {
         visited: &mut std::collections::HashSet<i64>,
         entered: &mut Vec<(i32, BlockPos)>,
         max_iterations: i32,
+        damage_only: bool,
     ) -> Result<i32> {
         let deflated = self.player.dimensions.bounds(to).deflate(Vec3::new(
             f64::from(1.0e-5_f32),
@@ -1152,6 +1251,33 @@ impl MotionWorld<'_, '_, '_> {
                 }
             };
             if inside && visited.insert(p.pack()) {
+                // CactusBlock and CampfireBlock.entityInside (`entity.hurt`).
+                match name {
+                    "minecraft:cactus" => self.environment_hurt("minecraft:cactus", 1.0)?,
+                    "minecraft:campfire" | "minecraft:soul_campfire" => {
+                        let lit = self
+                            .assets
+                            .registry
+                            .state(state)
+                            .and_then(|s| s.properties.get("lit"))
+                            .is_some_and(|v| v == "true");
+                        let damage = if name == "minecraft:campfire" {
+                            1.0
+                        } else {
+                            2.0
+                        };
+                        if lit {
+                            self.environment_hurt("minecraft:campfire", damage)?;
+                        }
+                    }
+                    "minecraft:sweet_berry_bush" if damage_only => {
+                        self.sweet_berry_bush_damage(state)?;
+                    }
+                    _ => {}
+                }
+                if damage_only {
+                    continue;
+                }
                 match name {
                     "minecraft:powder_snow" => {
                         self.powder_snow_inside(p)?;
@@ -1200,6 +1326,10 @@ impl MotionWorld<'_, '_, '_> {
     /// is at least 0.003 on X or Z.
     fn sweet_berry_bush_inside(&mut self, state: BlockStateId) -> Result<()> {
         self.make_stuck_in_block(Vec3::new(f64::from(0.8_f32), 0.75, f64::from(0.8_f32)));
+        self.sweet_berry_bush_damage(state)
+    }
+    /// The server's half of `SweetBerryBushBlock.entityInside`: the prick.
+    fn sweet_berry_bush_damage(&mut self, state: BlockStateId) -> Result<()> {
         let age = self
             .assets
             .registry
@@ -2128,6 +2258,68 @@ mod tests {
         assert!(player.position.y < 84.0);
     }
 
+    /// `MovingPistonBlock.getCollisionShape`: a block halfway through a push
+    /// up is solid at its moving position, so a player lands on it.
+    #[test]
+    fn a_player_lands_on_a_block_a_piston_is_moving() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("movement-properties.nbt").exists() {
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = crate::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        let mut scene = World::test_scene(&assets, &render, 1).unwrap();
+        let registry = assets.registry;
+        let moving = registry.default_state("minecraft:moving_piston").unwrap();
+        let stone = registry.default_state("minecraft:stone").unwrap();
+        scene.set(20, 4, 20, moving).unwrap();
+        scene.moving_pistons.push((
+            [20, 4, 20],
+            horizon_world::piston_shape::MovingPistonState {
+                moved_state: stone,
+                direction: horizon_core::geometry::Direction::Up,
+                extending: true,
+                source: false,
+                progress: 0.5,
+                previous_progress: 0.0,
+            },
+        ));
+        let mut player = PlayerMotion::new(&resources, Vec3::new(20.5, 6.0, 20.5)).unwrap();
+        for _ in 0..30 {
+            MotionWorld {
+                entities: &[],
+                player: &mut player,
+                scene: &mut scene,
+                assets: &assets,
+                collision_binding: &binding,
+                resources: &resources,
+            }
+            .controlled_simulation_tick(Default::default())
+            .unwrap();
+        }
+        assert!(player.ground.on_ground);
+        assert_eq!(player.position.y, 4.5);
+        // Once the block entity is gone, the moving_piston block has no shape.
+        scene.moving_pistons.clear();
+        for _ in 0..10 {
+            MotionWorld {
+                entities: &[],
+                player: &mut player,
+                scene: &mut scene,
+                assets: &assets,
+                collision_binding: &binding,
+                resources: &resources,
+            }
+            .controlled_simulation_tick(Default::default())
+            .unwrap();
+        }
+        assert_eq!(player.position.y, 4.0);
+    }
+
     #[test]
     fn spectator_scroll_speed_controls_horizontal_and_vertical_flight() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2481,6 +2673,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_glide_that_is_not_diving_keeps_the_fall_distance_at_one() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("movement-properties.nbt").exists() {
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = crate::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        // Entity.checkFallDistanceAccumulation: capped above -0.5 a tick, not below.
+        for (dy, capped) in [(-0.3, true), (-0.49, true), (-0.8, false)] {
+            let mut scene = World::test_scene(&assets, &render, 2).unwrap();
+            let mut player = PlayerMotion::new(&resources, Vec3::new(20.5, 20.0, 20.5)).unwrap();
+            player.glider = true;
+            player.fall_flying = true;
+            player.velocity = Vec3::new(0.0, dy, 0.6);
+            player.fall_distance = 30.0;
+            let mut w = MotionWorld {
+                entities: &[],
+                player: &mut player,
+                scene: &mut scene,
+                assets: &assets,
+                collision_binding: &binding,
+                resources: &resources,
+            };
+            w.player_movement_tick([0.0, 0.0], false).unwrap();
+            assert!(w.player.fall_flying);
+            if capped {
+                assert!(
+                    w.player.fall_distance < 2.0,
+                    "{dy}: {}",
+                    w.player.fall_distance
+                );
+            } else {
+                assert!(
+                    w.player.fall_distance > 30.0,
+                    "{dy}: {}",
+                    w.player.fall_distance
+                );
+            }
+        }
+    }
     /// Footsteps on the prepared vanilla resources, when they are present:
     /// none while standing (gravity still moves the player every tick), one
     /// per `nextStep` metre while walking.
@@ -2526,6 +2763,90 @@ mod tests {
                 assert!(w.player.health.health() < 20.0);
             }
         }
+    }
+    #[test]
+    fn a_riptide_spin_lies_flat_and_ends_on_the_first_entity_it_touches() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("movement-properties.nbt").exists() {
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = crate::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        let mut scene = World::test_scene(&assets, &render, 2).unwrap();
+        let ahead = Aabb::new(Vec3::new(20.2, 9.0, 21.5), Vec3::new(20.8, 11.0, 22.1));
+        for target in [None, Some(ahead)] {
+            let mut player = PlayerMotion::new(&resources, Vec3::new(20.5, 10.0, 20.5)).unwrap();
+            player.auto_spin_attack_ticks = 20;
+            player.auto_spin_attack_dmg = 8.0;
+            player.velocity = Vec3::new(0.0, 0.0, 1.0);
+            player.spin_targets = target.map(|b| (7, b)).into_iter().collect();
+            let mut w = MotionWorld {
+                entities: &[],
+                player: &mut player,
+                scene: &mut scene,
+                assets: &assets,
+                collision_binding: &binding,
+                resources: &resources,
+            };
+            w.simulation_tick([0.0, 0.0], false).unwrap();
+            if target.is_some() {
+                // Touched: the hit, no more spin, bounced back at a fifth.
+                assert_eq!(w.player.spin_hit, Some(7));
+                assert_eq!(w.player.auto_spin_attack_ticks, 0);
+                assert!(w.player.velocity.z < 0.0, "{:?}", w.player.velocity);
+                assert_eq!(w.player.pose, crate::pose::Pose::Standing);
+            } else {
+                assert_eq!(w.player.spin_hit, None);
+                assert_eq!(w.player.auto_spin_attack_ticks, 19);
+                assert_eq!(w.player.pose, crate::pose::Pose::SpinAttack);
+                assert_eq!(w.player.dimensions.height, 0.6);
+            }
+        }
+    }
+    #[test]
+    fn a_landing_glide_lasts_a_tick_so_a_jump_keeps_its_speed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("movement-properties.nbt").exists() {
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = crate::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        let mut scene = World::test_scene(&assets, &render, 2).unwrap();
+        let mut player = PlayerMotion::new(&resources, Vec3::new(20.5, 4.2, 20.5)).unwrap();
+        let mut w = MotionWorld {
+            entities: &[],
+            player: &mut player,
+            scene: &mut scene,
+            assets: &assets,
+            collision_binding: &binding,
+            resources: &resources,
+        };
+        w.move_self(Vec3::new(0.0, -1.0, 0.0)).unwrap();
+        assert!(w.player.ground.on_ground);
+        w.player.set_sprinting(true).unwrap();
+        w.player.glider = true;
+        w.player.fall_flying = true;
+        w.player.velocity = Vec3::new(0.0, 0.0, 1.5);
+        // The landed glide's extra tick: the jump's sprint boost, no ground friction.
+        w.player_movement_tick([0.0, 1.0], true).unwrap();
+        assert!(w.player.fall_flying);
+        assert!(w.player.velocity.y > 0.3, "jumped: {:?}", w.player.velocity);
+        assert!(
+            w.player.velocity.z > 1.5,
+            "kept its speed: {:?}",
+            w.player.velocity
+        );
+        // Then the server's cleared flag arrives.
+        w.player_movement_tick([0.0, 1.0], true).unwrap();
+        assert!(!w.player.fall_flying);
     }
 
     #[test]

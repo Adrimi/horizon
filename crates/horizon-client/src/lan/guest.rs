@@ -71,6 +71,13 @@ pub struct Guest {
     /// The permission level (0 none, 2 game masters, 4 owners).
     pub permission: u8,
     pub sneaking: bool,
+    /// The last `ServerboundPlayerInputPacket` flags (forward 1, backward 2,
+    /// left 4, right 8, jump 16, shift 32, sprint 64).
+    pub input: u8,
+    /// The boat or minecart the player rides (`Entity.getVehicle`).
+    pub vehicle: Option<u32>,
+    /// `ServerGamePacketListenerImpl.lastGoodX/Y/Z` of the vehicle it controls.
+    pub vehicle_good: Option<[f64; 3]>,
     pub sprinting: bool,
     pub fall_flying: bool,
     pub flying: bool,
@@ -86,6 +93,10 @@ pub struct Guest {
     /// Where the player respawns (a bed's spot; `ServerPlayer.respawnConfig`),
     /// None for the world spawn.
     pub spawn: Option<[f64; 3]>,
+    /// A respawn point outside the Overworld (a respawn anchor, or one
+    /// `spawnpoint` set there): its dimension, block, yaw and whether it is
+    /// forced, as the player's save keeps it (`respawn`).
+    pub respawn_elsewhere: Option<(String, [i32; 3], f32, bool)>,
     /// Pending ClientboundPlayerPositionPacket id; movement is ignored until
     /// the client accepts it (ServerGamePacketListenerImpl.awaitingPositionFromClient).
     pub awaiting_teleport: Option<(i32, [f64; 3])>,
@@ -122,6 +133,13 @@ pub struct Guest {
     pub tracker: Tracker,
     // Player state the gameplay code reads and writes.
     pub motion: Option<Box<PlayerMotion>>,
+    /// The hurt and attack logs of the body it had before it respawned,
+    /// until the new body takes them over (the control socket's `hurtlog`
+    /// reads across a death).
+    pub logs_kept: Option<(
+        Vec<crate::health::HurtRecord>,
+        Vec<crate::health::AttackRecord>,
+    )>,
     /// The 36 inventory slots (hotbar first), armor (head..feet) and off hand.
     pub inventory: Vec<Option<ItemStack>>,
     pub armor: [Option<ItemStack>; 4],
@@ -135,11 +153,16 @@ pub struct Guest {
     /// The ender chest inventory (`PlayerEnderChestContainer`, 27 slots).
     pub ender_items: Vec<Option<ItemStack>>,
     pub health: f32,
+    /// The saved `AbsorptionAmount`, until the player's first body on the
+    /// server takes it (the body holds the live amount).
+    pub saved_absorption: Option<f32>,
     pub food: i32,
     pub saturation: f32,
     pub xp_level: i32,
     pub xp_progress: f32,
     pub xp_total: i32,
+    /// `Player.enchantmentSeed` (the enchanting table's offers).
+    pub xp_seed: i32,
     /// Active status effects (`LivingEntity.activeEffects`).
     pub effects: crate::effects::PlayerEffects,
     /// What the client was told of each effect: id, amplifier, flags, and
@@ -152,6 +175,10 @@ pub struct Guest {
     /// `lastSentHealth`, `lastSentFood` and `lastFoodSaturationZero`.
     pub sent_health: Option<(f32, i32, bool)>,
     pub sent_xp: Option<(f32, i32, i32)>,
+    /// The air supply and absorption the player's client was last sent
+    /// (Entity.DATA_AIR_SUPPLY_ID, Player.DATA_PLAYER_ABSORPTION_ID); their
+    /// defaults until either changes.
+    pub sent_air: (i32, f32),
     /// Where the player last died (Player.lastDeathLocation), sent with the respawn.
     pub last_death: Option<[i32; 3]>,
     /// The last action sequence to acknowledge at the next tick (-1: none).
@@ -224,6 +251,9 @@ impl Guest {
             game_mode: SURVIVAL,
             permission: 0,
             sneaking: false,
+            input: 0,
+            vehicle: None,
+            vehicle_good: None,
             sprinting: false,
             fall_flying: false,
             flying: false,
@@ -233,6 +263,7 @@ impl Guest {
             sleep_timer: 0,
             sent_bed: None,
             spawn: None,
+            respawn_elsewhere: None,
             awaiting_teleport: None,
             teleport_counter: 0,
             teleport_tick: 0,
@@ -251,6 +282,7 @@ impl Guest {
             batch_quota: 0.0,
             tracker: Tracker::default(),
             motion: None,
+            logs_kept: None,
             inventory: vec![None; 36],
             armor: [None, None, None, None],
             offhand: None,
@@ -260,17 +292,20 @@ impl Guest {
             craft_result: None,
             ender_items: vec![None; 27],
             health: 20.0,
+            saved_absorption: None,
             food: 20,
             saturation: 5.0,
             xp_level: 0,
             xp_progress: 0.0,
             xp_total: 0,
+            xp_seed: 0,
             effects: Default::default(),
             sent_effects: Vec::new(),
             menu_sent: vec![None; 46],
             menu_state: 0,
             sent_health: None,
             sent_xp: None,
+            sent_air: (300, 0.0),
             last_death: None,
             ack_up_to: std::cell::Cell::new(-1),
             sent_selected: 0,
@@ -408,6 +443,43 @@ pub fn stack_to_network(
             stack.added.push((
                 horizon_protocol::item::component::MAP_ID,
                 horizon_protocol::item::Component::Int(id),
+            ));
+        }
+        if d.repair_cost > 0 {
+            stack.added.push((
+                horizon_protocol::item::component::REPAIR_COST,
+                horizon_protocol::item::Component::Int(d.repair_cost as i32),
+            ));
+        }
+        if let Some(mode) = d.map_post_processing {
+            stack.added.push((
+                horizon_protocol::item::component::MAP_POST_PROCESSING,
+                horizon_protocol::item::Component::Int(i32::from(mode)),
+            ));
+        }
+        // The books a lectern shows and a guest reads.
+        if !d.writable_pages.is_empty() {
+            stack.added.push((
+                horizon_protocol::item::component::WRITABLE_BOOK_CONTENT,
+                horizon_protocol::item::Component::WritableBook(d.writable_pages.clone()),
+            ));
+        }
+        if let Some(w) = &d.written {
+            stack.added.push((
+                horizon_protocol::item::component::WRITTEN_BOOK_CONTENT,
+                horizon_protocol::item::Component::WrittenBook(
+                    horizon_protocol::item::WrittenBook {
+                        title: w.title.clone(),
+                        author: w.author.clone(),
+                        generation: i32::from(w.generation),
+                        pages: w
+                            .pages
+                            .iter()
+                            .map(|p| horizon_protocol::text::literal(p))
+                            .collect(),
+                        resolved: true,
+                    },
+                ),
             ));
         }
     }

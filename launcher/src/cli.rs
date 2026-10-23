@@ -156,6 +156,78 @@ enum ModpackCmd {
 }
 
 #[derive(Subcommand)]
+enum ModsCmd {
+    /// What the browser installed (the default)
+    List,
+    /// Search for packs Horizon loads
+    Search {
+        text: Vec<String>,
+        #[arg(long, value_enum, default_value_t = KindArg::Resource)]
+        kind: KindArg,
+        /// Also what was made for other versions or runs only partly, each marked
+        #[arg(long)]
+        everything: bool,
+        #[arg(long, value_enum, default_value_t = SourceArg::Modrinth)]
+        source: SourceArg,
+    },
+    /// Say how well a Java mod runs in Horizon: its jar is downloaded (checksum checked),
+    /// carried over and read; the answer is kept
+    Check {
+        project: String,
+        /// Allow a version made for another Minecraft version (1.21 and later)
+        #[arg(long)]
+        everything: bool,
+        #[arg(long, value_enum, default_value_t = SourceArg::Modrinth)]
+        source: SourceArg,
+    },
+    /// Install a pack and what it needs, by its id or slug (checksums checked); a Java mod is
+    /// ported into horizon-mods and turned on; a modpack is imported
+    Install {
+        project: String,
+        /// Allow a version made for another Minecraft version
+        #[arg(long)]
+        everything: bool,
+        #[arg(long, value_enum, default_value_t = SourceArg::Modrinth)]
+        source: SourceArg,
+    },
+    /// Update what the browser installed (or one pack)
+    Update {
+        project: Option<String>,
+        /// Only say what is newer
+        #[arg(long)]
+        check: bool,
+    },
+    /// Remove a pack the browser installed
+    Remove { project: String },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum KindArg {
+    Mod,
+    Resource,
+    Shader,
+    Modpack,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SourceArg {
+    Modrinth,
+    /// CurseForge support is coming soon
+    Curseforge,
+}
+
+impl SourceArg {
+    fn get(self) -> Result<Box<dyn horizon_launcher::browser::Source>, String> {
+        use horizon_launcher::browser::{self, SourceId};
+        let id = match self {
+            SourceArg::Modrinth => SourceId::Modrinth,
+            SourceArg::Curseforge => SourceId::CurseForge,
+        };
+        browser::source(id).ok_or_else(|| browser::CURSEFORGE_SOON.into())
+    }
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// List Horizon releases, or the installed versions
     Versions {
@@ -181,6 +253,12 @@ enum Cmd {
     Play {
         #[arg(long)]
         version: Option<String>,
+        /// Open or create this world (a folder under saves) at once
+        #[arg(long)]
+        world: Option<String>,
+        /// Creative mode for a new world
+        #[arg(long)]
+        creative: bool,
         /// Join a friend's world with its invite code
         #[arg(long)]
         join: Option<String>,
@@ -209,11 +287,22 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<AccountCmd>,
     },
-    /// Show or set the game's menu style (classic is vanilla's own screens)
-    MenuStyle {
-        /// Omit to show the current style
-        #[arg(value_parser = ["horizon", "classic"])]
-        style: Option<String>,
+    /// Show or set which Horizon releases install by themselves: stable (a tested build about once
+    /// a day) or alpha (every release as soon as it is built; can break)
+    UpdateChannel {
+        /// Omit to show the current channel
+        #[arg(value_parser = ["stable", "alpha"])]
+        channel: Option<String>,
+    },
+    /// Show the launcher's settings, or set one (the Settings page): selected-version TAG,
+    /// minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions
+    /// on|off, opening-animation on|off
+    Settings {
+        #[arg(value_parser = SETTING_KEYS)]
+        key: Option<String>,
+        /// The new value (with KEY)
+        #[arg(requires = "key")]
+        value: Option<String>,
     },
     /// Show or set the extra arguments the game starts with (for example --server-thread);
     /// quotes group a word with spaces in it
@@ -257,14 +346,39 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<ModpackCmd>,
     },
+    /// The mod browser: Java mods, resource packs, shader packs and modpacks from Modrinth
+    /// (CurseForge support is coming soon), each file checked against its checksum
+    /// (docs/mod-browser.md)
+    Mods {
+        #[command(subcommand)]
+        action: Option<ModsCmd>,
+    },
     /// Servers hosted with horizon-server (the Servers page): list them, create one, or run any
     /// horizon-server command on one
     Servers {
         #[command(subcommand)]
         action: Option<ServersCmd>,
     },
-    /// Serve the Model Context Protocol on stdin and stdout, for AI agents
+    /// Serve the Model Context Protocol on stdin and stdout, for AI agents (refused while No AI
+    /// is on)
     Mcp,
+    /// How to connect an AI agent (Claude Code, Codex, Cursor, any MCP client) to `mcp`: the
+    /// config to paste and the command that adds it (refused while No AI is on)
+    AgentConfig {
+        /// Only this client
+        #[arg(long, value_parser = ["claude-code", "codex", "cursor", "generic"])]
+        client: Option<String>,
+        /// Start the MCP server as a client would and say whether it answered
+        #[arg(long)]
+        test: bool,
+    },
+    /// Show or set No AI: on hides and turns off every AI feature (the companion, agent control,
+    /// horizon-ctl and both MCP servers); off, the default, makes them available
+    NoAi {
+        /// Omit to show the current state
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+    },
     /// Measure the launcher: starts (the first is the cold one), page switching, idle CPU and
     /// memory, the release list fetch; writes a benchmark report to benchmarks/ in its data folder
     Benchmark {
@@ -274,11 +388,75 @@ enum Cmd {
     },
 }
 
+/// The CLI's definition, for the MCP tools generated from it (cli_tools.rs).
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
+}
+
+/// The commands that exist for AI agents: hidden and refused while No AI is on. Every other
+/// command stays: the launcher, packagers and scripts need them, and none drives the game.
+pub const AI_COMMANDS: [&str; 2] = ["mcp", "agent-config"];
+
+/// The keys `settings` sets.
+const SETTING_KEYS: [&str; 5] = [
+    "selected-version",
+    "minecraft-dir",
+    "server-dir",
+    "install-new-versions",
+    "opening-animation",
+];
+
+fn on_off(value: &str) -> Result<bool, String> {
+    match value {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        _ => Err(format!("{value}: say on or off")),
+    }
+}
+
+fn set_setting(s: &mut backend::Settings, key: &str, value: &str) -> Result<(), String> {
+    let folder = |value: &str| (value != "default").then(|| PathBuf::from(value));
+    match key {
+        "selected-version" => s.selected = Some(backend::resolve_version(Some(value))?),
+        "minecraft-dir" => s.minecraft_dir = folder(value),
+        "server-dir" => s.server_dir = folder(value),
+        "install-new-versions" => s.install_new_versions = Some(on_off(value)?),
+        "opening-animation" => s.skip_opening = !on_off(value)?,
+        _ => return Err(format!("No setting {key}.")),
+    }
+    Ok(())
+}
+
+/// Every launcher setting, as `settings` shows them.
+fn settings_json(s: &backend::Settings) -> serde_json::Value {
+    serde_json::json!({
+        "selected_version": backend::resolve_version(None).ok(),
+        "minecraft_dir": s.minecraft_dir,
+        "server_dir": backend::server_dir(None),
+        "install_new_versions": s.install_new_versions.unwrap_or(true),
+        "opening_animation": !s.skip_opening,
+        "update_channel": s.update_channel.name(),
+        "game_args": s.game_args,
+        "desktop_entry": s.desktop_entry.unwrap_or(true),
+        "no_ai": backend::no_ai(),
+    })
+}
+
 /// Runs a subcommand and returns the exit code, or None when the window should open.
 pub fn run() -> Option<i32> {
-    let cli = Cli::parse();
+    use clap::FromArgMatches;
+    let no_ai = backend::no_ai();
+    let mut definition = command();
+    if no_ai {
+        // Hidden from the help too; a call still gets the refusal below.
+        for name in AI_COMMANDS {
+            definition = definition.mut_subcommand(name, |c| c.hide(true));
+        }
+    }
+    let cli = Cli::from_arg_matches(&definition.get_matches()).unwrap_or_else(|e| e.exit());
     let command = cli.command?;
     let result = match command {
+        Cmd::Mcp | Cmd::AgentConfig { .. } if no_ai => Err(horizon_core::no_ai::REFUSAL.into()),
         Cmd::Mcp => crate::mcp::serve(),
         command => execute(command, cli.json),
     };
@@ -326,7 +504,7 @@ fn attached(mut cmd: Command) -> Result<(), String> {
 
 fn release_json(r: &Release) -> serde_json::Value {
     serde_json::json!({
-        "tag": r.tag, "name": r.name, "date": r.date, "channel": if r.beta { "beta" } else { "stable" },
+        "tag": r.tag, "name": r.name, "date": r.date, "channel": backend::UpdateChannel::of(r).name(),
         "available_here": r.asset.is_some(), "installed": backend::installed().contains(&r.tag),
     })
 }
@@ -354,10 +532,12 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                 } else {
                     " "
                 };
-                let state = if backend::is_prepared(tag) {
+                let state = if !backend::is_prepared(tag) {
+                    "not prepared"
+                } else if backend::has_sounds(tag) {
                     "prepared"
                 } else {
-                    "not prepared"
+                    "prepared, no sounds (prepare again)"
                 };
                 println!("{mark} {tag}  {state}");
             }
@@ -375,8 +555,8 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                     (false, true) => "",
                     (false, false) => "no build for this platform",
                 };
-                let channel = if r.beta { "beta" } else { "stable" };
-                println!("{:<15} {}  {:<6}  {}", r.tag, r.date, channel, state);
+                let channel = backend::UpdateChannel::of(r).name();
+                println!("{:<15} {}  {:<7}  {}", r.tag, r.date, channel, state);
             }
         }
         Cmd::Install { tag } => {
@@ -414,10 +594,22 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
             }
             println!("{tag} is prepared.");
         }
-        Cmd::Play { version, join, arg } => {
+        Cmd::Play {
+            version,
+            world,
+            creative,
+            join,
+            arg,
+        } => {
             let mut cmd = backend::client(&backend::resolve_version(version.as_deref())?)?;
             if let Some(code) = join {
                 backend::join_friend(&mut cmd, &code)?;
+            }
+            if let Some(world) = world {
+                cmd.arg("--world").arg(world);
+            }
+            if creative {
+                cmd.arg("--creative");
             }
             cmd.args(arg);
             attached(cmd)?
@@ -471,15 +663,87 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
                 }
             }
         }
-        Cmd::MenuStyle { style } => {
-            if let Some(style) = style.as_deref().and_then(backend::MenuStyle::parse) {
-                backend::set_menu_style(style)?;
+        Cmd::NoAi { state } => {
+            if let Some(state) = state {
+                backend::set_no_ai(state == "on")?;
             }
-            let style = backend::menu_style().name();
+            let on = backend::no_ai();
             if as_json {
-                json(serde_json::json!({ "menu_style": style }));
+                json(serde_json::json!({ "no_ai": on }));
+            } else if on {
+                println!("No AI is on: every AI feature is hidden and off.");
             } else {
-                println!("Menu style: {style}");
+                println!("No AI is off: AI features are available.");
+            }
+        }
+        Cmd::AgentConfig { test: true, .. } => {
+            let tools = horizon_launcher::agents::self_test(backend::exe_path())?;
+            if as_json {
+                json(serde_json::json!({ "answered": true, "tools": tools }));
+            } else {
+                println!("The MCP server answered with {tools} tools.");
+            }
+        }
+        Cmd::AgentConfig { client, .. } => {
+            use horizon_launcher::agents;
+            let exe = backend::exe_path();
+            if as_json {
+                let mut all = agents::json(exe);
+                if let Some(id) = &client {
+                    all["clients"] = all["clients"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|c| c["id"] == id.as_str())
+                        .cloned()
+                        .collect();
+                }
+                json(all);
+                return Ok(());
+            }
+            for c in agents::clients(exe)
+                .iter()
+                .filter(|c| client.as_ref().is_none_or(|id| id == c.id))
+            {
+                println!("{}", c.name);
+                if let Some(line) = c.add_line() {
+                    println!("  Add it with:  {line}");
+                }
+                println!("  Or put this in {}:", c.file);
+                for line in c.config.lines() {
+                    println!("    {line}");
+                }
+                println!();
+            }
+            println!("Then ask your agent to say hello: it can call the links tool, or play.");
+        }
+        Cmd::Settings { key, value } => {
+            let mut settings = backend::Settings::load();
+            if let Some(key) = key {
+                let value = value.ok_or("settings KEY VALUE: the value is missing")?;
+                set_setting(&mut settings, &key, &value)?;
+                settings.save();
+            }
+            let all = settings_json(&settings);
+            if as_json {
+                json(all);
+            } else {
+                for (key, value) in all.as_object().into_iter().flatten() {
+                    println!("{key}: {value}");
+                }
+            }
+        }
+        Cmd::UpdateChannel { channel } => {
+            let mut settings = backend::Settings::load();
+            if let Some(channel) = channel.as_deref().and_then(backend::UpdateChannel::parse) {
+                settings.update_channel = channel;
+                settings.save();
+            }
+            let channel = settings.update_channel.name();
+            if as_json {
+                json(serde_json::json!({ "update_channel": channel }));
+            } else {
+                println!("Update channel: {channel}");
             }
         }
         Cmd::GameArgs { args } => {
@@ -523,6 +787,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
             }
         }
         Cmd::Modpack { action } => modpack(action.unwrap_or(ModpackCmd::List), as_json)?,
+        Cmd::Mods { action } => mods(action.unwrap_or(ModsCmd::List), as_json)?,
         Cmd::Servers { action } => servers(action.unwrap_or(ServersCmd::List), as_json)?,
         Cmd::Mcp => unreachable!(),
     }
@@ -680,7 +945,7 @@ fn data(action: DataCmd, as_json: bool) -> Result<(), String> {
             println!("Waiting to be sent: {}", status["waiting"]);
             match horizon_telemetry::endpoint() {
                 Some(url) => println!("Server: {url}"),
-                None => println!("Server: none yet, nothing is sent"),
+                None => println!("Server: turned off (HORIZON_TELEMETRY_URL=off), nothing is sent"),
             }
         }
         DataCmd::Allow { kinds } => {
@@ -816,6 +1081,199 @@ fn servers(action: ServersCmd, as_json: bool) -> Result<(), String> {
                 entry.name,
                 entry.dir.display()
             );
+        }
+    }
+    Ok(())
+}
+
+fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
+    use horizon_launcher::browser::{installed, Kind, Query};
+    use horizon_launcher::modpacks;
+    let home = backend::game_home();
+    let entry_json = |e: &installed::Entry| serde_json::to_value(e).unwrap_or_default();
+    let line = |label: &str, f: f32| progress(label.to_string())(f);
+    match action {
+        ModsCmd::List => {
+            let list = installed::Installed::load(&home).entries;
+            if as_json {
+                json(list.iter().map(entry_json).collect());
+            } else if list.is_empty() {
+                println!(
+                    "Nothing installed from the browser yet: horizon-launcher mods search <text>"
+                );
+            }
+            for e in list.iter().filter(|_| !as_json) {
+                println!(
+                    "{}  {}  ({}, {})\n  {}  {}",
+                    e.title,
+                    e.number,
+                    e.source.label(),
+                    e.slug,
+                    e.file,
+                    e.checksum
+                );
+            }
+        }
+        ModsCmd::Search {
+            text,
+            kind,
+            everything,
+            source,
+        } => {
+            let kind = match kind {
+                KindArg::Resource => Kind::ResourcePack,
+                KindArg::Shader => Kind::ShaderPack,
+                KindArg::Modpack => Kind::Modpack,
+                KindArg::Mod => Kind::Mod,
+            };
+            let query = Query {
+                everything,
+                ..Query::new(&text.join(" "), kind)
+            };
+            let found = source.get()?.search(&query)?;
+            if as_json {
+                json(found.iter().map(|p| {
+                    let support = p.support();
+                    serde_json::json!({
+                        "id": p.id, "slug": p.slug, "title": p.title, "summary": p.summary,
+                        "author": p.author, "downloads": p.downloads, "page": p.page,
+                        "license": p.license, "support": support.label(), "reason": support.reason(),
+                    })
+                }).collect());
+            } else {
+                for p in &found {
+                    let support = p.support();
+                    let unchecked = p.kind == Kind::Mod && support.installable();
+                    println!(
+                        "{}  ({})  {} · {} downloads\n  {}",
+                        p.title,
+                        p.slug,
+                        if unchecked {
+                            "Not checked"
+                        } else {
+                            support.label()
+                        },
+                        p.downloads,
+                        p.summary
+                    );
+                    if unchecked {
+                        println!("  horizon-launcher mods check {}", p.slug);
+                    } else if let Some(why) = support.reason() {
+                        println!("  {why}");
+                    }
+                }
+            }
+        }
+        ModsCmd::Check {
+            project,
+            everything,
+            source,
+        } => {
+            let source = source.get()?;
+            let p = source.project(&project)?;
+            if p.kind != Kind::Mod {
+                return Err(format!("{} isn't a Java mod.", p.title));
+            }
+            let (version, c) = horizon_launcher::browser::java::check_project(
+                &home,
+                &*source,
+                &p,
+                everything,
+                &progress(p.title.clone()),
+            )?;
+            if as_json {
+                let mut v = serde_json::to_value(&c).unwrap_or_default();
+                v["version"] = version.number.clone().into();
+                v["label"] = c.verdict.label().into();
+                println!("{v}");
+                return Ok(());
+            }
+            println!(
+                "{} {} ({} {}): {}. {}",
+                p.title,
+                version.number,
+                c.loader,
+                c.mod_id,
+                c.verdict.label(),
+                c.summary
+            );
+            for line in &c.ports {
+                println!("  ports: {line}");
+            }
+            for line in &c.skipped {
+                println!("  doesn't: {line}");
+            }
+        }
+        ModsCmd::Install {
+            project,
+            everything,
+            source,
+        } => {
+            let source = source.get()?;
+            let p = source.project(&project)?;
+            if p.kind == Kind::Modpack {
+                let folder = modpacks::ports_dir().join("downloads");
+                let file =
+                    installed::fetch_modpack(&*source, &p, &folder, &progress(p.title.clone()))?;
+                let log = &|line: String| eprintln!("{line}");
+                let resources = backend::resolve_version(None)
+                    .ok()
+                    .filter(|t| backend::is_prepared(t))
+                    .map(|t| backend::resources(&t));
+                let pack = modpacks::import_and_port(&file, resources.as_deref(), log)?;
+                println!("{} ({})", modpacks::outcome(&pack), pack.summary());
+                println!("Play it: horizon-launcher modpack play {}", pack.slug);
+                return Ok(());
+            }
+            let done = installed::install(&*source, &p, everything, &home, &line)?;
+            if as_json {
+                json(done.iter().map(entry_json).collect());
+            }
+            for e in done.iter().filter(|_| !as_json) {
+                println!("{} {}: {} ({})", e.title, e.number, e.file, e.checksum);
+                for s in &e.skipped {
+                    println!("  not ported: {s}");
+                }
+            }
+        }
+        ModsCmd::Update { project, check } => {
+            let list = installed::Installed::load(&home).entries;
+            let chosen: Vec<_> = list
+                .iter()
+                .filter(|e| {
+                    project
+                        .as_deref()
+                        .is_none_or(|n| e.project == n || e.slug == n)
+                })
+                .collect();
+            if chosen.is_empty() {
+                return Err(match project {
+                    Some(n) => format!("{n} wasn't installed by the browser."),
+                    None => "Nothing installed from the browser yet.".into(),
+                });
+            }
+            for e in chosen {
+                let Some(source) = horizon_launcher::browser::source(e.source) else {
+                    println!("{}: {} isn't available here.", e.title, e.source.label());
+                    continue;
+                };
+                match installed::update_for(&*source, e)? {
+                    None => println!("{} {}: up to date.", e.title, e.number),
+                    Some(v) if check => {
+                        println!("{} {}: {} is available.", e.title, e.number, v.number)
+                    }
+                    Some(_) => {
+                        let p = source.project(&e.project)?;
+                        for done in installed::install(&*source, &p, true, &home, &line)? {
+                            println!("{} {}: {}", done.title, done.number, done.file);
+                        }
+                    }
+                }
+            }
+        }
+        ModsCmd::Remove { project } => {
+            let e = installed::remove(&home, &project)?;
+            println!("Removed {} ({}).", e.title, e.file);
         }
     }
     Ok(())

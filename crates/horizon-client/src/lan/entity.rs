@@ -34,7 +34,7 @@ pub fn changed_attributes(
 }
 
 /// What the game says about one entity this tick.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct EntityState {
     pub id: i32,
     pub uuid: u128,
@@ -59,6 +59,75 @@ pub struct EntityState {
     /// `Entity.getRequiresPrecisePosition` (primed TNT and falling blocks
     /// touching a block): moves are sent as full position syncs.
     pub precise: bool,
+    /// `Entity.needsSync`: send its changes this tick, due or not.
+    pub needs_sync: bool,
+}
+
+impl EntityState {
+    /// The entity `id` of type `kind` as a fresh state has it: at the origin,
+    /// at rest, with no data, equipment or attributes. Keeps the allocations
+    /// of the strings and vectors it held.
+    pub fn reset(&mut self, id: i32, uuid: u128, kind: &str) {
+        self.id = id;
+        self.uuid = uuid;
+        self.kind.clear();
+        self.kind.push_str(kind);
+        self.position = [0.0; 3];
+        (self.yaw, self.pitch, self.head_yaw) = (0.0, 0.0, 0.0);
+        self.on_ground = false;
+        self.velocity = [0.0; 3];
+        self.data = 0;
+        self.meta.clear();
+        self.equipment.clear();
+        self.attributes.clear();
+        self.precise = false;
+        self.needs_sync = false;
+    }
+}
+
+/// The states a level describes its entities with, kept from tick to tick:
+/// each tick's are written over the last tick's in place, so the strings and
+/// vectors in them are reused instead of being made and freed again for every
+/// entity on every tick.
+#[derive(Default)]
+pub struct States {
+    list: Vec<EntityState>,
+    len: usize,
+}
+
+impl States {
+    /// Start a new tick's states.
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+    /// The next entity's state, reset (`EntityState::reset`).
+    pub fn add(&mut self, id: i32, uuid: u128, kind: &str) -> &mut EntityState {
+        if self.len == self.list.len() {
+            self.list.push(EntityState::default());
+        }
+        let e = &mut self.list[self.len];
+        self.len += 1;
+        e.reset(id, uuid, kind);
+        e
+    }
+    pub fn push(&mut self, e: EntityState) {
+        match self.list.get_mut(self.len) {
+            Some(slot) => *slot = e,
+            None => self.list.push(e),
+        }
+        self.len += 1;
+    }
+    pub fn as_slice(&self) -> &[EntityState] {
+        &self.list[..self.len]
+    }
+}
+
+impl Extend<EntityState> for States {
+    fn extend<I: IntoIterator<Item = EntityState>>(&mut self, states: I) {
+        for e in states {
+            self.push(e);
+        }
+    }
 }
 
 /// `AbstractArrow`: every update sends its position and rotation.
@@ -256,7 +325,7 @@ impl ServerEntity {
         // SynchedEntityData.isDirty: once for every client.
         let dirty = e.meta != self.meta;
         let due = self.interval != 0 && self.tick.is_multiple_of(self.interval);
-        if due || dirty {
+        if due || dirty || e.needs_sync {
             let rotation = (pack_degrees(e.pitch), pack_degrees(e.yaw));
             let turned = |a: i8, b: i8| (i32::from(a) - i32::from(b)).abs() >= 1;
             let rotate = self.arrow
@@ -332,7 +401,7 @@ impl ServerEntity {
             } else {
                 None
             };
-            if self.track_deltas {
+            if self.track_deltas || e.needs_sync {
                 let diff: f64 = (0..3)
                     .map(|k| (e.velocity[k] - self.velocity[k]).powi(2))
                     .sum();
@@ -393,11 +462,13 @@ impl ServerEntity {
                 .collect();
             // A value back at its default is left out of the state, but the
             // clients still hold the old one: Entity's shared flags and pose go
-            // back to 0 (a player standing up again, a mob no longer on fire).
+            // back to 0 (a player standing up again, a mob no longer on fire),
+            // a sleeper's bed to none.
             for (index, kind, _) in &self.meta {
                 let default = match (*index, *kind) {
                     (0, serializer::BYTE) => Value::Byte(0),
                     (6, serializer::POSE) => Value::Id(0),
+                    (14, serializer::OPTIONAL_BLOCK_POS) => Value::OptPos(None),
                     _ => continue,
                 };
                 if !e.meta.iter().any(|m| m.0 == *index) {
@@ -787,7 +858,33 @@ mod tests {
             equipment: Vec::new(),
             attributes: Vec::new(),
             precise: false,
+            needs_sync: false,
         }
+    }
+
+    #[test]
+    fn states_are_written_over_last_ticks_in_place() {
+        let mut states = States::default();
+        let e = states.add(1, 1, "minecraft:zombie");
+        e.position = [1.0, 2.0, 3.0];
+        e.meta.push((9, serializer::FLOAT, Value::Float(20.0)));
+        e.equipment.push((0, None));
+        let (kind, meta) = (e.kind.as_ptr(), e.meta.as_ptr());
+        states.push(state(2.0));
+        states.clear();
+        let e = states.add(3, 3, "minecraft:husk");
+        // Nothing of the last tick's state is left, but its allocations are.
+        let fresh = EntityState {
+            id: 3,
+            uuid: 3,
+            kind: "minecraft:husk".into(),
+            ..EntityState::default()
+        };
+        assert_eq!(*e, fresh);
+        assert_eq!((e.kind.as_ptr(), e.meta.as_ptr()), (kind, meta));
+        assert_eq!(states.as_slice(), std::slice::from_ref(&fresh));
+        states.extend([state(5.0), state(6.0)]);
+        assert_eq!(states.as_slice(), [fresh, state(5.0), state(6.0)]);
     }
 
     /// The entity as added this tick, then its updates (one a tick).
@@ -823,6 +920,37 @@ mod tests {
         }
         let jump = changes(&mut s, &state(40.0));
         assert!(matches!(jump[0], play::Clientbound::EntityPositionSync(_)));
+    }
+
+    #[test]
+    fn a_knocked_back_mob_is_sent_at_once() {
+        let mut s = added(&state(0.0));
+        changes(&mut s, &state(0.0));
+        // Not due (tick 1 of 3), but LivingEntity.knockback set needsSync:
+        // its move and its new motion go out now.
+        let mut knocked = state(0.3);
+        knocked.velocity = [0.2, 0.3, 0.0];
+        knocked.needs_sync = true;
+        let out = changes(&mut s, &knocked);
+        assert!(
+            matches!(
+                out[..],
+                [
+                    play::Clientbound::SetEntityMotion(_),
+                    play::Clientbound::MoveEntityPos(_)
+                ]
+            ),
+            "{out:?}"
+        );
+        // Then every third tick again.
+        assert!(changes(&mut s, &state(0.5)).is_empty());
+        assert!(matches!(
+            changes(&mut s, &state(0.6))[..],
+            [
+                play::Clientbound::SetEntityMotion(_),
+                play::Clientbound::MoveEntityPos(_)
+            ]
+        ));
     }
 
     #[test]
