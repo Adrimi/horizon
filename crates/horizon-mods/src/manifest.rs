@@ -118,6 +118,11 @@ pub enum Capability {
     Overlay,
     /// The entities around the player (API 0.1.8).
     EntityRead,
+    /// The slot under the cursor (API 0.1.10).
+    SlotsRead,
+    /// Marks the game draws on its slots (API 0.1.10): no interface of its
+    /// own, `slots.set-marks` does nothing without it.
+    SlotDecorate,
     /// Removing entities and changing experience orbs (API 0.1.8): no
     /// interface of its own, `entity`'s edits do nothing without it.
     EntityEdit,
@@ -126,7 +131,7 @@ pub enum Capability {
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 22] = [
+    pub const ALL: [Capability; 24] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -148,6 +153,8 @@ impl Capability {
         Capability::Overlay,
         Capability::EntityRead,
         Capability::EntityEdit,
+        Capability::SlotsRead,
+        Capability::SlotDecorate,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -174,6 +181,8 @@ impl Capability {
             Capability::Overlay => "overlay",
             Capability::EntityRead => "entity",
             Capability::EntityEdit => "entity",
+            Capability::SlotsRead => "slots",
+            Capability::SlotDecorate => "slots",
             Capability::Registries => "registries",
         }
     }
@@ -201,6 +210,8 @@ impl Capability {
             Capability::Overlay => "draw over the world on your HUD",
             Capability::EntityRead => "see the mobs, items and players around you",
             Capability::EntityEdit => "remove entities and change experience orbs",
+            Capability::SlotsRead => "see which slot your cursor is over",
+            Capability::SlotDecorate => "draw marks on your slots",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -225,6 +236,7 @@ impl Capability {
                         | Capability::WorldEdit
                         | Capability::InventoryEdit
                         | Capability::EntityEdit
+                        | Capability::SlotDecorate
                 )
             })
             .find(|c| c.interface() == interface)
@@ -256,6 +268,8 @@ impl fmt::Display for Capability {
             Capability::Overlay => "overlay",
             Capability::EntityRead => "entity-read",
             Capability::EntityEdit => "entity-edit",
+            Capability::SlotsRead => "slots-read",
+            Capability::SlotDecorate => "slot-decorate",
             Capability::Registries => "registries",
         };
         f.write_str(name)

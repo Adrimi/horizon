@@ -53,6 +53,7 @@ impl Game<'_> {
 
     /// The marks of the hotbar's slots that hold a new item.
     pub(super) fn draw_hotbar_marks(&mut self, batch: &mut HudBatch, w: i32, h: i32) {
+        self.draw_mod_hotbar_marks(batch, w, h);
         if !self.settings.extras.item_highlighter {
             return;
         }
@@ -72,6 +73,7 @@ impl Game<'_> {
     /// The marks of the inventory screen: the player's slots, the armour and
     /// the off hand.
     pub(super) fn draw_inventory_marks(&mut self, batch: &mut HudBatch, ox: f32, oy: f32) {
+        self.draw_mod_inventory_marks(batch, ox, oy);
         if !self.settings.extras.item_highlighter {
             return;
         }
@@ -98,6 +100,7 @@ impl Game<'_> {
 
     /// The marks of the hotbar's row in the creative screen's item tab.
     pub(super) fn draw_creative_hotbar_marks(&mut self, batch: &mut HudBatch, ox: f32, oy: f32) {
+        self.draw_mod_creative_marks(batch, ox, oy);
         if !self.settings.extras.item_highlighter {
             return;
         }

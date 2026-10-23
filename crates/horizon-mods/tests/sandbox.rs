@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -1205,4 +1205,49 @@ fn the_look_apis_give_the_face_the_armour_and_the_container() {
             "look face Some(\"up\") armor Some(2.0) absorption Some(0.0) contents Some([\"minecraft:stonex12\"]) elsewhere false"
         )]
     );
+}
+
+#[test]
+fn the_slots_api_reads_the_inventory_and_keeps_marks() {
+    use horizon_mods::{Crafting, InventoryStack, PlayerInventory, Session, Snapshot, Ui};
+    let stack = |id: &str, count: u32| InventoryStack {
+        id: id.into(),
+        count,
+        damage: 0,
+        components: String::new(),
+    };
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let mut slots: Vec<Option<InventoryStack>> = vec![None; 36];
+    slots[0] = Some(stack("minecraft:stone", 7));
+    mods.set_snapshot(Snapshot {
+        inventory: Some(PlayerInventory {
+            slots,
+            armour: vec![None; 4],
+            offhand: None,
+            carried: None,
+        }),
+        crafting: Some(Crafting {
+            grid: vec![None; 4],
+            output: None,
+        }),
+        session: Some(Session {
+            id: 3,
+            elapsed_ms: 1500,
+        }),
+        ..player()
+    });
+    mods.set_ui(Ui {
+        hovered_slot: Some(9),
+        ..Ui::default()
+    });
+    assert!(mods.command("slotfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "slots Some((36, 4, false, Some((\"minecraft:stone\", 7)))) crafting Some((4, false)) session Some(3) hovered Some(9)"
+        )]
+    );
+    // The marks stay for the game to draw.
+    assert_eq!(mods.slot_marks().len(), 2);
+    assert_eq!(mods.slot_marks()[0].slot, 0);
 }

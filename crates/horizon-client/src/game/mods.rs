@@ -67,6 +67,10 @@ pub(super) struct ModsState {
     /// (`hud.get-bars`, `overlay`; API 0.1.7).
     pub(super) bars: Option<horizon_mods::Bars>,
     projection: Option<Projection>,
+    /// The number of the world the player is in and when it was loaded
+    /// (`game.get-session`, API 0.1.10).
+    session: u64,
+    session_started: Option<Instant>,
     /// The atlas slot of each mod's overlay image, by (mod, image).
     overlay_slots: HashMap<(String, u32), usize>,
     /// The version uploaded to each overlay slot.
@@ -378,6 +382,19 @@ impl Game<'_> {
         }
         if mods.uses(Capability::RecipesRead) {
             snapshot.recipes = self.mod_recipes();
+        }
+        if mods.uses(Capability::GameRead) && self.player.is_some() {
+            snapshot.session = Some(horizon_mods::Session {
+                id: self.mods.session,
+                elapsed_ms: self
+                    .mods
+                    .session_started
+                    .map_or(0, |t| t.elapsed().as_millis() as u64),
+            });
+        }
+        if inventory && self.player.is_some() {
+            snapshot.inventory = Some(self.mod_inventory());
+            snapshot.crafting = self.mod_crafting();
         }
         if mods.uses(Capability::EntityRead) && self.player.is_some() {
             snapshot.entities = Some(Arc::new(self.mod_entities()));
@@ -954,6 +971,7 @@ impl Game<'_> {
         if !(mods.uses(Capability::Screen)
             || mods.uses(Capability::InventoryEdit)
             || mods.uses(Capability::Overlay)
+            || mods.uses(Capability::SlotsRead)
             || mods.uses(Capability::GameRead)
             || mods.uses(Capability::Hud))
         {
@@ -1028,6 +1046,7 @@ impl Game<'_> {
                 hidden: self.ui.hide_gui,
             }),
             bars: self.mods.bars.clone(),
+            hovered_slot: self.mod_hovered_slot(&batch),
             seed: (self.remote.is_none() && self.player.is_some())
                 .then_some(self.level.seed as u64),
             fov: self.mods.projection.map(|p| p.fov),
@@ -1913,6 +1932,124 @@ impl Game<'_> {
             BlockEntity::Furnace(f) => Some(f.items.iter().map(stack).collect()),
             BlockEntity::Crafter(c) => Some(c.items.iter().map(stack).collect()),
             _ => None,
+        }
+    }
+}
+
+/// The inventory, the crafting grid and the slot marks for mods (API 0.1.10).
+impl Game<'_> {
+    /// A new world was loaded: mods see another session.
+    pub(super) fn new_mod_session(&mut self) {
+        self.mods.session += 1;
+        self.mods.session_started = Some(Instant::now());
+    }
+    fn mod_item_stack(stack: &horizon_client::items::ItemStack) -> horizon_mods::InventoryStack {
+        horizon_mods::InventoryStack {
+            id: stack.item.to_string(),
+            count: stack.count,
+            damage: stack.damage,
+            components: stack
+                .extra
+                .as_ref()
+                .map_or_else(String::new, |extra| format!("{extra:?}")),
+        }
+    }
+    fn mod_inventory(&self) -> horizon_mods::PlayerInventory {
+        let stack =
+            |s: &Option<horizon_client::items::ItemStack>| s.as_ref().map(Self::mod_item_stack);
+        horizon_mods::PlayerInventory {
+            slots: self.inventory.iter().take(36).map(stack).collect(),
+            armour: self.armor.iter().map(stack).collect(),
+            offhand: stack(&self.offhand),
+            carried: stack(&self.carried),
+        }
+    }
+    fn mod_crafting(&self) -> Option<horizon_mods::Crafting> {
+        if self.screen != Screen::Inventory || self.container.is_some() || self.station.is_some() {
+            return None;
+        }
+        let cells = self.craft_size * self.craft_size;
+        Some(horizon_mods::Crafting {
+            grid: self
+                .craft_grid
+                .iter()
+                .take(cells)
+                .map(|s| s.as_ref().map(Self::mod_item_stack))
+                .collect(),
+            output: self.craft_result().as_ref().map(Self::mod_item_stack),
+        })
+    }
+    /// The slot under the cursor in the inventory screen, for `slots`.
+    fn mod_hovered_slot(&self, batch: &HudBatch) -> Option<u32> {
+        if self.screen != Screen::Inventory {
+            return None;
+        }
+        self.slot_at(batch, self.cursor.0, self.cursor.1)
+            .map(|slot| slot as u32)
+    }
+    /// Draws one mark at the slot's top left corner (x, y).
+    fn draw_slot_mark(
+        &self,
+        batch: &mut HudBatch,
+        x: f32,
+        y: f32,
+        shape: &horizon_mods::MarkShape,
+    ) {
+        use horizon_mods::MarkShape as M;
+        let atlas = &self.gui.atlas;
+        match shape {
+            M::Frame(f) => {
+                let c = argb(f.color);
+                batch.fill(atlas, x, y, 16.0, 1.0, c);
+                batch.fill(atlas, x, y + 15.0, 16.0, 1.0, c);
+                batch.fill(atlas, x, y, 1.0, 16.0, c);
+                batch.fill(atlas, x + 15.0, y, 1.0, 16.0, c);
+            }
+            M::Dot(d) => {
+                let size = d.size.clamp(0.0, 16.0);
+                batch.fill(atlas, x + 15.0 - size, y + 1.0, size, size, argb(d.color));
+            }
+            M::Fill(f) => batch.fill(atlas, x, y, 16.0, 16.0, argb(f.color)),
+        }
+    }
+    /// The mods' marks on the hotbar's slots of the HUD.
+    pub(super) fn draw_mod_hotbar_marks(&mut self, batch: &mut HudBatch, w: i32, h: i32) {
+        if !self.mods.mods.uses(Capability::SlotDecorate) {
+            return;
+        }
+        let center = w / 2;
+        for m in self.mods.mods.slot_marks() {
+            if m.slot < 9 {
+                let x = (center - 90 + m.slot as i32 * 20 + 2) as f32;
+                let y = (h - 16 - 3) as f32;
+                self.draw_slot_mark(batch, x, y, &m.shape);
+            }
+        }
+    }
+    /// The mods' marks on the slots of the open inventory screen.
+    pub(super) fn draw_mod_inventory_marks(&mut self, batch: &mut HudBatch, ox: f32, oy: f32) {
+        if !self.mods.mods.uses(Capability::SlotDecorate) {
+            return;
+        }
+        let shown = self.slots();
+        for m in self.mods.mods.slot_marks() {
+            let slot = m.slot as usize;
+            if shown.contains(&slot) {
+                let (sx, sy) = self.slot_position(slot);
+                self.draw_slot_mark(batch, ox + sx, oy + sy, &m.shape);
+            }
+        }
+    }
+    /// The mods' marks on the hotbar row of the creative item tab.
+    pub(super) fn draw_mod_creative_marks(&mut self, batch: &mut HudBatch, ox: f32, oy: f32) {
+        if !self.mods.mods.uses(Capability::SlotDecorate) {
+            return;
+        }
+        for m in self.mods.mods.slot_marks() {
+            if m.slot < 9 {
+                let x = ox + 9.0 + m.slot as f32 * 18.0;
+                self.draw_slot_mark(batch, x, oy + 112.0, &m.shape);
+            }
         }
     }
 }

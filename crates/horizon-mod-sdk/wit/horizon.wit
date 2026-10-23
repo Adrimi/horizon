@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.9;
+package horizon:mods@0.1.10;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -57,6 +57,16 @@ interface game {
     /// The field of view the game drew the last frame with, in degrees, the
     /// vertical one; none outside a world (API 0.1.7).
     get-fov: func() -> option<f32>;
+    /// The world the player is in (API 0.1.10).
+    record session {
+        /// A number that changes with every world loaded and every server
+        /// joined.
+        id: u64,
+        /// The milliseconds since that world was loaded.
+        elapsed-ms: u64,
+    }
+    /// The world the player is in; none outside a world (API 0.1.10).
+    get-session: func() -> option<session>;
 }
 
 /// Capability `chat`: messages only the local player sees.
@@ -200,6 +210,43 @@ interface inventory {
     /// Every item tag the item in hotbar slot 0 to 8 is in (API 0.1.3);
     /// empty for an empty slot, another slot or an unknown item.
     get-tags: func(slot: u8) -> list<string>;
+    /// A stack with everything that tells it apart from another one (API
+    /// 0.1.10).
+    record item-stack {
+        /// `minecraft:iron_pickaxe`, ...
+        id: string,
+        count: u32,
+        /// The durability used; 0 for an item that does not wear out.
+        damage: u32,
+        /// The item's other components (enchantments, a custom name, a
+        /// potion's contents, a trim, a container's items): opaque text, the
+        /// same for stacks that are the same thing, empty for a plain stack.
+        components: string,
+    }
+    /// The player's whole inventory.
+    record player-inventory {
+        /// The 36 slots: the hotbar (0 to 8) and the rest (9 to 35).
+        slots: list<option<item-stack>>,
+        /// The armour: head, chest, legs, feet.
+        armour: list<option<item-stack>>,
+        /// The off hand.
+        offhand: option<item-stack>,
+        /// The stack on the cursor.
+        carried: option<item-stack>,
+    }
+    /// A crafting grid and what it makes.
+    record crafting {
+        /// The grid's cells in row order: 4 for the player's 2x2, 9 for a
+        /// crafting table's 3x3.
+        grid: list<option<item-stack>>,
+        /// What the grid makes; none when it makes nothing.
+        output: option<item-stack>,
+    }
+    /// The player's whole inventory; none outside a world (API 0.1.10).
+    get-inventory: func() -> option<player-inventory>;
+    /// The crafting grid and its result while the player's inventory or a
+    /// crafting table is open; none otherwise (API 0.1.10).
+    get-crafting: func() -> option<crafting>;
     /// Capability `inventory-edit` (API 0.1.5): gives the player `count` of
     /// the item `id`, as the creative inventory does: the stack goes into
     /// the inventory, and what does not fit is dropped. False (and nothing
@@ -1042,6 +1089,54 @@ interface %entity {
     get-face: func(uuid: string) -> option<face>;
 }
 
+/// Capabilities `slots-read` and `slot-decorate`: the game's own slots, the
+/// one under the cursor, and the marks the mod has the game draw on them
+/// (API 0.1.10).
+interface slots {
+    /// What to draw on a slot: 16 by 16 GUI pixels where an item is.
+    variant mark-shape {
+        /// A frame one pixel thick around the slot.
+        frame(frame-mark),
+        /// A square in the slot's top right corner.
+        dot(dot-mark),
+        /// The whole slot filled (a highlight).
+        fill(fill-mark),
+    }
+    record frame-mark {
+        /// 0xAARRGGBB.
+        color: u32,
+    }
+    record dot-mark {
+        /// 0xAARRGGBB.
+        color: u32,
+        /// The side of the square in GUI pixels.
+        size: f32,
+    }
+    record fill-mark {
+        /// 0xAARRGGBB.
+        color: u32,
+    }
+    /// A mark on one of the game's slots.
+    record mark {
+        /// The slot's id: 0 to 8 the hotbar (on the HUD, in the inventory and
+        /// in the creative inventory's item tab), 9 to 35 the rest of the
+        /// inventory, 100 to 108 the crafting grid, 200 the crafting result,
+        /// 300 and up a container's slots, 500 to 503 the armour (head to
+        /// feet), 504 the off hand.
+        slot: u32,
+        shape: mark-shape,
+    }
+    /// `slot-decorate`: the marks the game draws on its slots, in the HUD's
+    /// hotbar and in the open screen with slots; a mark of a slot that is not
+    /// on screen is kept and not drawn. They stay until the mod sets them
+    /// again (an empty list clears them), and go when the mod stops. At most
+    /// 256 marks.
+    set-marks: func(marks: list<mark>);
+    /// `slots-read`: the slot under the cursor in the open screen with slots
+    /// (the inventory, a container); none otherwise.
+    get-hovered-slot: func() -> option<u32>;
+}
+
 /// What the game calls. Only the hooks `init` asks for are ever called.
 interface events {
     record registration {
@@ -1083,6 +1178,7 @@ world horizon-mod {
     import atmosphere;
     import overlay;
     import %entity;
+    import slots;
     import %world;
     export events;
 }

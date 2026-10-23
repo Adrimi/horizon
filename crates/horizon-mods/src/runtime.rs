@@ -20,10 +20,11 @@ mod bindings {
 pub use bindings::horizon::mods::{
     atmosphere::Haze,
     entity::{Entity as WorldEntity, EntityKind, Face},
+    game::Session,
     game::{Clock, FoodStats, Player},
     hud::{BarIcon, Bars},
     hud::{Corner, Line},
-    inventory::{Food, Stack},
+    inventory::{Crafting, Food, ItemStack as InventoryStack, PlayerInventory, Stack},
     items::Item,
     keys::KeyEvent,
     overlay::{HudState, Layer as OverlayLayer, WorldElement},
@@ -37,6 +38,7 @@ pub use bindings::horizon::mods::{
         Modifiers, MouseMove, MousePress, Point, RectShape, Shape as ScreenShape,
         Size as ScreenSize, TextShape, TipLine, WheelTurn,
     },
+    slots::{Mark, MarkShape},
     target::{Block, Entity},
     weather::State as WeatherState,
     world::{Biome, BlockBroken, BlockPos, ChunkSurface, ContainerStack, WorldBlock},
@@ -46,7 +48,7 @@ use bindings::{
     exports::horizon::mods::events::Registration,
     horizon::mods::{
         atmosphere, chat, entity, game, hotbar, hud, inventory, items, keys, log as mod_log,
-        overlay, particles, recipes, screen, settings, storage, target, weather, world,
+        overlay, particles, recipes, screen, settings, slots, storage, target, weather, world,
     },
 };
 
@@ -81,6 +83,7 @@ const STORAGE_DIR: &str = ".horizon-mod-data";
 pub const SCREEN_SHAPES: usize = 4096;
 /// How many elements `paint` takes per call, and how many keys a panel names.
 pub const SCREEN_ELEMENTS: usize = 4096;
+const SLOT_MARKS: usize = 256;
 /// How many images and world elements a mod's overlay holds.
 pub const OVERLAY_TEXTURES: usize = 7;
 const OVERLAY_WORLD_ELEMENTS: usize = 512;
@@ -133,6 +136,11 @@ pub struct Snapshot {
     pub entity_absorption: Option<f32>,
     pub block_face: Option<String>,
     pub container: Option<([i32; 3], Vec<Option<ContainerStack>>)>,
+    /// The whole inventory, the crafting grid and the world's session
+    /// (`inventory-read`, `game-read`; API 0.1.10).
+    pub inventory: Option<PlayerInventory>,
+    pub crafting: Option<Crafting>,
+    pub session: Option<Session>,
     /// The weather over the player (`weather-read`, API 0.1.6).
     pub weather: Option<WeatherState>,
     /// The Particles setting: 0 all, 1 decreased, 2 minimal (`settings-read`).
@@ -218,6 +226,8 @@ pub struct Ui {
     pub fov: Option<f32>,
     /// The screen's size in GUI pixels (`overlay`).
     pub size: Option<ScreenSize>,
+    /// The slot under the cursor in the open screen with slots (`slots`).
+    pub hovered_slot: Option<u32>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -238,6 +248,7 @@ impl Default for Ui {
             seed: None,
             fov: None,
             size: None,
+            hovered_slot: None,
         }
     }
 }
@@ -501,6 +512,10 @@ struct State {
     landings: Vec<Landing>,
     /// The mod's haze (`atmosphere`).
     haze: Option<Haze>,
+    /// The marks the mod has the game draw on its slots (`slots`).
+    slot_marks: Vec<Mark>,
+    /// The manifest declares `slot-decorate`.
+    can_decorate: bool,
     /// What the mod painted in the HUD's layers, at points of the world, and
     /// the images it uploaded for it (`overlay`, API 0.1.7).
     overlay_layers: [Vec<ScreenElement>; 2],
@@ -702,6 +717,8 @@ impl Mods {
             owned_sprites: Vec::new(),
             landings: Vec::new(),
             haze: None,
+            slot_marks: Vec::new(),
+            can_decorate: m.capabilities.contains(&crate::Capability::SlotDecorate),
             overlay_layers: [Vec::new(), Vec::new()],
             overlay_world: Vec::new(),
             overlay_textures: Vec::new(),
@@ -857,6 +874,14 @@ impl Mods {
                 (!d.overlay_textures.is_empty())
                     .then_some((d.id.as_str(), d.overlay_textures.as_slice()))
             })
+            .collect()
+    }
+    /// The marks running mods have the game draw on its slots (API 0.1.10).
+    pub fn slot_marks(&self) -> Vec<&Mark> {
+        self.entries
+            .iter()
+            .filter_map(|e| Some(e.run.as_ref()?.store.data().slot_marks.iter()))
+            .flatten()
             .collect()
     }
     /// The haze of the running mods that set one (API 0.1.6).
@@ -1245,6 +1270,9 @@ impl game::Host for State {
     fn get_fov(&mut self) -> Option<f32> {
         self.ui.fov
     }
+    fn get_session(&mut self) -> Option<Session> {
+        self.snapshot.session
+    }
 }
 impl chat::Host for State {
     fn show(&mut self, text: String) {
@@ -1291,6 +1319,12 @@ impl target::Host for State {
 impl inventory::Host for State {
     fn get_hotbar(&mut self) -> Vec<Option<Stack>> {
         self.snapshot.hotbar.clone()
+    }
+    fn get_inventory(&mut self) -> Option<PlayerInventory> {
+        self.snapshot.inventory.clone()
+    }
+    fn get_crafting(&mut self) -> Option<Crafting> {
+        self.snapshot.crafting.clone()
     }
     fn get_selected(&mut self) -> u32 {
         self.snapshot.selected
@@ -1397,6 +1431,21 @@ impl entity::Host for State {
     }
     fn get_face(&mut self, _uuid: String) -> Option<Face> {
         None
+    }
+}
+impl slots::Host for State {
+    fn set_marks(&mut self, marks: Vec<Mark>) {
+        if !self.can_decorate {
+            return;
+        }
+        self.slot_marks = marks
+            .into_iter()
+            .take(SLOT_MARKS)
+            .filter(|m| m.slot < 1000)
+            .collect();
+    }
+    fn get_hovered_slot(&mut self) -> Option<u32> {
+        self.ui.hovered_slot
     }
 }
 impl weather::Host for State {

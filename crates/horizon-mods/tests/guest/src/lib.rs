@@ -7,7 +7,7 @@
 //! a call.
 use horizon_mod_sdk::{
     Mod, Registration, atmosphere, chat, entity, game, hotbar, hud, inventory, items, keys,
-    overlay, particles, recipes, screen, settings, storage, target, weather, world,
+    overlay, particles, recipes, screen, settings, slots, storage, target, weather, world,
 };
 
 struct Guest {
@@ -50,6 +50,7 @@ impl Mod for Guest {
             "overlayfx",
             "entityfx",
             "lookfx",
+            "slotfx",
             "save",
             "load",
             "save_key",
@@ -488,6 +489,37 @@ impl Mod for Guest {
                     target::get_entity_armor(),
                     target::get_entity_absorption(),
                     elsewhere.is_some(),
+                )))
+            }
+            "slotfx" => {
+                let inv = inventory::get_inventory();
+                let summary = inv.as_ref().map(|i| {
+                    (
+                        i.slots.len(),
+                        i.armour.len(),
+                        i.offhand.is_some(),
+                        i.slots[0].as_ref().map(|s| (s.id.clone(), s.count)),
+                    )
+                });
+                let crafting =
+                    inventory::get_crafting().map(|c| (c.grid.len(), c.output.is_some()));
+                let session = game::get_session().map(|s| s.id);
+                slots::set_marks(&[
+                    slots::Mark {
+                        slot: 0,
+                        shape: slots::MarkShape::Frame(slots::FrameMark { color: 0xFFFF_D058 }),
+                    },
+                    slots::Mark {
+                        slot: 0,
+                        shape: slots::MarkShape::Dot(slots::DotMark {
+                            color: 0xFFFF_F0A8,
+                            size: 3.0,
+                        }),
+                    },
+                ]);
+                Ok(Some(format!(
+                    "slots {summary:?} crafting {crafting:?} session {session:?} hovered {:?}",
+                    slots::get_hovered_slot()
                 )))
             }
             "giveitem" => {
