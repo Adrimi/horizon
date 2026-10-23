@@ -489,9 +489,10 @@ impl Game<'_> {
                     r.config.height as f32,
                 )
             });
-            snapshot.server_view_distance = match self.remote {
-                Some(_) => 0,
-                None => self.settings.render_distance.max(2) as u32,
+            snapshot.server_view_distance = if self.has_singleplayer_server() {
+                self.settings.render_distance.max(2) as u32
+            } else {
+                0
             };
             snapshot.game_mode = Some(self.mode.name().to_owned());
             snapshot.player_tags = self.tags_of(super::commands::Target::Player);
@@ -584,7 +585,7 @@ impl Game<'_> {
             snapshot.entity_details = Some(Arc::new(self.mod_entity_details(&entities)));
             snapshot.faces = Some(Arc::new(self.mod_faces(&entities)));
             snapshot.entities = Some(Arc::new(entities));
-            snapshot.entities_editable = self.remote.is_none();
+            snapshot.entities_editable = self.has_singleplayer_server();
         }
         self.particles.watch_light = light_events;
         if light_events && self.player.is_some() {
@@ -1185,7 +1186,17 @@ impl Game<'_> {
     /// Chat lines, command feedback and stopped mods, into the chat.
     pub(super) fn show_mod_output(&mut self) {
         let mut commands = Vec::new();
+        // What the world asks for goes to the integrated server's thread,
+        // in the order the mods gave it.
+        let mut for_server = Vec::new();
         for output in self.mods.mods.drain() {
+            let output = match self.route_mod_output(output) {
+                Ok(output) => output,
+                Err(forwarded) => {
+                    for_server.extend(forwarded);
+                    continue;
+                }
+            };
             let line = match output {
                 Output::RegisterSound { mod_id, name, path } => {
                     self.audio.add_mod_sound(&mod_id, &name, path);
@@ -1314,6 +1325,47 @@ impl Game<'_> {
         }
         for command in commands {
             self.run_command(&command);
+        }
+        self.post_mod_server_ops(for_server);
+    }
+    /// With the world on a server thread, the outputs that change the world
+    /// or its player are the server's to carry out: they come back as
+    /// `Err` (a command goes to the server as the player's own), the rest
+    /// as `Ok`.
+    fn route_mod_output(&mut self, output: Output) -> Result<Output, Option<Output>> {
+        if self.integrated.is_none() {
+            return Ok(output);
+        }
+        match output {
+            Output::Break { pos, .. } => {
+                self.mod_note_break(pos);
+                Err(Some(output))
+            }
+            Output::FallBlock { .. }
+            | Output::SetBlock { .. }
+            | Output::SpawnItem { .. }
+            | Output::Exhaust { .. }
+            | Output::MergeDrops { .. }
+            | Output::RemoveEntity { .. }
+            | Output::SetXp { .. }
+            | Output::Give { .. }
+            | Output::MoveItem { .. }
+            | Output::DamageHeld { .. } => Err(Some(output)),
+            Output::Command { command } => {
+                self.send_chat(&format!("/{command}"));
+                Err(None)
+            }
+            output => Ok(output),
+        }
+    }
+    /// Hands the server thread what mods asked of the world, to carry out
+    /// between two ticks as the player (`MinecraftServer.execute`).
+    fn post_mod_server_ops(&mut self, ops: Vec<Output>) {
+        if ops.is_empty() {
+            return;
+        }
+        if let Some(server) = self.integrated.as_ref() {
+            server.post(move |game| game.apply_mod_server_ops(ops));
         }
     }
     /// The mods' HUD panels, stacked with the extras in their corners.
@@ -1466,8 +1518,8 @@ impl Game<'_> {
             },
             slots,
             text_widths: Some(widths),
-            can_give: self.creative && self.remote.is_none() && self.player.is_some(),
-            can_move: self.remote.is_none() && self.player.is_some(),
+            can_give: self.creative && self.has_singleplayer_server() && self.player.is_some(),
+            can_move: self.has_singleplayer_server() && self.player.is_some(),
             hud: self.player.is_some().then_some(horizon_mods::HudState {
                 screen_open: self.screen != Screen::Playing,
                 debug: self.debug,
@@ -1493,8 +1545,8 @@ impl Game<'_> {
                     height: f[3],
                 }
             }),
-            seed: (self.remote.is_none() && self.player.is_some())
-                .then_some(self.level.seed as u64),
+            seed: (self.has_singleplayer_server() && self.player.is_some())
+                .then(|| self.world_seed()),
             fov: self.mods.projection.map(|p| p.fov),
             size: Some(horizon_mods::ScreenSize {
                 width: batch.width,
@@ -3564,4 +3616,73 @@ fn translated(e: &ScreenElement, dx: f32, dy: f32) -> Option<ScreenElement> {
         ScreenElement::Tooltip(_) | ScreenElement::Tip(_) => return None,
     };
     Some(e)
+}
+
+/// Mods with the world on an integrated server's thread.
+impl Game<'_> {
+    /// The world's seed: the server thread's, or this game's own.
+    fn world_seed(&self) -> u64 {
+        match self.integrated.as_ref() {
+            Some(server) => server.seed as u64,
+            None => self.level.seed as u64,
+        }
+    }
+    /// On the server thread: what mods asked of the world, carried out as
+    /// the integrated server's player, in the order the mods gave it.
+    pub(super) fn apply_mod_server_ops(&mut self, ops: Vec<Output>) {
+        let Some(owner) = self.serving.as_ref().map(|s| s.owner) else {
+            return;
+        };
+        let conn = self
+            .lan
+            .as_ref()
+            .and_then(|host| host.hub.guests.iter().find(|g| g.uuid == owner))
+            .map(|g| g.conn);
+        let Some(conn) = conn else {
+            return;
+        };
+        self.for_player(super::commands::Target::Guest(conn), |game| {
+            for op in ops {
+                match op {
+                    Output::Break {
+                        pos,
+                        drops,
+                        with_held,
+                    } => game.mod_break(pos, drops, with_held),
+                    Output::FallBlock {
+                        pos,
+                        velocity,
+                        drops,
+                        place,
+                    } => game.mod_fall_block(pos, velocity, drops, place),
+                    Output::SetBlock {
+                        pos,
+                        id,
+                        properties,
+                    } => game.mod_set_block(pos, &id, &properties),
+                    Output::SpawnItem { pos, id, count } => game.mod_spawn_item(pos, &id, count),
+                    Output::MergeDrops { pos } => game.mod_merge_drops(pos),
+                    Output::Exhaust { amount } => {
+                        if let Some(p) = game.player.as_mut() {
+                            p.cause_food_exhaustion(amount);
+                        }
+                    }
+                    Output::RemoveEntity { id } => game.mod_remove_entity(id),
+                    Output::SetXp { id, xp } => {
+                        if let Some(orb) = game.orbs.iter_mut().find(|o| o.id == id) {
+                            orb.value = xp;
+                        }
+                    }
+                    Output::Give { id, count } => game.mod_give(&id, count),
+                    Output::MoveItem { from, to } => game.mod_move_item(from as usize, to as usize),
+                    Output::DamageHeld { amount } => {
+                        if game.player.is_some() {
+                            game.damage_held(amount);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
 }

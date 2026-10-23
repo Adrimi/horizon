@@ -538,6 +538,8 @@ none.
 
 ## Multiplayer
 
+On an integrated server thread (`--server-thread`) mods still run in the window: they read the client's world, and what they change in the world or the player (`world`, `entity`, `game-edit`, `inventory` writes, `world.run-command`) is handed to the server thread and carried out there as the player, in order, a tick or two later.
+
 - **Client mods** (`side = "client"`, all of 0.1) run in the player's game,
   in single player and on any server, vanilla or Horizon. They see only what
   the client already knows (the snapshot), like F3 does, and act only on the

@@ -288,7 +288,7 @@ impl Game<'_> {
             chunks,
             res: self.res.clone(),
             registry: self.pack.assets.registry,
-            local: self.remote.is_none(),
+            local: self.has_singleplayer_server(),
             held,
             tags: Mutex::default(),
             palette,
@@ -371,6 +371,18 @@ impl Game<'_> {
             block,
             by_world,
         });
+    }
+    /// A block a mod asked to break on an integrated server's thread: the
+    /// next tick's `world.broken-blocks` tells of it, as `mod_break` does
+    /// when this game runs the world.
+    pub(super) fn mod_note_break(&mut self, pos: [i32; 3]) {
+        let [x, y, z] = pos;
+        let state = self.world.block(x, y, z);
+        let facts = self.res.facts().get(state);
+        if facts.hardness < 0.0 || AIR.contains(&&*facts.name) {
+            return;
+        }
+        self.mod_block_broken(pos, state, false);
     }
     /// `world.break-block` (`with_held` false) and `break-block-with-held`:
     /// `Level.destroyBlock`, its drops rolled without a tool or with the

@@ -3097,6 +3097,7 @@ impl Game<'_> {
         self.sleep_timer = super::tick_sleep_timer(self.sleep_timer, self.sleeping.is_some());
         // Gui.tick: the titles, the action bar and the held item's name.
         self.tick_hud();
+        self.tick_mods();
         let ghast_collisions = self.happy_ghast_player_collisions();
         let pushed = self.remote_pushes();
         let Some(player) = self.player.as_mut() else {
@@ -3736,6 +3737,7 @@ impl Game<'_> {
     }
     /// MultiPlayerGameMode.destroyBlock: the predicted break.
     fn predict_break(&mut self, pos: [i32; 3], state: BlockStateId, sequence: i32) {
+        self.mod_block_broken(pos, state, true);
         // BlockStatePredictionHandler.retainKnownServerState.
         if let Some(r) = self.remote.as_mut() {
             r.predictions
@@ -4310,6 +4312,10 @@ impl Game<'_> {
             return;
         }
         if let Some(command) = message.strip_prefix('/') {
+            // A mod's command is the mod's, whoever the server is.
+            if self.mod_command(command) {
+                return;
+            }
             self.send(S::ChatCommand(play::ChatCommand {
                 command: command.to_owned(),
             }));

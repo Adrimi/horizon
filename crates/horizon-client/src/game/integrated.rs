@@ -65,6 +65,8 @@ pub(super) struct Integrated {
     tasks: Sender<Task>,
     /// The world's name (`level.dat`'s `LevelName`), for the pause menu.
     pub world_name: String,
+    /// The world's seed, for the mods that read it.
+    pub seed: i64,
 }
 impl Integrated {
     pub fn smoothed_tick_ms(&self) -> f32 {
@@ -98,6 +100,11 @@ impl Integrated {
             }))
             .ok()?;
         rx.recv_timeout(Duration::from_secs(10)).ok()
+    }
+    /// `MinecraftServer.execute`: run `f` on the server thread between two
+    /// ticks, without waiting for it.
+    pub fn post(&self, f: impl FnOnce(&mut Game<'_>) + Send + 'static) {
+        let _ = self.tasks.send(Box::new(f));
     }
     /// `IntegratedServer.halt(true)`: returns once the world is saved and let go.
     pub fn stop(mut self) -> Result<()> {
@@ -144,7 +151,7 @@ pub(super) struct Serving {
     flags: Arc<Flags>,
     tasks: Receiver<Task>,
     /// The window's profile.
-    owner: u128,
+    pub(super) owner: u128,
     /// Open to LAN or closed from inside a player's command, while the hub
     /// is out of its place: applied after the tick.
     pending: Option<Publish>,
@@ -156,7 +163,7 @@ enum Publish {
 
 /// What the server thread hands the window once the world is open: its end
 /// of the connection and the world's name, or why it failed.
-type Ready = std::result::Result<(Pipe, String), String>;
+type Ready = std::result::Result<(Pipe, String, i64), String>;
 
 /// The world to open and the player who owns it.
 struct Launch {
@@ -266,10 +273,12 @@ impl Game<'_> {
             thread: Some(thread),
             tasks,
             world_name: String::new(),
+            seed: 0,
         };
         let pipe = match ready.recv() {
-            Ok(Ok((pipe, world_name))) => {
+            Ok(Ok((pipe, world_name, seed))) => {
                 handle.world_name = world_name;
+                handle.seed = seed;
                 pipe
             }
             Ok(Err(e)) => return Err(e.into()),
@@ -277,6 +286,8 @@ impl Game<'_> {
         };
         self.connect_local(pipe, &player)?;
         self.integrated = Some(handle);
+        // A new world: the mods start a new session.
+        self.new_mod_session();
         Ok(())
     }
 
@@ -360,7 +371,7 @@ impl Game<'_> {
             owner,
             pending: None,
         });
-        let _ = ready.send(Ok((pipe, self.level.name.clone())));
+        let _ = ready.send(Ok((pipe, self.level.name.clone(), self.level.seed)));
         self.settle_spawn()?;
         let mut next = Instant::now();
         while !flags.stop.load(Ordering::Relaxed) {
@@ -707,6 +718,7 @@ mod tests {
             thread: Some(std::thread::spawn(move || wait.recv().unwrap())),
             tasks,
             world_name: String::new(),
+            seed: 0,
         };
         server.request_stop();
         assert!(flags.stop.load(Ordering::Relaxed));
@@ -727,6 +739,7 @@ mod tests {
             })),
             tasks,
             world_name: String::new(),
+            seed: 0,
         };
         assert_eq!(server.stop().unwrap_err().to_string(), "disk write failed");
     }
