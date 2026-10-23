@@ -5,7 +5,9 @@
 use super::mod_scan::{self, Palette};
 use super::{Game, Resources};
 use horizon_client::chunk::Chunk;
-use horizon_mods::{BlockBroken, BlockPos, Capability, ChunkSurface, WorldAccess, WorldBlock};
+use horizon_mods::{
+    BlockBroken, BlockPos, Capability, ChunkSurface, RandomTick, WorldAccess, WorldBlock,
+};
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use std::{
     collections::HashMap,
@@ -246,6 +248,21 @@ impl Game<'_> {
     /// copy them.
     pub(super) fn take_mod_world(&mut self) {
         self.mods.mods.set_world(None);
+    }
+    /// The watched blocks that got a random tick since the last call, as
+    /// `world.random-ticked-blocks` gives them.
+    pub(super) fn mod_ticked(&mut self) -> Vec<RandomTick> {
+        let mut cache = HashMap::new();
+        std::mem::take(&mut self.mods.ticked)
+            .into_iter()
+            .map(|[x, y, z]| {
+                let pos = BlockPos { x, y, z };
+                let state = self.world.block(x, y, z);
+                let block =
+                    world_block(&self.res, self.pack.assets.registry, pos, state, &mut cache);
+                RandomTick { pos, block }
+            })
+            .collect()
     }
     /// Notes a block about to break or just broken (`state` as it was) for
     /// the next tick's `world.broken-blocks`.

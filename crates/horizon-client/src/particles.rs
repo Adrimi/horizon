@@ -508,6 +508,7 @@ pub struct ModParticle {
     pub sway: f32,
     pub sway_period: u32,
     pub spin: f32,
+    pub tumble: f32,
 }
 /// Where a mod's colliding particle landed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -530,6 +531,7 @@ pub struct ModMotion {
     sway: f32,
     sway_period: u32,
     spin: f32,
+    tumble: f32,
     alpha: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1503,6 +1505,7 @@ impl ParticleEngine {
             sway: m.sway,
             sway_period: m.sway_period.max(1),
             spin: m.spin,
+            tumble: m.tumble,
             alpha: m.rgba[3],
         });
         self.pending.push(q);
@@ -4201,11 +4204,21 @@ impl ParticleEngine {
                 p.previous[2] + (p.position[2] - p.previous[2]) * a,
             ) - camera;
             let center = pos.as_vec3();
-            let rotation = if p.roll != 0.0 {
+            let mut rotation = if p.roll != 0.0 {
                 base * Quat::from_rotation_z(p.o_roll + (p.roll - p.o_roll) * partial)
             } else {
                 base
             };
+            // A mod's particle that turns over about a horizontal axis.
+            if let Behaviour::Mod(ModMotion {
+                tumble,
+                flat: false,
+                ..
+            }) = p.behaviour
+                && tumble != 0.0
+            {
+                rotation *= Quat::from_rotation_x(tumble * (p.age as f32 + partial));
+            }
             let size = p.quad_size(partial);
             let mut alpha = p.rgba[3];
             // OverlayParticle.extract: the flash fades as it pulses.

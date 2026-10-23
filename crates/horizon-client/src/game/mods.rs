@@ -38,6 +38,9 @@ pub(super) struct ModsState {
     /// Blocks broken since the last tick, for `world.broken-blocks`
     /// (`mod_world.rs`).
     pub(super) broken: Vec<horizon_mods::BlockBroken>,
+    /// Watched blocks that got a random tick (`animate_tick`), for
+    /// `world.random-ticked-blocks` (API 0.1.12).
+    pub(super) ticked: Vec<[i32; 3]>,
     /// Every item tag by item, built once from the resources for
     /// `inventory.item-tags`/`get-tags` (API 0.1.3) and shared through the
     /// snapshot. Built on first use: the world resources holding the tags
@@ -591,6 +594,7 @@ impl Game<'_> {
             h.max_health = p.attribute("minecraft:max_health").unwrap_or(20.0) as f32;
         }
         snapshot.broken = std::mem::take(&mut self.mods.broken);
+        snapshot.ticked = self.mod_ticked();
         let landed: Vec<horizon_mods::Landing> = std::mem::take(&mut self.particles.mod_landings)
             .into_iter()
             .map(|l| horizon_mods::Landing {
@@ -1651,6 +1655,7 @@ impl Game<'_> {
                 sway: p.sway,
                 sway_period: p.sway_period,
                 spin: p.spin,
+                tumble: p.tumble,
             });
         }
     }

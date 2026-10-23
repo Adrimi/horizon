@@ -42,7 +42,7 @@ pub use bindings::horizon::mods::{
     target::{Block, Entity},
     tooltip::{Content as TooltipContent, Hovered as TooltipHovered},
     weather::State as WeatherState,
-    world::{Biome, BlockBroken, BlockPos, ChunkSurface, ContainerStack, WorldBlock},
+    world::{Biome, BlockBroken, BlockPos, ChunkSurface, ContainerStack, RandomTick, WorldBlock},
 };
 use bindings::{
     HorizonMod,
@@ -125,6 +125,9 @@ pub struct Snapshot {
     pub hotbar_food: Vec<Option<Food>>,
     /// Blocks broken since the previous tick (`world-read`, API 0.1.2).
     pub broken: Vec<BlockBroken>,
+    /// Blocks that got a random tick since the previous tick, in the tags
+    /// some mod watches (`world-read`, API 0.1.12).
+    pub ticked: Vec<RandomTick>,
     /// Every item tag by item, shared rather than copied each tick
     /// (`inventory-read`, API 0.1.3); none unless a mod uses it.
     pub item_tags: Option<Arc<ItemTags>>,
@@ -530,6 +533,8 @@ struct State {
     landings: Vec<Landing>,
     /// The mod's haze (`atmosphere`).
     haze: Option<Haze>,
+    /// The tags `world.watch-random-ticks` listens to.
+    watched_ticks: Vec<String>,
     /// The marks the mod has the game draw on its slots (`slots`).
     slot_marks: Vec<Mark>,
     /// What the mod adds to item tooltips, and its debug lines.
@@ -738,6 +743,7 @@ impl Mods {
             owned_sprites: Vec::new(),
             landings: Vec::new(),
             haze: None,
+            watched_ticks: Vec::new(),
             slot_marks: Vec::new(),
             tooltips: Vec::new(),
             debug_lines: Vec::new(),
@@ -929,6 +935,19 @@ impl Mods {
             .filter_map(|e| Some(e.run.as_ref()?.store.data().slot_marks.iter()))
             .flatten()
             .collect()
+    }
+    /// The tags the running mods watch for random ticks, none when no mod
+    /// does (API 0.1.12).
+    pub fn watched_ticks(&self) -> Vec<String> {
+        let mut tags: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| e.run.as_ref())
+            .flat_map(|r| r.store.data().watched_ticks.iter().cloned())
+            .collect();
+        tags.sort();
+        tags.dedup();
+        tags
     }
     /// The haze of the running mods that set one (API 0.1.6).
     pub fn hazes(&self) -> Vec<Haze> {
@@ -1897,6 +1916,20 @@ impl world::Host for State {
     }
     fn broken_blocks(&mut self) -> Vec<BlockBroken> {
         self.snapshot.broken.clone()
+    }
+    fn random_ticked_blocks(&mut self) -> Vec<RandomTick> {
+        if self.watched_ticks.is_empty() {
+            return Vec::new();
+        }
+        self.snapshot
+            .ticked
+            .iter()
+            .filter(|t| t.block.tags.iter().any(|g| self.watched_ticks.contains(g)))
+            .cloned()
+            .collect()
+    }
+    fn watch_random_ticks(&mut self, tags: Vec<String>) {
+        self.watched_ticks = tags.into_iter().take(16).collect();
     }
     fn break_block(&mut self, pos: BlockPos, drops: bool) -> bool {
         self.queue_break(pos, drops, false)

@@ -304,6 +304,12 @@ pub struct AnimateContext<'a> {
     /// Horizon's falling leaves: times vanilla's leaf chance
     /// (`falling_leaves_multiplier`), 0 when off.
     pub falling_leaves: f32,
+    /// Mods' watched blocks (`world.watch-random-ticks`): whether a state is
+    /// one, and where the watched blocks that got a random tick are noted.
+    pub watch: Option<(
+        &'a dyn Fn(BlockStateId) -> bool,
+        &'a std::cell::RefCell<Vec<[i32; 3]>>,
+    )>,
     /// Creative main-hand marker block and a resolver for each placed state's sprite.
     pub marker: Option<(&'a str, &'a dyn Fn(BlockStateId) -> Option<ParticleOptions>)>,
 }
@@ -459,6 +465,14 @@ fn do_animate_tick(
         return;
     }
     let state = ctx.state(pos);
+    if let Some((watched, ticked)) = ctx.watch
+        && watched(state)
+    {
+        let mut ticked = ticked.borrow_mut();
+        if ticked.len() < 2048 {
+            ticked.push(pos);
+        }
+    }
     block_animate_tick(tables, engine, ctx, state, pos);
     let facts = ctx.facts.get(state);
     if facts.fluid != Fluid::None {

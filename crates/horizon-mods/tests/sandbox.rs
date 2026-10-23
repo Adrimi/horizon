@@ -1253,6 +1253,54 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
 }
 
 #[test]
+fn random_ticks_reach_a_mod_only_for_the_tags_it_watches() {
+    use horizon_mods::{RandomTick, Snapshot};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let log = FakeWorld.block(&BlockPos { x: 0, y: 64, z: 0 }).unwrap();
+    let mut leaves = log.clone();
+    leaves.id = "minecraft:oak_leaves".into();
+    leaves.tags = vec!["minecraft:leaves".into()];
+    leaves.pos = BlockPos { x: 3, y: 70, z: 4 };
+    mods.set_snapshot(Snapshot {
+        ticked: vec![
+            RandomTick {
+                pos: log.pos,
+                block: log,
+            },
+            RandomTick {
+                pos: leaves.pos,
+                block: leaves,
+            },
+        ],
+        ..player()
+    });
+    // Nothing is watched yet: the blocks are not heard.
+    assert!(mods.watched_ticks().is_empty());
+    mods.tick(1);
+    assert!(mods.command("ticks"));
+    assert_eq!(mods.drain(), [feedback("0 heard, last ")]);
+    // Watching a tag lists only its blocks, from the next tick.
+    assert!(mods.command("ticks minecraft:leaves"));
+    mods.drain();
+    assert_eq!(mods.watched_ticks(), ["minecraft:leaves"]);
+    mods.tick(2);
+    assert!(mods.command("ticks"));
+    assert_eq!(
+        mods.drain(),
+        [feedback("1 heard, last minecraft:oak_leaves at 3 70 4")]
+    );
+    // Watching again replaces the earlier tags.
+    assert!(mods.command("ticks minecraft:logs"));
+    mods.drain();
+    mods.tick(3);
+    assert!(mods.command("ticks"));
+    assert_eq!(
+        mods.drain(),
+        [feedback("1 heard, last minecraft:oak_log at 0 64 0")]
+    );
+}
+
+#[test]
 fn the_food_hud_apis_read_the_player_keep_tooltips_and_debug_lines() {
     use horizon_mods::{Food, Health, Snapshot, TooltipHovered, Ui};
     use std::{collections::HashMap, sync::Arc};

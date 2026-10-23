@@ -345,7 +345,18 @@ impl Game<'_> {
                 && (12600..23401).contains(&day_time)
                 && motion_blocking(world, facts, p[0], p[2], p[1] + 64) <= p[1]
         };
+        let watched_ids: std::collections::HashSet<&str> = self
+            .mods
+            .mods
+            .watched_ticks()
+            .iter()
+            .filter_map(|tag| self.res.items().block_tags.get(tag))
+            .flat_map(|blocks| blocks.iter().map(|b| &**b))
+            .collect();
+        let watched = |state| watched_ids.contains(&*facts.get(state).name);
+        let ticked = std::cell::RefCell::new(Vec::new());
         let ctx = AnimateContext {
+            watch: (!watched_ids.is_empty()).then_some((&watched as &dyn Fn(_) -> _, &ticked)),
             raw_brightness: &raw_brightness,
             firefly_sounds: &firefly_sounds,
             world,
@@ -368,6 +379,7 @@ impl Game<'_> {
                 e[2].floor() as i32,
             ];
             animate_tick(self.res.animate(), &mut self.particles, &ctx, block);
+            self.mods.ticked = ticked.take();
             if rain > 0.0 {
                 // ClientLevel.tickWeatherEffects: rain splashes (weather radius 10).
                 let mut random = LegacyRandom::new(self.world.game_time.wrapping_mul(312_987_231));

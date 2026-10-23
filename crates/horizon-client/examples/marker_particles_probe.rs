@@ -77,6 +77,7 @@ fn main() -> Result<()> {
             raw_brightness: &|_| 15,
             firefly_sounds: &|_| false,
             falling_leaves: 0.0,
+            watch: None,
             marker: target.map(|name| (name, &options as &dyn Fn(_) -> _)),
         };
         engine.seed_randoms(1057, 0, 0);

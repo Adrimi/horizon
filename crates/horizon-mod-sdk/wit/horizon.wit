@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.11;
+package horizon:mods@0.1.12;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -660,6 +660,23 @@ interface %world {
     /// The block at `pos`; none where no chunk is loaded (and outside a
     /// world). Air is `minecraft:air`.
     get-block: func(pos: block-pos) -> option<world-block>;
+    /// A block that got a random tick (API 0.1.12).
+    record random-tick {
+        pos: block-pos,
+        /// The block as it is now.
+        block: world-block,
+    }
+    /// The blocks in the watched tags that got a random tick since the
+    /// previous tick, oldest first: the same positions the client's ambient
+    /// effects use (667 within 16 and 32 blocks of the player,
+    /// `ClientLevel.animateTick`), at most 2048 a tick. Empty until
+    /// `watch-random-ticks` is called (API 0.1.12).
+    random-ticked-blocks: func() -> list<random-tick>;
+    /// Watches the blocks of these tags (`minecraft:leaves`): only they are
+    /// reported by `random-ticked-blocks`. Calling it again replaces the
+    /// earlier tags; an empty list stops the listening. Works in `init`
+    /// too (API 0.1.12).
+    watch-random-ticks: func(tags: list<string>);
     /// The blocks broken since the previous tick, oldest first: the
     /// player's and those mods broke. The same list for every mod, read
     /// during `tick`.

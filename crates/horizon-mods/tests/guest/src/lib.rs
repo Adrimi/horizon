@@ -16,6 +16,9 @@ struct Guest {
     screen: u32,
     /// The panel the mod opened, 0 when it has none.
     panel: u32,
+    /// The random ticks heard so far, and the last block's description.
+    heard: u32,
+    last: String,
 }
 
 impl Mod for Guest {
@@ -52,6 +55,7 @@ impl Mod for Guest {
             "lookfx",
             "slotfx",
             "foodfx",
+            "ticks",
             "save",
             "load",
             "save_key",
@@ -66,12 +70,18 @@ impl Mod for Guest {
                 ticks: 0,
                 screen: 0,
                 panel: 0,
+                heard: 0,
+                last: String::new(),
             },
             hooks,
         ))
     }
     fn tick(&mut self, _tick: u64) {
         self.ticks += 1;
+        for t in world::random_ticked_blocks() {
+            self.heard += 1;
+            self.last = format!("{} at {} {} {}", t.block.id, t.pos.x, t.pos.y, t.pos.z);
+        }
     }
     fn command(&mut self, name: &str, args: &str) -> Result<Option<String>, String> {
         match name {
@@ -186,6 +196,15 @@ impl Mod for Guest {
                     world::damage_held(n),
                     world::damage_held(n)
                 )))
+            }
+            "ticks" => {
+                if !args.is_empty() {
+                    world::watch_random_ticks(
+                        &args.split_whitespace().map(str::to_owned).collect::<Vec<_>>(),
+                    );
+                    self.heard = 0;
+                }
+                Ok(Some(format!("{} heard, last {}", self.heard, self.last)))
             }
             "broken" => Ok(Some(
                 world::broken_blocks()
