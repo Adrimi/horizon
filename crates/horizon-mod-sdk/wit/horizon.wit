@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.12;
+package horizon:mods@0.1.13;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -1216,6 +1216,31 @@ interface tooltip {
     set-content: func(item: string, content: option<content>);
 }
 
+/// Capability `lighting`: light sources the mod gives the world, like a
+/// torch in the player's hand (API 0.1.13). Nothing is relit: the game keeps
+/// the sources nearest the camera and the shaders raise the block light of
+/// what they reach, one level less per block of distance, before the
+/// lightmap.
+interface lighting {
+    record light {
+        /// Where the source is, in the world.
+        x: f64,
+        y: f64,
+        z: f64,
+        /// 0 to 15, as block light.
+        level: u8,
+    }
+    /// The mod's light sources; the game keeps them until the mod sets
+    /// another list (an empty one removes its light) and drops them when
+    /// the mod stops. Up to 256 sources; the game draws the 16 nearest
+    /// the camera that can still light something in sight. Call it from
+    /// `frame` or `tick`.
+    set-lights: func(lights: list<light>);
+    /// The light a block gives off (`lightEmission`), 0 to 15; 0 for an
+    /// id that is not a block or an unknown one.
+    get-block-emission: func(id: string) -> u8;
+}
+
 /// Capability `debug`: lines the mod adds to the debug screen (F3) (API
 /// 0.1.11).
 interface debug {
@@ -1268,6 +1293,7 @@ world horizon-mod {
     import slots;
     import tooltip;
     import debug;
+    import lighting;
     import %world;
     export events;
 }

@@ -7,7 +7,7 @@
 //! a call.
 use horizon_mod_sdk::{
     Mod, Registration, atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys,
-    overlay, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
+    lighting, overlay, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
 };
 
 struct Guest {
@@ -56,6 +56,7 @@ impl Mod for Guest {
             "slotfx",
             "foodfx",
             "ticks",
+            "lightfx",
             "save",
             "load",
             "save_key",
@@ -196,6 +197,29 @@ impl Mod for Guest {
                     world::damage_held(n),
                     world::damage_held(n)
                 )))
+            }
+            "lightfx" => {
+                let torch = lighting::get_block_emission("minecraft:torch");
+                let stone = lighting::get_block_emission("minecraft:stone");
+                if args == "off" {
+                    lighting::set_lights(&[]);
+                } else {
+                    lighting::set_lights(&[
+                        lighting::Light {
+                            x: 1.5,
+                            y: 65.0,
+                            z: -2.5,
+                            level: 14,
+                        },
+                        lighting::Light {
+                            x: 0.0,
+                            y: 70.0,
+                            z: 0.0,
+                            level: 40,
+                        },
+                    ]);
+                }
+                Ok(Some(format!("torch {torch} stone {stone}")))
             }
             "ticks" => {
                 if !args.is_empty() {

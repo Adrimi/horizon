@@ -19,6 +19,7 @@ use horizon_mods::{
     Snapshot, Stack, Status, Ui,
 };
 use horizon_mods::{KeyPress, MouseMove, MousePress, WheelTurn};
+use horizon_world::registry::BlockStateId;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -80,6 +81,9 @@ pub(super) struct ModsState {
     tooltip_hovered: std::cell::Cell<Option<(String, [f32; 4])>>,
     /// What eating each food gives and whether it can hurt, built once.
     foods: std::sync::OnceLock<Arc<HashMap<String, (Food, bool)>>>,
+    /// The light of each block that gives any, built on first use
+    /// (`lighting.get-block-emission`, API 0.1.13).
+    emissions: std::sync::OnceLock<Arc<HashMap<String, u8>>>,
     /// The atlas slot of each mod's overlay image, by (mod, image).
     overlay_slots: HashMap<(String, u32), usize>,
     /// The version uploaded to each overlay slot.
@@ -422,6 +426,25 @@ impl Game<'_> {
                 }
                 .to_owned(),
             );
+        }
+        if mods.uses(Capability::Lighting) {
+            snapshot.emissions = Some(Arc::clone(self.mods.emissions.get_or_init(|| {
+                let facts = self.res.facts();
+                let registry = self.pack.assets.registry;
+                let mut emissions = HashMap::new();
+                for i in 0..registry.len() as u32 {
+                    let name = &facts.get(BlockStateId(i)).name;
+                    if emissions.contains_key(&**name) {
+                        continue;
+                    }
+                    let light = registry
+                        .default_state(name)
+                        .map_or(0, |s| facts.get(s).emission.min(15));
+                    emissions.insert(name.to_string(), light);
+                }
+                emissions.retain(|_, light| *light > 0);
+                Arc::new(emissions)
+            })));
         }
         if inventory && self.player.is_some() {
             snapshot.foods = Some(self.mod_foods());
@@ -1958,6 +1981,39 @@ impl Game<'_> {
                     hostile: false,
                     held_item: None,
                     off_hand_item: None,
+                },
+            ));
+        }
+        if !p.spectator {
+            let feet = p.position;
+            let held = |slot: usize| {
+                self.inventory
+                    .get(slot)
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .map(|s| s.item.to_string())
+            };
+            found.push((
+                0.0,
+                WorldEntity {
+                    id: u32::MAX,
+                    type_id: "minecraft:player".into(),
+                    kind: EntityKind::Player,
+                    name: String::new(),
+                    uuid: String::new(),
+                    x: feet.x,
+                    y: feet.y,
+                    z: feet.z,
+                    yaw: self.yaw,
+                    height: p.dimensions.height,
+                    health: 0.0,
+                    max_health: 0.0,
+                    xp: 0,
+                    on_fire: p.fire_ticks > 0,
+                    hostile: false,
+                    held_item: held(self.selected),
+                    off_hand_item: held(super::shield::OFFHAND_SLOT),
                 },
             ));
         }

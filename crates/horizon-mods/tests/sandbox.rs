@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -1250,6 +1250,30 @@ fn the_slots_api_reads_the_inventory_and_keeps_marks() {
     // The marks stay for the game to draw.
     assert_eq!(mods.slot_marks().len(), 2);
     assert_eq!(mods.slot_marks()[0].slot, 0);
+}
+
+#[test]
+fn the_lighting_api_keeps_the_mods_light_sources() {
+    use horizon_mods::Snapshot;
+    use std::{collections::HashMap, sync::Arc};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let mut emissions = HashMap::new();
+    emissions.insert("minecraft:torch".to_owned(), 14);
+    mods.set_snapshot(Snapshot {
+        emissions: Some(Arc::new(emissions)),
+        ..player()
+    });
+    assert!(mods.lights().is_empty());
+    assert!(mods.command("lightfx"));
+    assert_eq!(mods.drain(), [feedback("torch 14 stone 0")]);
+    // The levels are clamped to 15, and the sources stay until replaced.
+    assert_eq!(
+        mods.lights(),
+        [([1.5, 65.0, -2.5], 14), ([0.0, 70.0, 0.0], 15)]
+    );
+    assert!(mods.command("lightfx off"));
+    mods.drain();
+    assert!(mods.lights().is_empty());
 }
 
 #[test]

@@ -28,14 +28,27 @@ impl Game<'_> {
         reach: f64,
     ) -> Vec<[f32; 4]> {
         let mode = self.settings.extras.dynamic_lights;
+        // The mods' sources (`lighting`, API 0.1.13), in the world.
+        let mods: Vec<Source> = self
+            .mods
+            .mods
+            .lights()
+            .into_iter()
+            .map(|([x, y, z], level)| Source {
+                pos: DVec3::new(x, y, z),
+                level,
+            })
+            .collect();
         if mode == dynamic_lights::Mode::Off {
             self.dynamic_light_sources.clear();
-            return Vec::new();
+            return dynamic_lights::pack(&mods, camera, reach);
         }
         if mode.refresh(self.frames) {
             self.dynamic_light_sources = self.dynamic_light_sources(alpha);
         }
-        dynamic_lights::pack(&self.dynamic_light_sources, camera, reach)
+        let mut sources = self.dynamic_light_sources.clone();
+        sources.extend(mods);
+        dynamic_lights::pack(&sources, camera, reach)
     }
 
     fn dynamic_light_sources(&self, alpha: f64) -> Vec<Source> {

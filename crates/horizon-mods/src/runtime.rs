@@ -48,9 +48,9 @@ use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
     horizon::mods::{
-        atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys, log as mod_log,
-        overlay, particles, recipes, screen, settings, slots, storage, target, tooltip, weather,
-        world,
+        atmosphere, chat, debug, entity, game, hotbar, hud, inventory, items, keys, lighting,
+        log as mod_log, overlay, particles, recipes, screen, settings, slots, storage, target,
+        tooltip, weather, world,
     },
 };
 
@@ -125,6 +125,9 @@ pub struct Snapshot {
     pub hotbar_food: Vec<Option<Food>>,
     /// Blocks broken since the previous tick (`world-read`, API 0.1.2).
     pub broken: Vec<BlockBroken>,
+    /// The light each block gives off, by id, for the blocks that give
+    /// any (`lighting`, API 0.1.13).
+    pub emissions: Option<Arc<HashMap<String, u8>>>,
     /// Blocks that got a random tick since the previous tick, in the tags
     /// some mod watches (`world-read`, API 0.1.12).
     pub ticked: Vec<RandomTick>,
@@ -540,6 +543,8 @@ struct State {
     /// What the mod adds to item tooltips, and its debug lines.
     tooltips: Vec<(String, TooltipContent)>,
     debug_lines: Vec<String>,
+    /// The light sources the mod gave the world (API 0.1.13).
+    lights: Vec<lighting::Light>,
     /// The manifest declares `slot-decorate`.
     can_decorate: bool,
     /// What the mod painted in the HUD's layers, at points of the world, and
@@ -747,6 +752,7 @@ impl Mods {
             slot_marks: Vec::new(),
             tooltips: Vec::new(),
             debug_lines: Vec::new(),
+            lights: Vec::new(),
             can_decorate: m.capabilities.contains(&crate::Capability::SlotDecorate),
             overlay_layers: [Vec::new(), Vec::new()],
             overlay_world: Vec::new(),
@@ -914,6 +920,21 @@ impl Mods {
                 let d = e.run.as_ref()?.store.data();
                 let (_, c) = d.tooltips.iter().find(|(i, _)| i == item)?;
                 Some((d.id.as_str(), c))
+            })
+            .collect()
+    }
+    /// The light sources of the running mods: x, y, z and level (API
+    /// 0.1.13).
+    pub fn lights(&self) -> Vec<([f64; 3], u8)> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.run.as_ref())
+            .flat_map(|r| {
+                r.store
+                    .data()
+                    .lights
+                    .iter()
+                    .map(|l| ([l.x, l.y, l.z], l.level))
             })
             .collect()
     }
@@ -1554,6 +1575,26 @@ impl tooltip::Host for State {
             .take(TOOLTIP_ELEMENTS)
             .collect();
         self.tooltips.push((item, content));
+    }
+}
+impl lighting::Host for State {
+    fn set_lights(&mut self, lights: Vec<lighting::Light>) {
+        self.lights = lights
+            .into_iter()
+            .filter(|l| l.x.is_finite() && l.y.is_finite() && l.z.is_finite())
+            .take(256)
+            .map(|mut l| {
+                l.level = l.level.min(15);
+                l
+            })
+            .collect();
+    }
+    fn get_block_emission(&mut self, id: String) -> u8 {
+        self.snapshot
+            .emissions
+            .as_ref()
+            .and_then(|e| e.get(&id).copied())
+            .unwrap_or(0)
     }
 }
 impl debug::Host for State {

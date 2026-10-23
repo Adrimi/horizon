@@ -124,6 +124,8 @@ pub enum Capability {
     Tooltip,
     /// The mod's lines in the debug screen (API 0.1.11).
     Debug,
+    /// Light sources the mod gives the world (API 0.1.13).
+    Lighting,
     /// Marks the game draws on its slots (API 0.1.10): no interface of its
     /// own, `slots.set-marks` does nothing without it.
     SlotDecorate,
@@ -135,7 +137,7 @@ pub enum Capability {
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 26] = [
+    pub const ALL: [Capability; 27] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -161,6 +163,7 @@ impl Capability {
         Capability::SlotDecorate,
         Capability::Tooltip,
         Capability::Debug,
+        Capability::Lighting,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -191,6 +194,7 @@ impl Capability {
             Capability::SlotDecorate => "slots",
             Capability::Tooltip => "tooltip",
             Capability::Debug => "debug",
+            Capability::Lighting => "lighting",
             Capability::Registries => "registries",
         }
     }
@@ -222,6 +226,7 @@ impl Capability {
             Capability::SlotDecorate => "draw marks on your slots",
             Capability::Tooltip => "add to the tooltips of items",
             Capability::Debug => "add lines to the debug screen",
+            Capability::Lighting => "add light to the world",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -282,6 +287,7 @@ impl fmt::Display for Capability {
             Capability::SlotDecorate => "slot-decorate",
             Capability::Tooltip => "tooltip",
             Capability::Debug => "debug",
+            Capability::Lighting => "lighting",
             Capability::Registries => "registries",
         };
         f.write_str(name)
