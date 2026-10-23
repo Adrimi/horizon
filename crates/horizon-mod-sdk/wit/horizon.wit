@@ -401,10 +401,10 @@ interface screen {
         /// 1.0 is the game's size; the text grows from (x, y).
         scale: f32,
     }
-    /// A sprite of the GUI atlas by name (`hud/heart/full`,
-    /// `container/slot`, ...: the names of the game's GUI sprites without
-    /// the folder `gui/sprites/` and the `.png`), stretched into the
-    /// rectangle. An unknown name draws nothing.
+    /// A sprite of the game's atlas by name: the texture's path under
+    /// `assets/minecraft/textures/` without `.png` (`gui/sprites/hud/heart/full`,
+    /// `gui/sprites/container/slot`, `item/apple`, ...). It is stretched
+    /// into the rectangle (no nine-slice). An unknown name draws nothing.
     record sprite-element {
         x: f32,
         y: f32,

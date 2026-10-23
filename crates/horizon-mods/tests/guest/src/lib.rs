@@ -348,7 +348,7 @@ impl Mod for Guest {
                             y: 30.0,
                             width: 9.0,
                             height: 9.0,
-                            name: "hud/heart/full".into(),
+                            name: "gui/sprites/hud/heart/full".into(),
                             tint: 0xFFFF_FFFF,
                         }),
                         screen::Element::Item(screen::ItemElement {
