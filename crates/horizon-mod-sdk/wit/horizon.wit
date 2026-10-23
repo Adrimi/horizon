@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.7;
+package horizon:mods@0.1.8;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -940,6 +940,82 @@ interface overlay {
     get-hud-state: func() -> option<hud-state>;
 }
 
+/// Capability `entity-read`: the entities around the player (API 0.1.8). With
+/// capability `entity-edit` as well, removing entities and changing what an
+/// experience orb is worth, in a world this game runs (single player, or one
+/// it opened to LAN); in another's world the edits do nothing and return
+/// false. What the game keeps of the other world's entities is what the
+/// server told it.
+interface %entity {
+    /// What an entity is.
+    enum entity-kind {
+        /// A mob (a zombie, a cow, a villager, an armour stand).
+        mob,
+        /// An item lying in the world.
+        item,
+        /// A player other than the local one.
+        player,
+        /// Everything else: an experience orb, an arrow, a boat.
+        other,
+    }
+    /// One entity.
+    record entity {
+        /// Its id in the world, as of the last tick.
+        id: u32,
+        /// `minecraft:zombie`, `minecraft:item`, `minecraft:experience_orb`, ...
+        type-id: string,
+        kind: entity-kind,
+        /// Its name in the game's language (its custom name when it has one);
+        /// an item's is the item's.
+        name: string,
+        /// A player's UUID; empty for the others.
+        uuid: string,
+        /// Where it is, as of the last tick, in blocks.
+        x: f64,
+        y: f64,
+        z: f64,
+        /// Where it faces, in degrees.
+        yaw: f32,
+        /// Its height in blocks.
+        height: f32,
+        /// Its health when it has one; 0 for an entity without.
+        health: f32,
+        max-health: f32,
+        /// What an experience orb is worth; 0 for every other entity.
+        xp: u32,
+        /// It is burning.
+        on-fire: bool,
+        /// A mob that attacks the player (the game's monster category).
+        hostile: bool,
+        /// What it holds in its main hand and its off hand; an item's own
+        /// item in `held-item`.
+        held-item: option<string>,
+        off-hand-item: option<string>,
+    }
+    /// A player's face as an image.
+    record face {
+        width: u32,
+        height: u32,
+        /// `width * height * 4` bytes, RGBA.
+        rgba: list<u8>,
+    }
+    /// The entities of the kind (`minecraft:experience_orb`, ...) within
+    /// `radius` blocks of the player (at most 512 blocks); every kind when
+    /// `type-id` is empty. The nearest first, at most 1024. Empty outside a
+    /// world.
+    nearby: func(type-id: string, radius: f64) -> list<entity>;
+    /// `entity-edit`: removes the entity with that id; false when there is
+    /// no such entity or the world is not this game's.
+    remove: func(id: u32) -> bool;
+    /// `entity-edit`: sets what an experience orb is worth; false for
+    /// another entity or a world this game does not run.
+    set-xp: func(id: u32, xp: u32) -> bool;
+    /// The face of the player with that UUID (the 8 by 8 face and hat of
+    /// the skin); none when the game has no skin of theirs. None for now
+    /// for every UUID: the skins are not given to mods yet.
+    get-face: func(uuid: string) -> option<face>;
+}
+
 /// What the game calls. Only the hooks `init` asks for are ever called.
 interface events {
     record registration {
@@ -980,6 +1056,7 @@ world horizon-mod {
     import particles;
     import atmosphere;
     import overlay;
+    import %entity;
     import %world;
     export events;
 }

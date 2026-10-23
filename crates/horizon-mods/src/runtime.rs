@@ -19,6 +19,7 @@ mod bindings {
 }
 pub use bindings::horizon::mods::{
     atmosphere::Haze,
+    entity::{Entity as WorldEntity, EntityKind, Face},
     game::{Clock, FoodStats, Player},
     hud::{BarIcon, Bars},
     hud::{Corner, Line},
@@ -44,8 +45,8 @@ use bindings::{
     HorizonMod,
     exports::horizon::mods::events::Registration,
     horizon::mods::{
-        atmosphere, chat, game, hotbar, hud, inventory, items, keys, log as mod_log, overlay,
-        particles, recipes, screen, settings, storage, target, weather, world,
+        atmosphere, chat, entity, game, hotbar, hud, inventory, items, keys, log as mod_log,
+        overlay, particles, recipes, screen, settings, storage, target, weather, world,
     },
 };
 
@@ -129,6 +130,11 @@ pub struct Snapshot {
     pub weather: Option<WeatherState>,
     /// The Particles setting: 0 all, 1 decreased, 2 minimal (`settings-read`).
     pub particles_setting: u32,
+    /// The entities around the player as of this tick, nearest first
+    /// (`entity-read`, API 0.1.8); none unless a mod uses it.
+    pub entities: Option<Arc<Vec<WorldEntity>>>,
+    /// The world is this game's own: entity edits are allowed.
+    pub entities_editable: bool,
 }
 
 /// A picture a mod defined for its particles (`particles.define-sprite`).
@@ -397,6 +403,10 @@ pub enum Output {
     },
     /// `world.damage-held`: wear the main hand's item by `amount` uses.
     DamageHeld { amount: u32 },
+    /// `entity.remove` (API 0.1.8): remove the entity with this id.
+    RemoveEntity { id: u32 },
+    /// `entity.set-xp` (API 0.1.8): what an experience orb is worth.
+    SetXp { id: u32, xp: u32 },
     /// `inventory.give` (API 0.1.5): put `count` of the item in the
     /// player's inventory, dropping what does not fit.
     Give { id: String, count: u32 },
@@ -471,6 +481,8 @@ struct State {
     ui: Arc<Ui>,
     /// The manifest declares `inventory-edit`.
     can_give: bool,
+    /// The manifest declares `entity-edit`.
+    can_edit_entities: bool,
     /// Particle pictures defined and particles spawned since the game last
     /// took them (`particles`, API 0.1.6).
     new_sprites: Vec<SpriteDef>,
@@ -675,6 +687,7 @@ impl Mods {
             overlay: None,
             ui,
             can_give: m.capabilities.contains(&crate::Capability::InventoryEdit),
+            can_edit_entities: m.capabilities.contains(&crate::Capability::EntityEdit),
             given: 0,
             new_sprites: Vec::new(),
             new_particles: Vec::new(),
@@ -1310,6 +1323,64 @@ impl State {
             self.out.push(Output::Give { id, count });
         }
         ok
+    }
+}
+impl entity::Host for State {
+    fn nearby(&mut self, type_id: String, radius: f64) -> Vec<WorldEntity> {
+        let (Some(entities), Some(player)) = (
+            self.snapshot.entities.as_ref(),
+            self.snapshot.player.as_ref(),
+        ) else {
+            return Vec::new();
+        };
+        let radius = if radius.is_finite() {
+            radius.clamp(0.0, 512.0)
+        } else {
+            0.0
+        };
+        let limit = radius * radius;
+        entities
+            .iter()
+            .filter(|e| type_id.is_empty() || e.type_id == type_id)
+            .filter(|e| {
+                let (dx, dy, dz) = (e.x - player.x, e.y - player.y, e.z - player.z);
+                dx * dx + dy * dy + dz * dz <= limit
+            })
+            .take(1024)
+            .cloned()
+            .collect()
+    }
+    fn remove(&mut self, id: u32) -> bool {
+        let ok = self.can_edit_entities
+            && self.snapshot.entities_editable
+            && self
+                .snapshot
+                .entities
+                .as_ref()
+                .is_some_and(|e| e.iter().any(|e| e.id == id))
+            && !self
+                .out
+                .iter()
+                .any(|o| matches!(o, Output::RemoveEntity { id: i } if *i == id));
+        if ok {
+            self.out.push(Output::RemoveEntity { id });
+        }
+        ok
+    }
+    fn set_xp(&mut self, id: u32, xp: u32) -> bool {
+        let ok = self.can_edit_entities
+            && self.snapshot.entities_editable
+            && self.snapshot.entities.as_ref().is_some_and(|e| {
+                e.iter()
+                    .any(|e| e.id == id && e.type_id == "minecraft:experience_orb")
+            });
+        if ok {
+            self.out.push(Output::SetXp { id, xp });
+        }
+        ok
+    }
+    fn get_face(&mut self, _uuid: String) -> Option<Face> {
+        None
     }
 }
 impl weather::Host for State {

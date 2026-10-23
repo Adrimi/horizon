@@ -99,6 +99,7 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | `atmosphere` (0.1.6) | `atmosphere` | `set-haze(option<haze>)`: closes the fog in and tints it |
 | `world` (0.1.6) | `world-read` | `get-biome(pos)` (temperature, precipitation, downfall, foliage/grass/water colours), `get-surface(pos, start-y)`, `is-solid(pos)` |
 | `overlay` (0.1.7) | `overlay` | `paint(layer, elements)` / `clear(layer)`: the `screen.paint` elements in the HUD (`under-bars` before the status bars, `over-bars` after), no mouse or keyboard taken; `paint-world(elements)`: labels, sprites and rectangles at points of the world, projected with the last frame's camera; `get-size()`, `get-text-width(text)`, `upload-texture(id, w, h, rgba)` (7 images), `get-hud-state()` |
+| `entity` (0.1.8) | `entity-read`, `entity-edit` | `nearby(type-id, radius)`: mobs, items on the ground and experience orbs around the player (id, type, kind, name, position, yaw, height, health, xp, on-fire, hostile, held items), nearest first; `remove(id)`, `set-xp(id, xp)` with `entity-edit`; `get-face(uuid)` (none for now) |
 | `hud.get-bars()` (0.1.7) | `hud` | the containers of the hunger icons and hearts as the game drew them (after the shaking) |
 | `game` (0.1.7) | `game-read` | `get-seed()`, `get-fov()`; `world.get-chunk-columns(cx, cz, y)`: the chunk surface scanned down from `y` (a cave map) |
 

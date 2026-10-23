@@ -16,7 +16,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit"]
 "#;
 
 /// Builds both mods once and writes their `.hmod` files; returns the folder.
@@ -1101,4 +1101,69 @@ fn the_overlay_api_paints_layers_and_the_world_and_reads_the_hud() {
     let textures = mods.overlay_textures();
     assert_eq!(textures[0].1.len(), 1);
     assert_eq!(textures[0].1[0].width, 2);
+}
+
+#[test]
+fn the_entity_api_lists_nearby_entities_and_queues_edits() {
+    use horizon_mods::{EntityKind, Snapshot, WorldEntity};
+    use std::sync::Arc;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    let entity = |id: u32, type_id: &str, x: f64, kind: EntityKind| WorldEntity {
+        id,
+        type_id: type_id.into(),
+        kind,
+        name: type_id.into(),
+        uuid: String::new(),
+        x,
+        y: 64.0,
+        z: -3.25,
+        yaw: 0.0,
+        height: 1.0,
+        health: 20.0,
+        max_health: 20.0,
+        xp: 0,
+        on_fire: false,
+        hostile: id == 1,
+        held_item: None,
+        off_hand_item: None,
+    };
+    // The player is at (12.5, 64, -3.25).
+    mods.set_snapshot(Snapshot {
+        entities: Some(Arc::new(vec![
+            entity(1, "minecraft:zombie", 13.5, EntityKind::Mob),
+            entity(2, "minecraft:experience_orb", 14.5, EntityKind::Other),
+            entity(3, "minecraft:cow", 200.0, EntityKind::Mob),
+        ])),
+        entities_editable: true,
+        ..player()
+    });
+    assert!(mods.command("entityfx"));
+    let out = mods.drain();
+    assert_eq!(
+        out,
+        [
+            Output::RemoveEntity { id: 1 },
+            Output::SetXp { id: 2, xp: 9 },
+            feedback(
+                "entities 2 orbs 1 first Some((1, \"minecraft:zombie\", true)) removed true again false xp true wrong false face false"
+            ),
+        ]
+    );
+    // Another's world: nothing is edited.
+    mods.set_snapshot(Snapshot {
+        entities: Some(Arc::new(vec![entity(
+            1,
+            "minecraft:zombie",
+            13.5,
+            EntityKind::Mob,
+        )])),
+        entities_editable: false,
+        ..player()
+    });
+    assert!(mods.command("entityfx"));
+    let out = mods.drain();
+    assert!(
+        matches!(&out[0], Output::Feedback { text, .. } if text.contains("removed false")),
+        "{out:?}"
+    );
 }

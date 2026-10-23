@@ -36,7 +36,7 @@ wit_bindgen::generate!({
 
 pub use exports::horizon::mods::events::{Guest as __Guest, Registration};
 pub use horizon::mods::{
-    atmosphere, chat, game, hotbar, hud, inventory, items, keys, log, overlay, particles, recipes, screen,
+    atmosphere, chat, entity, game, hotbar, hud, inventory, items, keys, log, overlay, particles, recipes, screen,
     settings, storage, target, weather, world,
 };
 

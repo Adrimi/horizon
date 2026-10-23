@@ -6,8 +6,8 @@
 //! `tick` and `frame` do nothing, to measure the cost of
 //! a call.
 use horizon_mod_sdk::{
-    Mod, Registration, atmosphere, chat, game, hotbar, hud, inventory, items, keys, overlay,
-    particles, recipes, screen, settings, storage, target, weather, world,
+    Mod, Registration, atmosphere, chat, entity, game, hotbar, hud, inventory, items, keys,
+    overlay, particles, recipes, screen, settings, storage, target, weather, world,
 };
 
 struct Guest {
@@ -48,6 +48,7 @@ impl Mod for Guest {
             "giveitem",
             "weatherfx",
             "overlayfx",
+            "entityfx",
             "save",
             "load",
             "save_key",
@@ -449,6 +450,21 @@ impl Mod for Guest {
                     game::get_seed(),
                     game::get_fov(),
                     overlay::get_text_width("ab"),
+                )))
+            }
+            "entityfx" => {
+                let all = entity::nearby("", 10.0);
+                let orbs = entity::nearby("minecraft:experience_orb", 10.0);
+                let first = all.first().map(|e| (e.id, e.name.clone(), e.hostile));
+                let removed = entity::remove(1);
+                let again = entity::remove(1);
+                let xp = entity::set_xp(2, 9);
+                let wrong = entity::set_xp(1, 9);
+                Ok(Some(format!(
+                    "entities {} orbs {} first {first:?} removed {removed} again {again} xp {xp} wrong {wrong} face {}",
+                    all.len(),
+                    orbs.len(),
+                    entity::get_face("x").is_some(),
                 )))
             }
             "giveitem" => {

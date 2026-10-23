@@ -379,6 +379,10 @@ impl Game<'_> {
         if mods.uses(Capability::RecipesRead) {
             snapshot.recipes = self.mod_recipes();
         }
+        if mods.uses(Capability::EntityRead) && self.player.is_some() {
+            snapshot.entities = Some(Arc::new(self.mod_entities()));
+            snapshot.entities_editable = self.remote.is_none();
+        }
         if snapshot.player.is_none() {
             return snapshot;
         }
@@ -835,6 +839,16 @@ impl Game<'_> {
                     with_held,
                 } => {
                     self.mod_break(pos, drops, with_held);
+                    continue;
+                }
+                Output::RemoveEntity { id } => {
+                    self.mod_remove_entity(id);
+                    continue;
+                }
+                Output::SetXp { id, xp } => {
+                    if let Some(orb) = self.orbs.iter_mut().find(|o| o.id == id) {
+                        orb.value = xp;
+                    }
                     continue;
                 }
                 Output::Give { id, count } => {
@@ -1730,6 +1744,130 @@ impl Game<'_> {
                         argb(f.color),
                     );
                 }
+            }
+        }
+    }
+}
+
+/// The entities of the world for mods (API 0.1.8).
+impl Game<'_> {
+    /// Mobs, items on the ground and experience orbs within 512 blocks of
+    /// the player, nearest first, as of this tick.
+    fn mod_entities(&self) -> Vec<horizon_mods::WorldEntity> {
+        use horizon_mods::{EntityKind, WorldEntity};
+        let Some(p) = self.player.as_ref() else {
+            return Vec::new();
+        };
+        let origin = p.position;
+        let dist2 = |v: horizon_core::geometry::Vec3| {
+            let (dx, dy, dz) = (v.x - origin.x, v.y - origin.y, v.z - origin.z);
+            dx * dx + dy * dy + dz * dz
+        };
+        let near = |v: horizon_core::geometry::Vec3| dist2(v) <= 512.0 * 512.0;
+        let mut found: Vec<(f64, WorldEntity)> = Vec::new();
+        for m in &self.mobs {
+            if !near(m.position) {
+                continue;
+            }
+            let name = m.custom_name.clone().unwrap_or_else(|| {
+                let key = format!("entity.{}", m.kind.id.replace(':', "."));
+                horizon_client::lang::get_or(&key, &m.kind.id)
+            });
+            found.push((
+                dist2(m.position),
+                WorldEntity {
+                    id: m.id,
+                    type_id: m.kind.id.clone(),
+                    kind: EntityKind::Mob,
+                    name,
+                    uuid: String::new(),
+                    x: m.position.x,
+                    y: m.position.y,
+                    z: m.position.z,
+                    yaw: m.yaw,
+                    height: m.kind.height as f32,
+                    health: m.health,
+                    max_health: m.attrs.max_health,
+                    xp: 0,
+                    on_fire: m.fire_ticks > 0,
+                    hostile: m.hostile(),
+                    held_item: m.extra.main_hand.as_ref().map(|s| s.to_string()),
+                    off_hand_item: m.extra.off_hand.as_ref().map(|s| s.to_string()),
+                },
+            ));
+        }
+        for i in &self.dropped {
+            if !near(i.position) {
+                continue;
+            }
+            let item = i.stack.item.to_string();
+            found.push((
+                dist2(i.position),
+                WorldEntity {
+                    id: i.id,
+                    type_id: "minecraft:item".into(),
+                    kind: EntityKind::Item,
+                    name: self.pack.names.item(&item),
+                    uuid: String::new(),
+                    x: i.position.x,
+                    y: i.position.y,
+                    z: i.position.z,
+                    yaw: 0.0,
+                    height: 0.25,
+                    health: 0.0,
+                    max_health: 0.0,
+                    xp: 0,
+                    on_fire: i.fire_ticks > 0,
+                    hostile: false,
+                    held_item: Some(item),
+                    off_hand_item: None,
+                },
+            ));
+        }
+        for o in &self.orbs {
+            if !near(o.position) {
+                continue;
+            }
+            found.push((
+                dist2(o.position),
+                WorldEntity {
+                    id: o.id,
+                    type_id: "minecraft:experience_orb".into(),
+                    kind: EntityKind::Other,
+                    name: horizon_client::lang::get_or(
+                        "entity.minecraft.experience_orb",
+                        "Experience Orb",
+                    ),
+                    uuid: String::new(),
+                    x: o.position.x,
+                    y: o.position.y,
+                    z: o.position.z,
+                    yaw: 0.0,
+                    height: 0.5,
+                    health: 0.0,
+                    max_health: 0.0,
+                    xp: o.value,
+                    on_fire: false,
+                    hostile: false,
+                    held_item: None,
+                    off_hand_item: None,
+                },
+            ));
+        }
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.truncate(1024);
+        found.into_iter().map(|(_, e)| e).collect()
+    }
+    /// `entity.remove`: a mob goes at once, an item too, an orb expires.
+    fn mod_remove_entity(&mut self, id: u32) {
+        if self.remote.is_some() {
+            return;
+        }
+        self.mobs.retain(|m| m.id != id);
+        self.dropped.retain(|i| i.id != id);
+        for o in &mut self.orbs {
+            if o.id == id {
+                o.age = u32::MAX / 2;
             }
         }
     }

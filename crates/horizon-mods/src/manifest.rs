@@ -116,12 +116,17 @@ pub enum Capability {
     Atmosphere,
     /// The mod's graphics over the world, in the HUD (API 0.1.7).
     Overlay,
+    /// The entities around the player (API 0.1.8).
+    EntityRead,
+    /// Removing entities and changing experience orbs (API 0.1.8): no
+    /// interface of its own, `entity`'s edits do nothing without it.
+    EntityEdit,
     /// New blocks and items from the mod's `data/` (API 0.2): no WIT
     /// interface, the game reads them before the world loads.
     Registries,
 }
 impl Capability {
-    pub const ALL: [Capability; 20] = [
+    pub const ALL: [Capability; 22] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -141,6 +146,8 @@ impl Capability {
         Capability::Particles,
         Capability::Atmosphere,
         Capability::Overlay,
+        Capability::EntityRead,
+        Capability::EntityEdit,
         Capability::Registries,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
@@ -165,6 +172,8 @@ impl Capability {
             Capability::Particles => "particles",
             Capability::Atmosphere => "atmosphere",
             Capability::Overlay => "overlay",
+            Capability::EntityRead => "entity",
+            Capability::EntityEdit => "entity",
             Capability::Registries => "registries",
         }
     }
@@ -190,6 +199,8 @@ impl Capability {
             Capability::Particles => "add particles of its own",
             Capability::Atmosphere => "change the haze in the fog",
             Capability::Overlay => "draw over the world on your HUD",
+            Capability::EntityRead => "see the mobs, items and players around you",
+            Capability::EntityEdit => "remove entities and change experience orbs",
             Capability::Registries => "add blocks and items to your worlds",
         }
     }
@@ -210,7 +221,10 @@ impl Capability {
             .filter(|c| {
                 !matches!(
                     c,
-                    Capability::Registries | Capability::WorldEdit | Capability::InventoryEdit
+                    Capability::Registries
+                        | Capability::WorldEdit
+                        | Capability::InventoryEdit
+                        | Capability::EntityEdit
                 )
             })
             .find(|c| c.interface() == interface)
@@ -240,6 +254,8 @@ impl fmt::Display for Capability {
             Capability::Particles => "particles",
             Capability::Atmosphere => "atmosphere",
             Capability::Overlay => "overlay",
+            Capability::EntityRead => "entity-read",
+            Capability::EntityEdit => "entity-edit",
             Capability::Registries => "registries",
         };
         f.write_str(name)
