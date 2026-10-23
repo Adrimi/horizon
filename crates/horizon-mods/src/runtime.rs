@@ -39,7 +39,7 @@ pub use bindings::horizon::mods::{
     },
     target::{Block, Entity},
     weather::State as WeatherState,
-    world::{Biome, BlockBroken, BlockPos, ChunkSurface, WorldBlock},
+    world::{Biome, BlockBroken, BlockPos, ChunkSurface, ContainerStack, WorldBlock},
 };
 use bindings::{
     HorizonMod,
@@ -126,6 +126,13 @@ pub struct Snapshot {
     pub items: Option<Arc<Vec<Item>>>,
     /// Every recipe of the game (`recipes-read`, API 0.1.5); built once.
     pub recipes: Option<Arc<Vec<Recipe>>>,
+    /// The looked-at mob's armour and absorption, the face of the looked-at
+    /// block, and the contents of the container looked at or broken
+    /// (`target`, `world`; API 0.1.9).
+    pub entity_armor: Option<f32>,
+    pub entity_absorption: Option<f32>,
+    pub block_face: Option<String>,
+    pub container: Option<([i32; 3], Vec<Option<ContainerStack>>)>,
     /// The weather over the player (`weather-read`, API 0.1.6).
     pub weather: Option<WeatherState>,
     /// The Particles setting: 0 all, 1 decreased, 2 minimal (`settings-read`).
@@ -1271,6 +1278,15 @@ impl target::Host for State {
     fn get_entity(&mut self) -> Option<Entity> {
         self.snapshot.entity.clone()
     }
+    fn get_entity_armor(&mut self) -> Option<f32> {
+        self.snapshot.entity_armor
+    }
+    fn get_entity_absorption(&mut self) -> Option<f32> {
+        self.snapshot.entity_absorption
+    }
+    fn get_block_face(&mut self) -> Option<String> {
+        self.snapshot.block_face.clone()
+    }
 }
 impl inventory::Host for State {
     fn get_hotbar(&mut self) -> Vec<Option<Stack>> {
@@ -1763,6 +1779,10 @@ impl world::Host for State {
         self.world
             .as_ref()
             .map_or_else(Vec::new, |w| w.map_colors())
+    }
+    fn get_container(&mut self, pos: BlockPos) -> Option<Vec<Option<ContainerStack>>> {
+        let (at, stacks) = self.snapshot.container.as_ref()?;
+        (*at == [pos.x, pos.y, pos.z]).then(|| stacks.clone())
     }
     fn get_chunk_columns(&mut self, cx: i32, cz: i32, y: i32) -> Option<ChunkSurface> {
         self.world.as_ref()?.chunk_columns(cx, cz, y)

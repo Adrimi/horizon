@@ -1167,3 +1167,42 @@ fn the_entity_api_lists_nearby_entities_and_queues_edits() {
         "{out:?}"
     );
 }
+
+#[test]
+fn the_look_apis_give_the_face_the_armour_and_the_container() {
+    use horizon_mods::{Block, ContainerStack, Snapshot};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    mods.set_snapshot(Snapshot {
+        block: Some(Block {
+            x: 3,
+            y: 64,
+            z: 4,
+            id: "minecraft:chest".into(),
+            hardness: 2.5,
+            requires_tool: false,
+            tags: Vec::new(),
+        }),
+        block_face: Some("up".into()),
+        entity_armor: Some(2.0),
+        entity_absorption: Some(0.0),
+        container: Some((
+            [3, 64, 4],
+            vec![
+                Some(ContainerStack {
+                    id: "minecraft:stone".into(),
+                    count: 12,
+                    damage: 0,
+                }),
+                None,
+            ],
+        )),
+        ..player()
+    });
+    assert!(mods.command("lookfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "look face Some(\"up\") armor Some(2.0) absorption Some(0.0) contents Some([\"minecraft:stonex12\"]) elsewhere false"
+        )]
+    );
+}

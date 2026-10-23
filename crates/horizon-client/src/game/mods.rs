@@ -389,9 +389,25 @@ impl Game<'_> {
         if !target && !inventory {
             return snapshot;
         }
-        let looked = self.pick().map(|hit| hit.pos);
+        let hit = self.pick();
+        let looked = hit.as_ref().map(|hit| hit.pos);
         let breaking = self.mining.as_ref().map(|m| m.pos);
         if target {
+            snapshot.block_face = hit.as_ref().map(|hit| {
+                match hit.face {
+                    [0, -1, 0] => "down",
+                    [0, 1, 0] => "up",
+                    [0, 0, -1] => "north",
+                    [0, 0, 1] => "south",
+                    [-1, 0, 0] => "west",
+                    _ => "east",
+                }
+                .to_owned()
+            });
+            snapshot.container = looked.or(breaking).and_then(|pos| {
+                let stacks = self.mod_container(pos)?;
+                Some((pos, stacks))
+            });
             snapshot.block = looked.map(|pos| self.mod_block(pos));
             snapshot.breaking = breaking.map(|pos| self.mod_block(pos));
             snapshot.breaking_progress = self.mining.as_ref().map(|m| m.progress.min(1.0));
@@ -399,6 +415,12 @@ impl Game<'_> {
                 horizon_client::lang::get_or(&format!("block.{}", b.id.replace(':', ".")), &b.id)
             });
             snapshot.entity = self.mod_entity();
+            if let Some(e) = &snapshot.entity
+                && let Some(m) = self.mobs.iter().find(|m| m.id == e.id)
+            {
+                snapshot.entity_armor = Some(m.kind.armor);
+                snapshot.entity_absorption = Some(0.0);
+            }
         }
         if inventory {
             // The block a tool would be used on: the one being broken, else
@@ -1869,6 +1891,28 @@ impl Game<'_> {
             if o.id == id {
                 o.age = u32::MAX / 2;
             }
+        }
+    }
+}
+
+impl Game<'_> {
+    /// The slots of the container at `pos`, for `world.get-container`
+    /// (API 0.1.9); none for a block that is not one.
+    fn mod_container(&self, pos: [i32; 3]) -> Option<Vec<Option<horizon_mods::ContainerStack>>> {
+        use horizon_client::containers::BlockEntity;
+        let stack = |s: &Option<horizon_client::items::ItemStack>| {
+            s.as_ref().map(|s| horizon_mods::ContainerStack {
+                id: s.item.to_string(),
+                count: s.count,
+                damage: s.damage,
+            })
+        };
+        let entity = self.world.block_entities.get(&(pos[0], pos[1], pos[2]))?;
+        match entity {
+            BlockEntity::Chest(items) => Some(items.iter().map(stack).collect()),
+            BlockEntity::Furnace(f) => Some(f.items.iter().map(stack).collect()),
+            BlockEntity::Crafter(c) => Some(c.items.iter().map(stack).collect()),
+            _ => None,
         }
     }
 }

@@ -49,6 +49,7 @@ impl Mod for Guest {
             "weatherfx",
             "overlayfx",
             "entityfx",
+            "lookfx",
             "save",
             "load",
             "save_key",
@@ -465,6 +466,28 @@ impl Mod for Guest {
                     all.len(),
                     orbs.len(),
                     entity::get_face("x").is_some(),
+                )))
+            }
+            "lookfx" => {
+                let at = target::get_block().map(|b| world::BlockPos {
+                    x: b.x,
+                    y: b.y,
+                    z: b.z,
+                });
+                let contents = at.and_then(world::get_container).map(|slots| {
+                    slots
+                        .iter()
+                        .flatten()
+                        .map(|s| format!("{}x{}", s.id, s.count))
+                        .collect::<Vec<_>>()
+                });
+                let elsewhere = world::get_container(world::BlockPos { x: 9, y: 9, z: 9 });
+                Ok(Some(format!(
+                    "look face {:?} armor {:?} absorption {:?} contents {contents:?} elsewhere {}",
+                    target::get_block_face(),
+                    target::get_entity_armor(),
+                    target::get_entity_absorption(),
+                    elsewhere.is_some(),
                 )))
             }
             "giveitem" => {

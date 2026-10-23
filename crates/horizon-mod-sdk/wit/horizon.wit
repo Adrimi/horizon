@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.8;
+package horizon:mods@0.1.9;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -147,6 +147,17 @@ interface target {
     /// The mob the attack button would hit (`EntityHitResult`) within
     /// reach, before any block; none otherwise (API 0.1.2).
     get-entity: func() -> option<entity>;
+    /// The armour points of the mob under the crosshair
+    /// (`LivingEntity.getArmorValue`: its type's, not what it wears); none
+    /// as `get-entity` (API 0.1.9).
+    get-entity-armor: func() -> option<f32>;
+    /// The absorption of the mob under the crosshair; none as `get-entity`.
+    /// The game does not track a mob's absorption: 0 (API 0.1.9).
+    get-entity-absorption: func() -> option<f32>;
+    /// The face of the block under the crosshair that the player looks at:
+    /// `north`, `south`, `east`, `west`, `up` or `down`; none as `get-block`
+    /// (API 0.1.9).
+    get-block-face: func() -> option<string>;
 }
 
 /// Capability `inventory-read`: the player's hotbar (API 0.1.1).
@@ -642,6 +653,21 @@ interface %world {
     get-surface: func(pos: block-pos, start-y: s32) -> option<s32>;
     /// Whether the block at `pos` has a full collision box (API 0.1.6).
     is-solid: func(pos: block-pos) -> bool;
+    /// One stack in a container (API 0.1.9).
+    record container-stack {
+        /// `minecraft:stone`, ...
+        id: string,
+        count: u32,
+        /// The durability used; 0 for an item that does not wear out.
+        damage: u32,
+    }
+    /// The items of the container at `pos` (a chest, a barrel, a shulker box,
+    /// a hopper, a dropper, a dispenser, a crafter; a furnace, a blast
+    /// furnace or a smoker: input, fuel, result), in slot order, an empty slot
+    /// none. Only for the block the player looks at or is breaking, in a
+    /// world this game runs or whose contents the game knows; none for any
+    /// other position or block (API 0.1.9).
+    get-container: func(pos: block-pos) -> option<list<option<container-stack>>>;
 }
 
 /// Capability `items-read`: the items of the game, vanilla's and the content
