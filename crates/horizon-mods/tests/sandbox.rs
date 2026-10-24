@@ -1493,6 +1493,38 @@ fn the_entity_detail_and_light_event_apis() {
 }
 
 #[test]
+fn the_entity_api_lists_the_registry_and_tells_invisible_entities() {
+    use horizon_mods::EntityType;
+    use std::sync::Arc;
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert!(mods.command("typesfx"));
+    assert_eq!(mods.drain(), [feedback("invisible:false:false")]);
+    mods.set_snapshot(Snapshot {
+        entity_types: Some(Arc::new(vec![
+            EntityType {
+                id: "minecraft:creeper".into(),
+                name: "Creeper".into(),
+                tags: vec![],
+            },
+            EntityType {
+                id: "x:thing".into(),
+                name: String::new(),
+                tags: vec!["minecraft:skeletons".into(), "x:t".into()],
+            },
+        ])),
+        invisible: Some(Arc::new(std::collections::HashSet::from([2]))),
+        ..player()
+    });
+    assert!(mods.command("typesfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "minecraft:creeper=Creeper[]|x:thing=[minecraft:skeletons,x:t]|invisible:false:true"
+        )]
+    );
+}
+
+#[test]
 fn the_minimap_apis_light_commands_and_world_pictures() {
     use horizon_mods::{Output, WorldElement};
     let mut mods = load("horizon_mods_test_guest.hmod");

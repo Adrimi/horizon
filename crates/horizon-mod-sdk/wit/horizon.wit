@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.32;
+package horizon:mods@0.1.33;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -1692,6 +1692,27 @@ interface %entity {
     /// The state of the entity with that id (API 0.1.20; `entity-read`);
     /// none for an id `nearby` did not list.
     get-detail: func(id: u32) -> option<detail>;
+
+    /// One entity type of the game's registry (API 0.1.33).
+    record type-info {
+        /// The registry key, e.g. `minecraft:creeper`.
+        id: string,
+        /// The display name from the language files (`entity.<ns>.<path>`),
+        /// empty when the language has none.
+        name: string,
+        /// The entity tags the type is in, full names without `#`
+        /// (`minecraft:skeletons`), sorted.
+        tags: list<string>,
+    }
+    /// Every entity type of the registry, sorted by id (API 0.1.33;
+    /// `entity-read`). `BuiltInRegistries.ENTITY_TYPE`, not only the types
+    /// that were seen near the player.
+    get-types: func() -> list<type-info>;
+    /// Whether the entity with that id is invisible (`Entity.isInvisible`:
+    /// the Invisibility effect or the invisible flag), as of the last tick
+    /// (API 0.1.33; `entity-read`); false for an id `nearby` did not list.
+    /// A separate function: `detail` is a published record and stays as it is.
+    is-invisible: func(id: u32) -> bool;
 }
 
 /// Capabilities `slots-read` and `slot-decorate`: the game's own slots, the

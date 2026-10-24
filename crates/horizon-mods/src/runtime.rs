@@ -24,7 +24,7 @@ pub use bindings::horizon::mods::{
         Decoration as ChatDecoration, Picture as ChatPicture, Place as ChatPlace,
         Region as ChatRegion, Source as ChatSource, Style as ChatStyle,
     },
-    entity::{Detail as EntityDetail, Entity as WorldEntity, EntityKind, Face},
+    entity::{Detail as EntityDetail, Entity as WorldEntity, EntityKind, Face, TypeInfo as EntityType},
     game::{Clock, FoodStats, Player},
     game::{Health, InputState, Session},
     hud::{BarIcon, Bars},
@@ -224,6 +224,11 @@ pub struct Snapshot {
     /// The player's tags (`game.get-player-tags`, API 0.1.24).
     pub player_tags: Vec<String>,
     pub entity_details: Option<Arc<std::collections::HashMap<u32, EntityDetail>>>,
+    /// The registry's entity types (`entity.get-types`, API 0.1.33).
+    pub entity_types: Option<Arc<Vec<EntityType>>>,
+    /// The ids of the invisible entities among `entities`
+    /// (`entity.is-invisible`, API 0.1.33).
+    pub invisible: Option<Arc<std::collections::HashSet<u32>>>,
     /// The faces of the players among the entities, by UUID (32 hexadecimal
     /// characters), for `entity.get-face` (API 0.1.20).
     pub faces: Option<Arc<std::collections::HashMap<String, Face>>>,
@@ -2156,6 +2161,19 @@ impl entity::Host for State {
     }
     fn get_face(&mut self, uuid: String) -> Option<Face> {
         self.snapshot.faces.as_ref()?.get(&uuid).cloned()
+    }
+    fn get_types(&mut self) -> Vec<EntityType> {
+        self.snapshot
+            .entity_types
+            .as_ref()
+            .map(|t| t.as_ref().clone())
+            .unwrap_or_default()
+    }
+    fn is_invisible(&mut self, id: u32) -> bool {
+        self.snapshot
+            .invisible
+            .as_ref()
+            .is_some_and(|set| set.contains(&id))
     }
 }
 /// The marks a mod set, at most `SLOT_MARKS`, on slots that exist, with

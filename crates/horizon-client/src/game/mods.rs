@@ -65,6 +65,8 @@ pub(super) struct ModsState {
     pub(super) palette: std::sync::OnceLock<Arc<Palette>>,
     /// The world's biome names, in the order of their indexes (API 0.1.4).
     pub(super) biomes: std::sync::OnceLock<Arc<Vec<String>>>,
+    /// The registry's entity types, built once (`entity.get-types`).
+    pub(super) entity_types: std::sync::OnceLock<Arc<Vec<horizon_mods::EntityType>>>,
     /// The screen a mod has open (API 0.1.4).
     pub(super) screen: ModScreen,
     /// Every item of the game, for `items.list` (API 0.1.5); built on first use.
@@ -583,6 +585,14 @@ impl Game<'_> {
         if entity_read && self.player.is_some() {
             let entities = self.mod_entities();
             snapshot.entity_details = Some(Arc::new(self.mod_entity_details(&entities)));
+            snapshot.invisible = Some(Arc::new(
+                self.mobs
+                    .iter()
+                    .filter(|m| m.invisible || m.has_effect("minecraft:invisibility"))
+                    .map(|m| m.id)
+                    .collect(),
+            ));
+            snapshot.entity_types = Some(self.mod_entity_types());
             snapshot.faces = Some(Arc::new(self.mod_faces(&entities)));
             snapshot.entities = Some(Arc::new(entities));
             snapshot.entities_editable = self.has_singleplayer_server();
@@ -2977,6 +2987,38 @@ fn projectile_type(
 }
 /// `entity.get-detail` and `light-events` (API 0.1.20).
 impl Game<'_> {
+    /// `entity.get-types` (API 0.1.33): the registry's entity types with their
+    /// names and tags, sorted by id.
+    fn mod_entity_types(&self) -> Arc<Vec<horizon_mods::EntityType>> {
+        self.mods
+            .entity_types
+            .get_or_init(|| {
+                let root = &self.options.resources;
+                let mut ids: Vec<String> = std::fs::read(root.join("entity-types.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
+                    .unwrap_or_default();
+                ids.sort();
+                let tags = &self.res.rest().mob_data.entity_tags;
+                Arc::new(
+                    ids.into_iter()
+                        .map(|id| {
+                            let key = format!("entity.{}", id.replace(':', "."));
+                            let name = horizon_client::lang::get_or(&key, "");
+                            let mut tags: Vec<String> = tags
+                                .iter()
+                                .filter(|(_, members)| members.contains(&id))
+                                .map(|(tag, _)| tag.clone())
+                                .collect();
+                            tags.sort();
+                            horizon_mods::EntityType { id, name, tags }
+                        })
+                        .collect(),
+                )
+            })
+            .clone()
+    }
     /// The extra state of the mobs and primed TNT among `entities`, by id.
     fn mod_entity_details(
         &self,

@@ -67,6 +67,7 @@ impl Mod for Guest {
             "said",
             "playersfx",
             "detailfx",
+            "typesfx",
             "rainfx",
             "restfx",
             "sndfx",
@@ -730,6 +731,19 @@ impl Mod for Guest {
                 lines.extend(light_events::poll().iter().map(|f| {
                     format!("{}@{},{},{}->{}:{}", f.kind, f.x, f.y, f.z, f.end_y, f.ticks)
                 }));
+                Ok(Some(lines.join("|")))
+            }
+            "typesfx" => {
+                let types = entity::get_types();
+                let mut lines: Vec<String> = types
+                    .iter()
+                    .map(|t| format!("{}={}[{}]", t.id, t.name, t.tags.join(",")))
+                    .collect();
+                lines.push(format!(
+                    "invisible:{}:{}",
+                    entity::is_invisible(1),
+                    entity::is_invisible(2)
+                ));
                 Ok(Some(lines.join("|")))
             }
             "playersfx" => Ok(Some(
