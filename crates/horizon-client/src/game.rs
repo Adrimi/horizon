@@ -1655,7 +1655,7 @@ fn facing_offset(facing: &str) -> [i32; 3] {
     }
 }
 /// How far along `dir` (within `reach`) a ray from `eye` enters `b`.
-fn ray_box(eye: [f64; 3], dir: [f64; 3], reach: f64, b: Aabb) -> Option<f64> {
+pub(super) fn ray_box(eye: [f64; 3], dir: [f64; 3], reach: f64, b: Aabb) -> Option<f64> {
     let (min, max) = (b.min_position(), b.max_position());
     let (lo, hi) = ([min.x, min.y, min.z], [max.x, max.y, max.z]);
     let (mut t0, mut t1) = (0.0f64, reach);
@@ -1675,7 +1675,7 @@ fn ray_box(eye: [f64; 3], dir: [f64; 3], reach: f64, b: Aabb) -> Option<f64> {
     }
     (t0 <= t1).then_some(t0)
 }
-fn view_vector(yaw: f32, pitch: f32) -> [f64; 3] {
+pub(super) fn view_vector(yaw: f32, pitch: f32) -> [f64; 3] {
     let (y, p) = (f64::from(yaw).to_radians(), f64::from(pitch).to_radians());
     [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()]
 }

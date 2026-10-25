@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.33;
+package horizon:mods@0.1.34;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -136,6 +136,9 @@ interface game {
     /// The world's difficulty: `peaceful`, `easy`, `normal` or `hard`; none
     /// outside a world (API 0.1.11).
     get-difficulty: func() -> option<string>;
+    /// The hand the player holds the main item in, `left` or `right`
+    /// (the Main Hand option; API 0.1.34; `game-read`).
+    get-main-hand: func() -> string;
 }
 
 /// Capability `chat`: messages only the local player sees.
@@ -390,6 +393,18 @@ interface hud {
     /// Where the bars are; none when the game draws none (creative,
     /// spectator, the HUD hidden). One frame old (API 0.1.7).
     get-bars: func() -> option<bars>;
+
+    /// A boss bar the game draws at the top of the screen (API 0.1.34).
+    record boss-bar {
+        /// The name above the bar, without formatting.
+        name: string,
+        /// Where the bar ends, in GUI pixels from the top of the screen
+        /// (the bar's 5 pixels; the next starts 19 below the one before).
+        y-bottom: f32,
+    }
+    /// The boss bars the game draws now, from the top; empty when there is
+    /// none (API 0.1.34; `hud`). A panel under them starts below the last.
+    get-boss-bars: func() -> list<boss-bar>;
 }
 
 /// Capability `target`: the block the player looks at, and the one they
@@ -445,6 +460,51 @@ interface target {
     /// `north`, `south`, `east`, `west`, `up` or `down`; none as `get-block`
     /// (API 0.1.9).
     get-block-face: func() -> option<string>;
+
+    /// A status effect on a mob (API 0.1.34).
+    record effect {
+        /// The effect's id, e.g. `minecraft:speed`.
+        id: string,
+        /// 0 for level I.
+        amplifier: u32,
+        /// The ticks left; -1 when the effect lasts for ever.
+        duration-ticks: s32,
+        /// Given by a beacon or a conduit: its particles are faint.
+        ambient: bool,
+        /// Shown in the game's own effect icons and particles.
+        visible: bool,
+    }
+    /// The effects on the mob under the crosshair; none as `get-entity`
+    /// (API 0.1.34; `target`). The game knows the effects of the mobs it
+    /// simulates or is told of: a mob it was not told of has none.
+    get-entity-effects: func() -> option<list<effect>>;
+
+    /// The block under a ray of `reach` blocks (0 to 32; the game's own reach
+    /// is 4.5, 5 in creative) from the player's eyes, or, with `from-eye`
+    /// false, from the camera and along its view (the third-person
+    /// perspectives); none as `get-block` (API 0.1.34). The first block
+    /// along the ray, as `get-block` finds it.
+    get-block-ex: func(reach: f32, from-eye: bool) -> option<block>;
+    /// The face of that block, as `get-block-face` (API 0.1.34).
+    get-block-face-ex: func(reach: f32, from-eye: bool) -> option<string>;
+    /// The mob under that ray, nearer than the block it hits (API 0.1.34).
+    get-entity-ex: func(reach: f32, from-eye: bool) -> option<entity>;
+
+    /// A fluid under the crosshair (API 0.1.34).
+    record fluid {
+        /// `minecraft:water` or `minecraft:lava`.
+        id: string,
+        /// The name in the game's language.
+        name: string,
+        /// The block state's `level`: 0 for a source, 1 to 7 for flowing
+        /// fluid (more is lower), 8 and up for falling fluid.
+        level: u32,
+    }
+    /// The fluid the crosshair is on, within the game's reach (API 0.1.34).
+    /// `mode`: `any` gives the first fluid on the ray, even before a block;
+    /// `fallback` gives it only when the ray hits no block; `none` (and any
+    /// other word) gives none, as a game that ignores fluids does.
+    get-fluid: func(mode: string) -> option<fluid>;
 }
 
 /// Capability `inventory-read`: the player's hotbar (API 0.1.1).
@@ -1602,6 +1662,9 @@ interface overlay {
     upload-texture: func(id: u32, width: u32, height: u32, rgba: list<u8>) -> result<_, string>;
     /// What the HUD is doing; none outside a world.
     get-hud-state: func() -> option<hud-state>;
+    /// The player list (Tab) is open (API 0.1.34; `overlay`). A separate
+    /// function: `hud-state` is a published record.
+    is-tab-list-open: func() -> bool;
 }
 
 /// Capability `entity-read`: the entities around the player (API 0.1.8). With

@@ -627,6 +627,21 @@ impl Game<'_> {
                 attacking: self.left,
             });
         }
+        if self.player.is_some() {
+            snapshot.main_hand = Some(
+                if self.settings.main_hand_left {
+                    "left"
+                } else {
+                    "right"
+                }
+                .to_owned(),
+            );
+            snapshot.tab_list_open = self.screen == Screen::Playing
+                && self.keys.contains(&winit::keyboard::KeyCode::Tab);
+            if mods.uses(Capability::Hud) {
+                snapshot.boss_bars = self.mod_boss_bars();
+            }
+        }
         if inventory && self.player.is_some() {
             snapshot.inventory = Some(self.mod_inventory());
             snapshot.crafting = self.mod_crafting();
@@ -686,6 +701,7 @@ impl Game<'_> {
                 horizon_client::lang::get_or(&format!("block.{}", b.id.replace(':', ".")), &b.id)
             });
             snapshot.entity = self.mod_entity();
+            self.mod_target_extras(&mut snapshot);
             if let Some(e) = &snapshot.entity
                 && let Some(m) = self.mobs.iter().find(|m| m.id == e.id)
             {
@@ -724,18 +740,22 @@ impl Game<'_> {
         if !self.before_block(distance) {
             return None;
         }
+        Some(self.mod_entity_of(i))
+    }
+    /// The mob `i` as `target` gives it.
+    fn mod_entity_of(&self, i: usize) -> horizon_mods::Entity {
         let m = &self.mobs[i];
         let name = m.custom_name.clone().unwrap_or_else(|| {
             let key = format!("entity.{}", m.kind.id.replace(':', "."));
             horizon_client::lang::get_or(&key, &m.kind.id)
         });
-        Some(horizon_mods::Entity {
+        horizon_mods::Entity {
             id: m.id,
             type_id: m.kind.id.clone(),
             name,
             health: m.health,
             max_health: m.attrs.max_health,
-        })
+        }
     }
     /// A block as `target` gives it: its id, hardness and every block tag
     /// it is in.
@@ -3779,5 +3799,139 @@ impl Game<'_> {
                 }
             }
         });
+    }
+}
+
+/// Longer rays, mob effects, fluids and boss bars (API 0.1.34).
+impl Game<'_> {
+    /// The farthest a `get-*-ex` ray looks.
+    const MOD_RAY: f64 = 32.0;
+    /// What a ray hits: the first block and the nearest mob, with distances.
+    fn mod_ray(&self, origin: [f64; 3], dir: [f64; 3]) -> horizon_mods::RayHits {
+        let dist = |p: [f64; 3]| {
+            (0..3)
+                .map(|a| (p[a] - origin[a]).powi(2))
+                .sum::<f64>()
+                .sqrt() as f32
+        };
+        let block = self.clip_ray(origin, dir, Self::MOD_RAY).map(|hit| {
+            let face = match hit.face {
+                [0, -1, 0] => "down",
+                [0, 1, 0] => "up",
+                [0, 0, -1] => "north",
+                [0, 0, 1] => "south",
+                [-1, 0, 0] => "west",
+                _ => "east",
+            };
+            (self.mod_block(hit.pos), face.to_owned(), dist(hit.point))
+        });
+        let mut best: Option<(usize, f64)> = None;
+        for (i, m) in self.mobs.iter().enumerate() {
+            if m.alive()
+                && let Some(t) = super::ray_box(origin, dir, Self::MOD_RAY, m.bounds())
+                && best.is_none_or(|b| t < b.1)
+            {
+                best = Some((i, t));
+            }
+        }
+        horizon_mods::RayHits {
+            block,
+            entity: best.map(|(i, t)| (self.mod_entity_of(i), t as f32)),
+        }
+    }
+    /// The target's extras for the snapshot: effects of the mob looked at,
+    /// the long rays from the eyes and the camera, and the fluid in front.
+    fn mod_target_extras(&mut self, snapshot: &mut Snapshot) {
+        if let Some(e) = &snapshot.entity
+            && let Some(m) = self.mobs.iter().find(|m| m.id == e.id)
+        {
+            snapshot.entity_effects = Some(
+                m.extra
+                    .effects
+                    .iter()
+                    .map(|&(id, ticks, amplifier)| horizon_mods::TargetEffect {
+                        id: id.to_owned(),
+                        amplifier: amplifier.max(0) as u32,
+                        duration_ticks: if ticks > 1_000_000 { -1 } else { ticks },
+                        ambient: false,
+                        visible: true,
+                    })
+                    .collect(),
+            );
+        }
+        let Some(eye) = self.eye_position() else {
+            return;
+        };
+        let dir = super::view_vector(self.yaw, self.pitch);
+        snapshot.ray_eye = Some(self.mod_ray(eye, dir));
+        snapshot.ray_camera = match self.camera_view(1.0) {
+            Some((c, yaw, pitch)) => {
+                Some(self.mod_ray([c.x, c.y, c.z], super::view_vector(yaw, pitch)))
+            }
+            None => snapshot.ray_eye.clone(),
+        };
+        // The first fluid before the block in reach.
+        let stop = snapshot
+            .block
+            .as_ref()
+            .and_then(|_| self.pick())
+            .map_or(self.reach(), |h| {
+                (0..3)
+                    .map(|a| (h.point[a] - eye[a]).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+            });
+        let facts = self.res.facts();
+        let mut t = 0.0;
+        while t <= stop.min(self.reach()) {
+            let at = [0, 1, 2].map(|a| (eye[a] + dir[a] * t).floor() as i32);
+            let state = self.world.block(at[0], at[1], at[2]);
+            let f = facts.get(state);
+            if f.fluid != horizon_client::blocks::Fluid::None {
+                let id = match f.fluid {
+                    horizon_client::blocks::Fluid::Lava => "minecraft:lava",
+                    _ => "minecraft:water",
+                };
+                let level = self
+                    .pack
+                    .assets
+                    .registry
+                    .state(state)
+                    .and_then(|s| s.properties.get("level"))
+                    .and_then(|l| l.parse().ok())
+                    .unwrap_or(0);
+                snapshot.fluid = Some(horizon_mods::TargetFluid {
+                    id: id.to_owned(),
+                    name: horizon_client::lang::get_or(
+                        &format!("block.{}", id.replace(':', ".")),
+                        id,
+                    ),
+                    level,
+                });
+                break;
+            }
+            t += 0.1;
+        }
+    }
+    /// The boss bars the HUD draws, with where each ends.
+    fn mod_boss_bars(&self) -> Vec<horizon_mods::BossBarInfo> {
+        let Some(r) = self.renderer.as_ref() else {
+            return Vec::new();
+        };
+        let h = HudBatch::new([r.config.width, r.config.height]).height as i32;
+        let bars = self.boss_bar_list();
+        let mut out = Vec::new();
+        let mut y = 12;
+        for bar in bars {
+            out.push(horizon_mods::BossBarInfo {
+                name: bar.name.plain(),
+                y_bottom: (y + 5) as f32,
+            });
+            y += 19;
+            if y >= h / 3 {
+                break;
+            }
+        }
+        out
     }
 }

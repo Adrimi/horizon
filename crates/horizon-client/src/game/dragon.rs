@@ -2160,6 +2160,17 @@ impl Game<'_> {
     /// `BossHealthOverlay`: the dragon's pink bar, then the withers', the
     /// raids' and the custom bars, in that order.
     pub(super) fn draw_boss_bars(&self, batch: &mut HudBatch) {
+        let bars = self.boss_bar_list();
+        let draws = hud_overlays::boss_overlay(
+            batch.width as i32,
+            batch.height as i32,
+            &bars,
+            &self.gui.atlas.font,
+        );
+        hud_layout::paint(batch, &self.gui.atlas, &draws);
+    }
+    /// The bars `BossHealthOverlay` shows, in order.
+    pub(super) fn boss_bar_list(&self) -> Vec<hud_overlays::BossBar> {
         let mut bars = Vec::new();
         if let Some(d) = self.dragon.as_ref().filter(|_| self.dragon_bar_shown()) {
             bars.push(hud_overlays::BossBar {
@@ -2174,13 +2185,7 @@ impl Game<'_> {
         self.wither_bars(&mut bars);
         self.raid_bars(&mut bars);
         self.custom_bossbars(&mut bars);
-        let draws = hud_overlays::boss_overlay(
-            batch.width as i32,
-            batch.height as i32,
-            &bars,
-            &self.gui.atlas.font,
-        );
-        hud_layout::paint(batch, &self.gui.atlas, &draws);
+        bars
     }
     /// The dragon fight's boss bar shows (`EnderDragonFight.dragonEvent`,
     /// with `setCreateWorldFog`).

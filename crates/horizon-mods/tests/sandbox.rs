@@ -1525,6 +1525,69 @@ fn the_entity_api_lists_the_registry_and_tells_invisible_entities() {
 }
 
 #[test]
+fn the_look_info_apis_read_effects_rays_fluids_hand_tab_list_and_boss_bars() {
+    use horizon_mods::{BossBarInfo, RayHits, TargetEffect, TargetFluid};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert!(mods.command("parityfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback("none|-/-/- -/-/- -/-/-|- - -|right|false||||")]
+    );
+    let block = |id: &str| Block {
+        x: 1,
+        y: 2,
+        z: 3,
+        id: id.into(),
+        hardness: 1.0,
+        requires_tool: false,
+        tags: vec![],
+    };
+    let mob = |t: &str| Entity {
+        id: 7,
+        type_id: t.into(),
+        name: t.into(),
+        health: 1.0,
+        max_health: 2.0,
+    };
+    mods.set_snapshot(Snapshot {
+        entity_effects: Some(vec![TargetEffect {
+            id: "minecraft:speed".into(),
+            amplifier: 1,
+            duration_ticks: 100,
+            ambient: false,
+            visible: true,
+        }]),
+        ray_eye: Some(RayHits {
+            block: Some((block("minecraft:stone"), "north".into(), 3.0)),
+            entity: Some((mob("minecraft:zombie"), 2.0)),
+        }),
+        ray_camera: Some(RayHits {
+            block: Some((block("minecraft:dirt"), "up".into(), 8.0)),
+            entity: Some((mob("minecraft:cow"), 9.0)),
+        }),
+        fluid: Some(TargetFluid {
+            id: "minecraft:water".into(),
+            name: "Water".into(),
+            level: 0,
+        }),
+        main_hand: Some("left".into()),
+        tab_list_open: true,
+        boss_bars: vec![BossBarInfo {
+            name: "Wither".into(),
+            y_bottom: 17.0,
+        }],
+        ..player()
+    });
+    assert!(mods.command("parityfx"));
+    assert_eq!(
+        mods.drain(),
+        [feedback(
+            "minecraft:speed:1:100:false:true|minecraft:stone/north/minecraft:zombie -/-/- minecraft:dirt/up/-|minecraft:water#0 minecraft:water#0 -|left|true|Wither@17|||"
+        )]
+    );
+}
+
+#[test]
 fn the_minimap_apis_light_commands_and_world_pictures() {
     use horizon_mods::{Output, WorldElement};
     let mut mods = load("horizon_mods_test_guest.hmod");

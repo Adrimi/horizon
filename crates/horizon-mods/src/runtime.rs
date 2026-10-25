@@ -29,7 +29,7 @@ pub use bindings::horizon::mods::{
     },
     game::{Clock, FoodStats, Player},
     game::{Health, InputState, Session},
-    hud::{BarIcon, Bars},
+    hud::{BarIcon, Bars, BossBar as BossBarInfo},
     hud::{Corner, Line},
     input::MouseEvent,
     inventory::{
@@ -54,7 +54,7 @@ pub use bindings::horizon::mods::{
         Size as ScreenSize, TextShape, TipLine, WheelTurn,
     },
     slots::{Mark, MarkShape},
-    target::{Block, Entity},
+    target::{Block, Effect as TargetEffect, Entity, Fluid as TargetFluid},
     texture_rules::{
         BlockFilter as RuleBlock, Connect as RuleConnect, Method as RuleMethod, Rule as TextureRule,
     },
@@ -223,6 +223,20 @@ pub struct Snapshot {
     /// The player's tags (`game.get-player-tags`, API 0.1.24).
     pub player_tags: Vec<String>,
     pub entity_details: Option<Arc<std::collections::HashMap<u32, EntityDetail>>>,
+    /// The effects on the mob under the crosshair (`target.get-entity-effects`, API 0.1.34).
+    pub entity_effects: Option<Vec<TargetEffect>>,
+    /// What a ray of 32 blocks hits from the eyes and from the camera
+    /// (`target.get-block-ex` and the others, API 0.1.34).
+    pub ray_eye: Option<RayHits>,
+    pub ray_camera: Option<RayHits>,
+    /// The first fluid on the crosshair's ray (`target.get-fluid`, API 0.1.34).
+    pub fluid: Option<TargetFluid>,
+    /// The Main Hand option: `left` or `right` (`game.get-main-hand`, API 0.1.34).
+    pub main_hand: Option<String>,
+    /// The player list is open (`overlay.is-tab-list-open`, API 0.1.34).
+    pub tab_list_open: bool,
+    /// The boss bars on the screen (`hud.get-boss-bars`, API 0.1.34).
+    pub boss_bars: Vec<BossBarInfo>,
     /// The registry's entity types (`entity.get-types`, API 0.1.33).
     pub entity_types: Option<Arc<Vec<EntityType>>>,
     /// The ids of the invisible entities among `entities`
@@ -1917,6 +1931,12 @@ impl game::Host for State {
     fn get_difficulty(&mut self) -> Option<String> {
         self.snapshot.difficulty.clone()
     }
+    fn get_main_hand(&mut self) -> String {
+        self.snapshot
+            .main_hand
+            .clone()
+            .unwrap_or_else(|| "right".into())
+    }
 }
 impl chat::Host for State {
     fn get_messages(&mut self) -> Vec<ChatMessage> {
@@ -1937,7 +1957,48 @@ impl chat::Host for State {
         }
     }
 }
+/// What a long ray hits: the first block with its face and distance, and the
+/// nearest mob with its distance; `get-block-ex` and its kin keep what is
+/// within the asked reach (API 0.1.34).
+#[derive(Clone, Debug)]
+pub struct RayHits {
+    pub block: Option<(Block, String, f32)>,
+    pub entity: Option<(Entity, f32)>,
+}
+impl State {
+    fn ray(&self, from_eye: bool) -> Option<&RayHits> {
+        if from_eye {
+            self.snapshot.ray_eye.as_ref()
+        } else {
+            self.snapshot.ray_camera.as_ref()
+        }
+    }
+}
 impl target::Host for State {
+    fn get_entity_effects(&mut self) -> Option<Vec<TargetEffect>> {
+        self.snapshot.entity_effects.clone()
+    }
+    fn get_block_ex(&mut self, reach: f32, from_eye: bool) -> Option<Block> {
+        let (block, _, d) = self.ray(from_eye)?.block.as_ref()?;
+        (*d <= reach).then(|| block.clone())
+    }
+    fn get_block_face_ex(&mut self, reach: f32, from_eye: bool) -> Option<String> {
+        let (_, face, d) = self.ray(from_eye)?.block.as_ref()?;
+        (*d <= reach).then(|| face.clone())
+    }
+    fn get_entity_ex(&mut self, reach: f32, from_eye: bool) -> Option<Entity> {
+        let ray = self.ray(from_eye)?;
+        let (entity, d) = ray.entity.as_ref()?;
+        let before_block = ray.block.as_ref().is_none_or(|(_, _, b)| d < b);
+        (*d <= reach && before_block).then(|| entity.clone())
+    }
+    fn get_fluid(&mut self, mode: String) -> Option<TargetFluid> {
+        match mode.as_str() {
+            "any" => self.snapshot.fluid.clone(),
+            "fallback" if self.snapshot.block.is_none() => self.snapshot.fluid.clone(),
+            _ => None,
+        }
+    }
     fn get_block(&mut self) -> Option<Block> {
         self.snapshot.block.clone()
     }
@@ -3422,6 +3483,9 @@ impl hud::Host for State {
     fn get_bars(&mut self) -> Option<Bars> {
         self.ui.bars.clone()
     }
+    fn get_boss_bars(&mut self) -> Vec<BossBarInfo> {
+        self.snapshot.boss_bars.clone()
+    }
 }
 impl overlay::Host for State {
     fn paint(&mut self, layer: OverlayLayer, elements: Vec<ScreenElement>) {
@@ -3494,6 +3558,9 @@ impl overlay::Host for State {
     }
     fn get_hud_state(&mut self) -> Option<HudState> {
         self.ui.hud
+    }
+    fn is_tab_list_open(&mut self) -> bool {
+        self.snapshot.tab_list_open
     }
 }
 impl State {

@@ -1,7 +1,7 @@
 <!-- Generated from crates/horizon-mod-sdk/wit/horizon.wit and the manifest's capabilities by crates/horizon-mods/tests/api_reference.rs; a test fails when this file is out of date. Update it with: HORIZON_WRITE_DOCS=1 cargo test -p horizon-mods --features pack --test api_reference -->
 # Mod API reference
 
-The contract between Horizon and its mods: the WIT package `horizon:mods@0.1.33`, every interface, type, function and hook in it, and the capabilities a manifest may list. The guide is [mods.md](../mods.md); stability and versions: [stability.md](stability.md). Manifest `api` lines this game serves: `0.1`, `0.2`.
+The contract between Horizon and its mods: the WIT package `horizon:mods@0.1.34`, every interface, type, function and hook in it, and the capabilities a manifest may list. The guide is [mods.md](../mods.md); stability and versions: [stability.md](stability.md). Manifest `api` lines this game serves: `0.1`, `0.2`.
 
 ## Capabilities
 
@@ -161,6 +161,7 @@ The player's health (API 0.1.11).
 | `get-health` | `func() -> option<health>` | The player's health; none outside a world (API 0.1.11). |
 | `get-effects` | `func() -> list<string>` | The ids of the effects on the player (`minecraft:poison`, `minecraft:regeneration`, ...); empty when there is none (API 0.1.11). |
 | `get-difficulty` | `func() -> option<string>` | The world's difficulty: `peaceful`, `easy`, `normal` or `hard`; none outside a world (API 0.1.11). |
+| `get-main-hand` | `func() -> string` | The hand the player holds the main item in, `left` or `right` (the Main Hand option; API 0.1.34; `game-read`). |
 
 ## `chat`
 
@@ -392,12 +393,22 @@ The health and hunger bars as the game drew them in the last frame.
 | `food` | `list<bar-icon>` | The container of each hunger icon, in the order the game drew them. |
 | `health` | `list<bar-icon>` | The container of each heart, in the order the game drew them. |
 
+### record `boss-bar`
+
+A boss bar the game draws at the top of the screen (API 0.1.34).
+
+| Field | Type | |
+| --- | --- | --- |
+| `name` | `string` | The name above the bar, without formatting. |
+| `y-bottom` | `f32` | Where the bar ends, in GUI pixels from the top of the screen (the bar's 5 pixels; the next starts 19 below the one before). |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `set-panel` | `func(corner: corner, lines: list<line>)` | Replaces the mod's panel: up to 16 lines in that corner of the screen. |
 | `clear` | `func()` | Removes the mod's panel. |
 | `show-action-bar` | `func(text: string, color: u32)` | Shows a line over the hotbar, as vanilla's action bar does (API 0.1.16); it fades after about three seconds, and a new one replaces it. `color` is 0xRRGGBB; the text may have `§` formatting. An empty text does nothing. |
 | `get-bars` | `func() -> option<bars>` | Where the bars are; none when the game draws none (creative, spectator, the HUD hidden). One frame old (API 0.1.7). |
+| `get-boss-bars` | `func() -> list<boss-bar>` | The boss bars the game draws now, from the top; empty when there is none (API 0.1.34; `hud`). A panel under them starts below the last. |
 
 ## `target`
 
@@ -429,6 +440,28 @@ A living entity under the crosshair (API 0.1.2).
 | `health` | `f32` |  |
 | `max-health` | `f32` |  |
 
+### record `effect`
+
+A status effect on a mob (API 0.1.34).
+
+| Field | Type | |
+| --- | --- | --- |
+| `id` | `string` | The effect's id, e.g. `minecraft:speed`. |
+| `amplifier` | `u32` | 0 for level I. |
+| `duration-ticks` | `s32` | The ticks left; -1 when the effect lasts for ever. |
+| `ambient` | `bool` | Given by a beacon or a conduit: its particles are faint. |
+| `visible` | `bool` | Shown in the game's own effect icons and particles. |
+
+### record `fluid`
+
+A fluid under the crosshair (API 0.1.34).
+
+| Field | Type | |
+| --- | --- | --- |
+| `id` | `string` | `minecraft:water` or `minecraft:lava`. |
+| `name` | `string` | The name in the game's language. |
+| `level` | `u32` | The block state's `level`: 0 for a source, 1 to 7 for flowing fluid (more is lower), 8 and up for falling fluid. |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `get-block` | `func() -> option<block>` | The block under the crosshair within reach; none on air, an entity or the title screen. |
@@ -439,6 +472,11 @@ A living entity under the crosshair (API 0.1.2).
 | `get-entity-armor` | `func() -> option<f32>` | The armour points of the mob under the crosshair (`LivingEntity.getArmorValue`: its type's, not what it wears); none as `get-entity` (API 0.1.9). |
 | `get-entity-absorption` | `func() -> option<f32>` | The absorption of the mob under the crosshair; none as `get-entity`. The game does not track a mob's absorption: 0 (API 0.1.9). |
 | `get-block-face` | `func() -> option<string>` | The face of the block under the crosshair that the player looks at: `north`, `south`, `east`, `west`, `up` or `down`; none as `get-block` (API 0.1.9). |
+| `get-entity-effects` | `func() -> option<list<effect>>` | The effects on the mob under the crosshair; none as `get-entity` (API 0.1.34; `target`). The game knows the effects of the mobs it simulates or is told of: a mob it was not told of has none. |
+| `get-block-ex` | `func(reach: f32, from-eye: bool) -> option<block>` | The block under a ray of `reach` blocks (0 to 32; the game's own reach is 4.5, 5 in creative) from the player's eyes, or, with `from-eye` false, from the camera and along its view (the third-person perspectives); none as `get-block` (API 0.1.34). The first block along the ray, as `get-block` finds it. |
+| `get-block-face-ex` | `func(reach: f32, from-eye: bool) -> option<string>` | The face of that block, as `get-block-face` (API 0.1.34). |
+| `get-entity-ex` | `func(reach: f32, from-eye: bool) -> option<entity>` | The mob under that ray, nearer than the block it hits (API 0.1.34). |
+| `get-fluid` | `func(mode: string) -> option<fluid>` | The fluid the crosshair is on, within the game's reach (API 0.1.34). `mode`: `any` gives the first fluid on the ray, even before a block; `fallback` gives it only when the ray hits no block; `none` (and any other word) gives none, as a game that ignores fluids does. |
 
 ## `inventory`
 
@@ -1423,6 +1461,7 @@ What the HUD is doing.
 | `get-text-width` | `func(text: string) -> f32` | The width of the text in GUI pixels at the game's font. |
 | `upload-texture` | `func(id: u32, width: u32, height: u32, rgba: list<u8>) -> result<_, string>` | Uploads an RGBA image (`width * height * 4` bytes) under the id `id` (0 to 6); it is drawn by `picture` elements of the overlay. At most 7 images of 256x256 pixels shared by all the mods' overlays. |
 | `get-hud-state` | `func() -> option<hud-state>` | What the HUD is doing; none outside a world. |
+| `is-tab-list-open` | `func() -> bool` | The player list (Tab) is open (API 0.1.34; `overlay`). A separate function: `hud-state` is a published record. |
 
 ## `entity`
 

@@ -6,8 +6,10 @@
 //! `tick` and `frame` do nothing, to measure the cost of
 //! a call.
 use horizon_mod_sdk::{
-    Mod, Registration, atmosphere, audio, chat, debug, entity, exchange, game, hotbar, hud, input, inventory, items, keys,
-    lighting, chat_decorate, light_events, overlay, players, resources, texture_rules, particles, recipes, screen, settings, slots, storage, target, tooltip, weather, world,
+    Mod, Registration, atmosphere, audio, chat, chat_decorate, debug, entity, exchange, game,
+    hotbar, hud, input, inventory, items, keys, light_events, lighting, overlay, particles,
+    players, recipes, resources, screen, settings, slots, storage, target, texture_rules, tooltip,
+    weather, world,
 };
 
 struct Guest {
@@ -68,6 +70,7 @@ impl Mod for Guest {
             "playersfx",
             "detailfx",
             "typesfx",
+            "parityfx",
             "rainfx",
             "restfx",
             "sndfx",
@@ -114,7 +117,14 @@ impl Mod for Guest {
         let messages = chat::get_messages();
         self.said = messages
             .iter()
-            .map(|m| format!("{}:{}:{}", m.id, m.text, m.sender.as_ref().map_or("-", |s| &s.name)))
+            .map(|m| {
+                format!(
+                    "{}:{}:{}",
+                    m.id,
+                    m.text,
+                    m.sender.as_ref().map_or("-", |s| &s.name)
+                )
+            })
             .collect::<Vec<_>>()
             .join("|");
         if text.contains("deco")
@@ -359,7 +369,9 @@ impl Mod for Guest {
                         },
                     )
                 });
-                Ok(Some(format!("removed {removed} sprite {size:?} registered {registered:?}")))
+                Ok(Some(format!(
+                    "removed {removed} sprite {size:?} registered {registered:?}"
+                )))
             }
             "gsprite" => Ok(Some(format!(
                 "{:?}",
@@ -373,13 +385,20 @@ impl Mod for Guest {
             ))),
             "pfx" => {
                 // N pictures of S by S pixels, each its own colour, in a row at x y z.
-                let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let nums: Vec<f64> = args
+                    .split_whitespace()
+                    .filter_map(|a| a.parse().ok())
+                    .collect();
                 let (x, y, z) = (nums[0], nums[1], nums[2]);
                 let count = nums.get(3).copied().unwrap_or(2.0) as u32;
                 let side = nums.get(4).copied().unwrap_or(16.0) as u32;
                 let mut ids = Vec::new();
                 for i in 0..count {
-                    let rgb = [(i * 97 % 256) as u8, (i * 53 % 256) as u8, (255 - i * 40 % 256) as u8];
+                    let rgb = [
+                        (i * 97 % 256) as u8,
+                        (i * 53 % 256) as u8,
+                        (255 - i * 40 % 256) as u8,
+                    ];
                     let mut pixels = Vec::new();
                     for _ in 0..side * side {
                         pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
@@ -400,7 +419,12 @@ impl Mod for Guest {
                         vx: 0.0,
                         vy: 0.0,
                         vz: 0.0,
-                        color: particles::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                        color: particles::Color {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
                         size: 0.2,
                         lifetime: 1000,
                         gravity: 0.0,
@@ -429,8 +453,15 @@ impl Mod for Guest {
                 game::set_break_speed_modifier(0.5);
                 let merged = world::merge_drops_at(world::BlockPos { x: 1, y: 64, z: 1 });
                 let (x, y, z): (f64, f64, f64) = {
-                    let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
-                    if nums.len() == 3 { (nums[0], nums[1], nums[2]) } else { (1.0, 64.0, 1.0) }
+                    let nums: Vec<f64> = args
+                        .split_whitespace()
+                        .filter_map(|a| a.parse().ok())
+                        .collect();
+                    if nums.len() == 3 {
+                        (nums[0], nums[1], nums[2])
+                    } else {
+                        (1.0, 64.0, 1.0)
+                    }
                 };
                 overlay::paint_world(&[
                     overlay::WorldElement::Box(overlay::WorldBox {
@@ -453,9 +484,16 @@ impl Mod for Guest {
                 Ok(Some(format!("events {} merged {merged}", seen.join(","))))
             }
             "timberfx" => {
-                let nums: Vec<i32> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let nums: Vec<i32> = args
+                    .split_whitespace()
+                    .filter_map(|a| a.parse().ok())
+                    .collect();
                 let pos = if nums.len() == 3 {
-                    world::BlockPos { x: nums[0], y: nums[1], z: nums[2] }
+                    world::BlockPos {
+                        x: nums[0],
+                        y: nums[1],
+                        z: nums[2],
+                    }
                 } else {
                     world::BlockPos { x: 0, y: 64, z: 0 }
                 };
@@ -463,24 +501,35 @@ impl Mod for Guest {
                 let tags = game::get_player_tags();
                 let fell = world::fall_block(pos, 0.1, 0.0, 0.0, true, args.contains("place"));
                 let put = world::set_block(
-                    world::BlockPos { x: pos.x + 3, y: pos.y, z: pos.z },
+                    world::BlockPos {
+                        x: pos.x + 3,
+                        y: pos.y,
+                        z: pos.z,
+                    },
                     "minecraft:oak_log",
                     &[("axis".to_string(), "x".to_string())],
                 );
                 let item = world::spawn_item(pos, "minecraft:stick", 3);
                 let bad_item = world::spawn_item(pos, "minecraft:stick", 0);
-                Ok(Some(format!("mode {mode:?} tags {tags:?} fell {fell} put {put} item {item} {bad_item}")))
+                Ok(Some(format!(
+                    "mode {mode:?} tags {tags:?} fell {fell} put {put} item {item} {bad_item}"
+                )))
             }
             "restfx" => {
                 weather::set_default_splashing(false);
-                world::set_weather_passthrough(&["minecraft:oak_fence".into(), "#minecraft:fences".into()]);
+                world::set_weather_passthrough(&[
+                    "minecraft:oak_fence".into(),
+                    "#minecraft:fences".into(),
+                ]);
                 let n = particles::get_particles().len();
                 let clouds = game::get_cloud_height();
                 let bad_name = audio::register("Bad Name", &[1, 2]).is_err();
                 let bad_file = audio::register("ok", &[1, 2, 3, 4]).is_err();
                 let fake = audio::register("fake", b"OggS-not-really").is_ok();
                 let wav = audio::register("tone", b"RIFF\x00\x00\x00\x00WAVEfmt ").is_ok();
-                Ok(Some(format!("particles {n} clouds {clouds:?} {bad_name} {bad_file} {fake} {wav}")))
+                Ok(Some(format!(
+                    "particles {n} clouds {clouds:?} {bad_name} {bad_file} {fake} {wav}"
+                )))
             }
             "stackfx" => {
                 let Some(stack) = tooltip::get_hovered_stack() else {
@@ -565,7 +614,12 @@ impl Mod for Guest {
                         wind_x: 0.0,
                         wind_z: 0.0,
                         collide: true,
-                        color: particles::Color { r: 1.0, g: 1.0, b: 1.0, a: 0.5 },
+                        color: particles::Color {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 0.5,
+                        },
                         size_curve: particles::SizeCurve::Constant,
                         fade: particles::Fade::None,
                         flat: false,
@@ -594,7 +648,10 @@ impl Mod for Guest {
                 Ok(Some(format!("{id}")))
             }
             "rmfx" => {
-                let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
+                let nums: Vec<f64> = args
+                    .split_whitespace()
+                    .filter_map(|a| a.parse().ok())
+                    .collect();
                 let n = particles::remove(nums[0] as u32, nums[1], nums[2], nums[3]);
                 let other = particles::remove(999, nums[1], nums[2], nums[3]);
                 let file = audio::register_file("fake").is_ok();
@@ -603,8 +660,12 @@ impl Mod for Guest {
                 Ok(Some(format!("removed {n} {other} {file} {missing} {bad}")))
             }
             "crossfx" => {
-                let nums: Vec<f64> = args.split_whitespace().filter_map(|a| a.parse().ok()).collect();
-                let img = particles::get_game_sprite("minecraft:block/dead_bush").ok_or("no sprite")?;
+                let nums: Vec<f64> = args
+                    .split_whitespace()
+                    .filter_map(|a| a.parse().ok())
+                    .collect();
+                let img =
+                    particles::get_game_sprite("minecraft:block/dead_bush").ok_or("no sprite")?;
                 let id = particles::define_sprite(&particles::Sprite {
                     name: "bush".into(),
                     width: img.width,
@@ -620,7 +681,12 @@ impl Mod for Guest {
                         vx: 0.0,
                         vy: 0.0,
                         vz: 0.0,
-                        color: particles::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                        color: particles::Color {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
                         size: 0.5,
                         lifetime: 1000,
                         gravity: 0.0,
@@ -641,12 +707,16 @@ impl Mod for Guest {
                 Ok(Some(format!("bush {id} {ok}")))
             }
             "sndfx" => {
-                let Some(bytes) = resources::read_file("minecraft", "sounds/step/stone6.ogg") else {
+                let Some(bytes) = resources::read_file("minecraft", "sounds/step/stone6.ogg")
+                else {
                     return Ok(Some("no file".into()));
                 };
                 let registered = audio::register("hit", &bytes);
                 let played = audio::play("test_guest:hit", None, 1.0, 1.0);
-                Ok(Some(format!("size {} registered {registered:?} played {played}", bytes.len())))
+                Ok(Some(format!(
+                    "size {} registered {registered:?} played {played}",
+                    bytes.len()
+                )))
             }
             "rainfx" => {
                 let sprite = particles::define_sprite(&particles::Sprite {
@@ -691,7 +761,9 @@ impl Mod for Guest {
                 let fog = world::get_biome_fog(world::BlockPos { x: 1, y: 64, z: 1 });
                 let sound = audio::play("minecraft:weather.rain", None, 0.2, 1.0);
                 let bad = audio::play("Bad Name", None, 1.0, 1.0);
-                Ok(Some(format!("rotated {rotated} fog {fog:?} sound {sound} bad {bad}")))
+                Ok(Some(format!(
+                    "rotated {rotated} fog {fog:?} sound {sound} bad {bad}"
+                )))
             }
             "removedfx" => Ok(Some(self.removed_seen.clone())),
             "minimapfx" => {
@@ -699,20 +771,22 @@ impl Mod for Guest {
                     .map(|l| (l.block, l.sky));
                 let command = world::run_command("/tp 10 64 -20");
                 if command {
-                    overlay::paint_world(&[overlay::WorldElement::Picture(overlay::WorldPicture {
-                        x: 1.0,
-                        y: 65.0,
-                        z: 1.0,
-                        width: 8.0,
-                        height: 12.0,
-                        texture: 0,
-                        u: 0.0,
-                        v: 0.0,
-                        u_width: 8.0,
-                        v_height: 12.0,
-                        tint: 0xFFFF_FFFF,
-                        offset_y: 0.0,
-                    })]);
+                    overlay::paint_world(&[overlay::WorldElement::Picture(
+                        overlay::WorldPicture {
+                            x: 1.0,
+                            y: 65.0,
+                            z: 1.0,
+                            width: 8.0,
+                            height: 12.0,
+                            texture: 0,
+                            u: 0.0,
+                            v: 0.0,
+                            u_width: 8.0,
+                            v_height: 12.0,
+                            tint: 0xFFFF_FFFF,
+                            offset_y: 0.0,
+                        },
+                    )]);
                 }
                 Ok(Some(format!("light {light:?} command {command}")))
             }
@@ -722,16 +796,70 @@ impl Mod for Guest {
                     .map(|e| match entity::get_detail(e.id) {
                         Some(d) => format!(
                             "{}:{:.2}:{}:{}:{:.1}:{}:{}",
-                            e.type_id, d.swell, d.glowing, d.in_water, d.squish, d.dark_ticks, d.carried_block
+                            e.type_id,
+                            d.swell,
+                            d.glowing,
+                            d.in_water,
+                            d.squish,
+                            d.dark_ticks,
+                            d.carried_block
                         ),
                         None => format!("{}:none", e.type_id),
                     })
                     .collect();
                 lines.push(format!("gone:{}", entity::get_detail(4_000_000).is_none()));
                 lines.extend(light_events::poll().iter().map(|f| {
-                    format!("{}@{},{},{}->{}:{}", f.kind, f.x, f.y, f.z, f.end_y, f.ticks)
+                    format!(
+                        "{}@{},{},{}->{}:{}",
+                        f.kind, f.x, f.y, f.z, f.end_y, f.ticks
+                    )
                 }));
                 Ok(Some(lines.join("|")))
+            }
+            "parityfx" => {
+                let effects = target::get_entity_effects()
+                    .map(|e| {
+                        e.iter()
+                            .map(|e| {
+                                format!(
+                                    "{}:{}:{}:{}:{}",
+                                    e.id, e.amplifier, e.duration_ticks, e.ambient, e.visible
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_else(|| "none".into());
+                let ex = |reach: f32, eye: bool| {
+                    format!(
+                        "{}/{}/{}",
+                        target::get_block_ex(reach, eye).map_or("-".into(), |b| b.id),
+                        target::get_block_face_ex(reach, eye).unwrap_or_else(|| "-".into()),
+                        target::get_entity_ex(reach, eye).map_or("-".into(), |e| e.type_id)
+                    )
+                };
+                let fluid = |m: &str| {
+                    target::get_fluid(m).map_or("-".into(), |f| format!("{}#{}", f.id, f.level))
+                };
+                let bars: Vec<String> = hud::get_boss_bars()
+                    .iter()
+                    .map(|b| format!("{}@{}", b.name, b.y_bottom))
+                    .collect();
+                Ok(Some(format!(
+                    "{effects}|{} {} {}|{} {} {}|{}|{}|{}|{}|{}|{}",
+                    ex(5.0, true),
+                    ex(1.0, true),
+                    ex(10.0, false),
+                    fluid("any"),
+                    fluid("fallback"),
+                    fluid("none"),
+                    game::get_main_hand(),
+                    overlay::is_tab_list_open(),
+                    bars.join(","),
+                    "",
+                    "",
+                    ""
+                )))
             }
             "typesfx" => {
                 let types = entity::get_types();
@@ -807,7 +935,10 @@ impl Mod for Guest {
             "ticks" => {
                 if !args.is_empty() {
                     world::watch_random_ticks(
-                        &args.split_whitespace().map(str::to_owned).collect::<Vec<_>>(),
+                        &args
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>(),
                     );
                     self.heard = 0;
                 }
