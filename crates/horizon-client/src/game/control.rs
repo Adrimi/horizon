@@ -227,12 +227,29 @@ impl Game<'_> {
                 }
                 Ok(Some(json!({ "ok": true, "cull": r.section_cull() })))
             }
+            "section-sides" => {
+                let r = self.renderer.as_mut().ok_or("no renderer")?;
+                match words.get(1).copied() {
+                    None => {}
+                    Some("on") => r.set_section_sides(true),
+                    Some("off") => r.set_section_sides(false),
+                    Some(other) => return Err(format!("unknown section sides mode {other}").into()),
+                }
+                Ok(Some(json!({ "ok": true, "sides": r.section_sides() })))
+            }
             "sculk" => Ok(Some(self.sculk_command(&words)?)),
             "status" => Ok(Some(self.control_status())),
             "pad" => Ok(Some(self.pad_command(&words)?)),
             "key" => {
                 let key = key_code(arg(1)?).ok_or_else(|| format!("unknown key {}", words[1]))?;
                 self.require_world()?;
+                // The sign editor takes raw presses (Enter, arrows, Backspace, Escape).
+                if self.sign_edit.is_some() {
+                    if arg(2)? != "up" {
+                        self.sign_input(Some(key), None);
+                    }
+                    return ok();
+                }
                 // A held edit modifier (`key super down`) and A/C/V/X: the
                 // open book's Select All, Copy, Paste or Cut.
                 if self.book.is_some() && arg(2)? != "up" {
@@ -599,6 +616,10 @@ impl Game<'_> {
                     self.book_type(text);
                     return ok();
                 }
+                if self.sign_edit.is_some() {
+                    self.sign_input(None, Some(text));
+                    return ok();
+                }
                 match self.screen {
                     Screen::Chat => self.chat_type(text),
                     Screen::CommandBlock => self.command_block_type(text),
@@ -625,7 +646,7 @@ impl Game<'_> {
                     }
                     _ => {
                         return Err(
-                            "type needs the chat screen (key t tap), the language search, the creative search, the anvil or World Options".into(),
+                            "type needs the chat screen (key t tap), a sign or book, the language search, the creative search, the anvil or World Options".into(),
                         );
                     }
                 }
@@ -654,7 +675,6 @@ impl Game<'_> {
                     "credits" => Page::Credits,
                     "horizon" => Page::Horizon,
                     "agent" => Page::Agent,
-                    "shader-packs" => Page::ShaderPacks,
                     other => return Err(format!("unknown options page {other}").into()),
                 };
                 if self.screen == Screen::Playing && self.title.is_none() {
@@ -921,6 +941,12 @@ impl Game<'_> {
                 "velocity": [p.velocity.x, p.velocity.y, p.velocity.z],
                 "on_ground": p.ground.on_ground,
                 "health": p.health.health(),
+                // The maximum the HUD's hearts last read (its cached value).
+                "max_health": p
+                    .attributes
+                    .lookup(p.attributes.key("minecraft:max_health").as_ref())
+                    .and_then(|h| p.attributes.instance(&h).ok())
+                    .map(|i| i.cached_value()),
                 "food": p.health.food.food,
             })
         });
@@ -1052,12 +1078,20 @@ impl Game<'_> {
         status["destroying"] = json!(destroying);
         status["physical_keys"] = json!(physical_keys);
         status["heard"] = json!(self.audio.heard);
+        status["stopped_sounds"] = json!(self.audio.stopped);
         // Boats, minecarts, armor stands, item frames and paintings.
         status["objects"] = json!(self.objects_status());
         status["lightning"] = json!({"bolts": self.bolts.len(), "struck": self.lightning_seen[0],
             "flashes": self.lightning_seen[1], "flash": self.flash});
         // Primed TNT, falling blocks, projectiles, tridents and end crystals.
         status["projectiles"] = json!(self.projectiles_status());
+        status["maps"] = json!(self.maps_status());
+        // The particles made so far, by type.
+        status["particles"] = json!(self.particles.made());
+        // The world border this side knows of.
+        status["border"] = json!({ "center": self.border.center(), "size": self.border.size() });
+        // The scoreboard sidebar the HUD shows.
+        status["sidebar"] = self.sidebar_status();
         status
     }
 }

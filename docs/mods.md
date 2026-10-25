@@ -3,8 +3,9 @@
 Horizon gets its own mod system, written in Rust and run in a sandbox, plus
 two ways to bring over what Java players use: native Horizon ports of popular
 mods and the data-driven parts of packs and mods. Fabric and NeoForge jars do
-**not** run as they are: [research/java-mod-compat.md](research/java-mod-compat.md)
-explains why and what we do instead.
+**not** run as they are: their code calls and patches Minecraft's Java classes, and
+Horizon has none. What carries over is the data and assets inside a jar
+([modpacks.md](modpacks.md)).
 
 Mods are **off and absent by default**. A fresh install has no `horizon-mods`
 folder, loads no runtime and plays exactly like vanilla 26.3.
@@ -15,10 +16,11 @@ folder, loads no runtime and plays exactly like vanilla 26.3.
 | SDK for mod authors | `crates/horizon-mod-sdk` | 0.1 |
 | Example mod | `crates/horizon-mod-sdk/examples/coords-hud` | coordinates, facing and time HUD, `/where`, `/coords` |
 | Runtime | `crates/horizon-mods` | wasmtime 36 LTS, component model |
-| Authoring tool | `crates/cargo-horizon-mod` | `cargo horizon-mod new / build / run` |
+| Authoring tool | `crates/cargo-horizon-mod` | `cargo horizon-mod new / build / run / check`, and the registry's CI (`registry build / review / list`) |
 | In the game | `crates/horizon-client/src/game/mods.rs`, Options > Mods | client mods |
-| Launcher mod browser (Modrinth, CurseForge with a key) | [mod-browser.md](mod-browser.md) | resource packs, shader packs, modpacks |
-| `.hmod` index, signing, server mods, registries | this page, [Roadmap](#roadmap) | planned |
+| Launcher mod browser (Modrinth, CurseForge with a key) | [mod-browser.md](mod-browser.md) | resource packs, modpacks |
+| Registry index (`index.json`, `.hpack`), signatures | `horizon_mods::index`, [api/mod-index.md](api/mod-index.md) | schema 1; launcher and website next |
+| Server mods, registries | this page, [Roadmap](#roadmap) | planned |
 
 ## Design goals
 
@@ -191,7 +193,7 @@ the block is gone.
 ### Planned interfaces
 
 Each is a new capability, added in a 0.x minor version so older mods keep
-loading. Ordered by what the first native ports need ([research](research/java-mod-compat.md#port-first)):
+loading. Ordered by what the first native ports need:
 
 | Interface | For | Notes |
 |---|---|---|
@@ -227,10 +229,17 @@ proposal, no profiling. Its cranelift backend generates native code for x86-64
 and ARM64 on Windows, macOS and Linux, which is why one `.hmod` serves them
 all.
 
+The game links it only with its `mods` feature: every release build turns it
+on (`release.yml`), and a build from source needs
+`cargo build --release -p horizon-client --features mods` to run code mods.
+Without it (the tests and probes) wasmtime and cranelift aren't built, a
+quarter of a clean build; content mods still load, and the game logs why the
+code mods don't start.
+
 ### Performance
 
 Measured on the Mac mini (M4 Pro), release build, `cargo test -p
-horizon-mods --release --test sandbox -- --ignored --nocapture`:
+horizon-mods --features runtime,pack --release --test sandbox -- --ignored --nocapture`:
 
 | | per call |
 |---|---|
@@ -270,7 +279,8 @@ chat (`Mod Test Guest stopped: it took too long (an endless loop?)`), marks it
 on the Mods page and carries on; the other mods keep running. Host functions
 clip what a mod hands back (chat lines per call, HUD lines and lengths). Tests:
 `crates/horizon-mods/tests/sandbox.rs` (an endless loop, a panic and a 1 GiB
-allocation, next to a healthy mod).
+allocation, next to a healthy mod; `cargo test -p horizon-mods --features
+runtime,pack`).
 
 ## Playing with mods
 
@@ -305,6 +315,18 @@ cargo horizon-mod build             # again after an edit: the running game relo
 always on, and the game checks its file once a second: rebuild and it restarts
 with "Mods reloaded" in chat. Its in-memory state starts over; whatever it
 saved with capability `storage` survives the reload.
+
+Before you submit it to the registry, run what its CI runs:
+
+```sh
+cargo horizon-mod check target/horizon-mod/my_mod.hmod   # --json for the report as JSON
+```
+
+It reads the manifest and content, refuses imports the capabilities don't
+cover, then plays the mod in the sandbox for 40 ticks, 120 frames, a chat line
+and each of its commands: it must start and never trap or overrun. It checks a
+`.hpack` and a resource pack `.zip` too, and a signature with `--key <public
+key> --signature <file>.minisig`.
 
 ### Template layout
 

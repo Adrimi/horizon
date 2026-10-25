@@ -1,8 +1,7 @@
 //! Resolution scale and FXAA (Horizon settings): the world renders into its
 //! own target at the scaled size, then one full-screen pass copies or
-//! anti-aliases it onto the screen, under the hand and HUD. A shader pack
-//! also needs the target (its stages read the world's colour and depth).
-//! With none of them on, the world renders straight to the screen as before.
+//! anti-aliases it onto the screen, under the hand and HUD. With neither on,
+//! the world renders straight to the screen.
 
 struct WorldTarget {
     size: [u32; 2],
@@ -99,15 +98,15 @@ impl Post {
             target: None,
         }
     }
+
     /// The world's colour and depth targets this frame, or `None` to draw
-    /// it straight to the screen. `pack`: a shader pack runs this frame.
+    /// it straight to the screen.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
         window: [u32; 2],
-        pack: bool,
     ) -> Option<(wgpu::TextureView, wgpu::TextureView)> {
-        if self.scale == 1.0 && !self.antialias && !pack {
+        if self.scale == 1.0 && !self.antialias {
             self.target = None;
             return None;
         }
@@ -118,30 +117,31 @@ impl Post {
                 height: size[1],
                 depth_or_array_layers: 1,
             };
-            let texture = |label, format, usage| {
-                device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some(label),
-                        size: extent,
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format,
-                        usage,
-                        view_formats: &[],
-                    })
-                    .create_view(&Default::default())
+            let make_tex = |label, format, usage| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
             };
-            let color = texture(
+            let color = make_tex(
                 "Scaled world",
                 self.format,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            );
-            let depth = texture(
+            )
+            .create_view(&Default::default());
+            // TEXTURE_BINDING: occlusion culling reads it.
+            let depth = make_tex(
                 "Scaled world depth",
                 wgpu::TextureFormat::Depth32Float,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            );
+            )
+            .create_view(&Default::default());
             let group = self.bind(device, &color);
             self.target = Some(WorldTarget {
                 size,
@@ -154,10 +154,7 @@ impl Post {
             .as_ref()
             .map(|t| (t.color.clone(), t.depth.clone()))
     }
-    /// The world target's size, once `prepare` made one.
-    pub fn size(&self) -> Option<[u32; 2]> {
-        self.target.as_ref().map(|t| t.size)
-    }
+
     /// Bindings that copy (or anti-alias) `view` onto the screen in `finish_with`.
     pub fn bind(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -175,11 +172,13 @@ impl Post {
             ],
         })
     }
+
     /// Draw the scaled world onto `screen`.
     pub fn finish(&self, encoder: &mut wgpu::CommandEncoder, screen: &wgpu::TextureView) {
         let Some(target) = &self.target else { return };
         self.finish_with(encoder, screen, &target.group);
     }
+
     /// Draw what `group` binds (`bind`) onto `screen`.
     pub fn finish_with(
         &self,

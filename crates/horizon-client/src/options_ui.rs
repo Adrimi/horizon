@@ -862,8 +862,6 @@ pub enum Page {
     Font,
     Packs,
     Mods,
-    /// The shader packs in `shaderpacks/`: pick one, open the folder.
-    ShaderPacks,
     /// Horizon's graphics settings (`graphics_ui`).
     Graphics,
     GraphicsAdvanced,
@@ -899,9 +897,6 @@ enum Act {
     ResetPadKeys,
     ToggleMod(usize),
     OpenModFolder,
-    /// Pick shader pack `i` of `OptionsUi::shader_packs` (again: off).
-    ToggleShaderPack(usize),
-    OpenShaderPackFolder,
     /// Credits & Attribution's Credits button (WinScreen without the poem).
     Credits,
     CopyAgentDetails,
@@ -952,8 +947,6 @@ pub enum Event {
     Packs(Vec<String>),
     OpenPackFolder,
     OpenModFolder,
-    /// Create `shaderpacks/` if needed and open it.
-    OpenShaderPackFolder,
     /// Roll the credits (`CreditsAndAttributionScreen.openCreditsScreen`).
     Credits,
     /// Copy how an agent connects (the AI Agent page).
@@ -1011,10 +1004,6 @@ pub struct OptionsUi {
     /// Scroll the selected language into the middle on the next layout.
     center_language: bool,
     pub graphics: crate::graphics_ui::GraphicsUi,
-    /// `shaderpacks/` and its packs, read while the Shader Packs page shows.
-    pub shader_packs: crate::shader_pack::Folder,
-    /// The pack that failed to load last and why (set by the game).
-    pub shader_pack_error: Option<(String, String)>,
     /// The AI Agent page's status lines (set by the game while it shows).
     pub agent_status: Vec<String>,
 }
@@ -1046,8 +1035,6 @@ impl Default for OptionsUi {
             in_world: false,
             center_language: false,
             graphics: Default::default(),
-            shader_packs: Default::default(),
-            shader_pack_error: None,
             agent_status: Vec::new(),
         }
     }
@@ -1095,14 +1082,11 @@ fn option_widget(s: &Settings, opt: Opt, x: f32, y: f32, w: f32) -> Widget {
 /// What a button opening one of Horizon's pages says on hover.
 fn horizon_page_tooltip(page: Page) -> Option<&'static str> {
     Some(match page {
-        Page::Horizon => {
-            "Horizon's own settings: graphics, shader packs, controllers, extras and mods."
-        }
+        Page::Horizon => "Horizon's own settings: graphics, controllers, extras and mods.",
         Page::Graphics => "Graphics, simply: each setting says what it costs.",
         Page::GraphicsAdvanced => {
             "Every graphics setting, Horizon's included, with what each costs."
         }
-        Page::ShaderPacks => "Packs that redraw the world. Off is the vanilla look.",
         Page::Controller => "Controllers: their buttons, sticks, vibration and menu navigation.",
         Page::Extras => {
             "Optional additions, all off by default: the game stays vanilla until you turn one on."
@@ -1177,28 +1161,6 @@ impl OptionsUi {
             self.graphics.reset();
         }
     }
-    /// Pick shader pack `i` of the folder, or turn it off when it is the
-    /// one running.
-    pub(crate) fn toggle_shader_pack(&self, s: &mut Settings, i: usize) {
-        let Some((id, Ok(_))) = self.shader_packs.packs.get(i) else {
-            return;
-        };
-        let g = &mut s.horizon;
-        g.shader_pack = if g.shader_pack == *id {
-            String::new()
-        } else {
-            id.clone()
-        };
-    }
-    pub(crate) fn shader_pack_failed(&self, id: &str) -> bool {
-        self.shader_pack_error
-            .as_ref()
-            .is_some_and(|(e, _)| e == id)
-    }
-    /// Whether the Shader Packs page shows.
-    fn shader_packs_shown(&self) -> bool {
-        self.page() == Page::ShaderPacks
-    }
     /// The graphics screen level of `page`, if it is one.
     fn graphics_level(page: Page) -> Option<crate::graphics_ui::Level> {
         match page {
@@ -1221,7 +1183,6 @@ impl OptionsUi {
             Page::Font => "options.font.title",
             Page::Packs => "resourcePack.title",
             Page::Mods => "Mods",
-            Page::ShaderPacks => "Shader Packs",
             Page::Graphics | Page::GraphicsAdvanced => "options.videoTitle",
             Page::Controller => "Controller Settings",
             Page::PadBinds => "Controller Binds",
@@ -1337,10 +1298,7 @@ impl OptionsUi {
                         open("Graphics...", Page::Graphics),
                         Some(open("Advanced Graphics...", Page::GraphicsAdvanced)),
                     ),
-                    Row::Buttons(
-                        open("Shader Packs...", Page::ShaderPacks),
-                        Some(open("Controller Settings...", Page::Controller)),
-                    ),
+                    Row::Buttons(open("Controller Settings...", Page::Controller), None),
                     Row::Buttons(
                         open("Extras...", Page::Extras),
                         Some(open("Mods...", Page::Mods)),
@@ -1388,16 +1346,6 @@ impl OptionsUi {
                         Act::Push(Page::GraphicsAdvanced),
                     )),
                 )];
-                rows.push(Row::Buttons(
-                    button(
-                        0.0,
-                        0.0,
-                        310.0,
-                        Text::literal("Shader Packs..."),
-                        Act::Push(Page::ShaderPacks),
-                    ),
-                    None,
-                ));
                 rows.push(Row::Header("options.video.display.header"));
                 rows.extend(pairs(&[
                     Opt::MaxFps,
@@ -1569,32 +1517,6 @@ impl OptionsUi {
                         )
                     })
                     .collect()
-            }
-            Page::ShaderPacks => {
-                let folder = &self.shader_packs;
-                let mut rows = vec![Row::Note(folder.dir.display().to_string())];
-                if folder.packs.is_empty() {
-                    rows.push(Row::Header(
-                        "No shader packs: put a pack's folder or .zip in this folder",
-                    ));
-                }
-                for (i, (id, info)) in folder.packs.iter().enumerate() {
-                    let on = s.horizon.shader_pack == *id;
-                    let mut label = Text::literal(format!("{id}: ")).append(on_off(on));
-                    if info.is_err() || self.shader_pack_failed(id) {
-                        label = label.append(" (Failed)");
-                    }
-                    let widget = button(0.0, 0.0, 310.0, label, Act::ToggleShaderPack(i));
-                    rows.push(Row::Buttons(
-                        if info.is_ok() {
-                            widget
-                        } else {
-                            inactive(widget)
-                        },
-                        None,
-                    ));
-                }
-                rows
             }
             _ => {
                 let _ = s;
@@ -2144,20 +2066,13 @@ impl OptionsUi {
                 }
                 content = y + self.scroll - top + 2.0;
                 out[list_start..].iter_mut().for_each(|w| w.list = true);
-                let folder = match page {
-                    Page::Mods => Some(("Open Mod Folder", Act::OpenModFolder)),
-                    Page::ShaderPacks => {
-                        Some(("Open Shader Pack Folder", Act::OpenShaderPackFolder))
-                    }
-                    _ => None,
-                };
-                if let Some((label, act)) = folder {
+                if page == Page::Mods {
                     out.push(button(
                         cx - 154.0,
                         h - 27.0,
                         150.0,
-                        Text::literal(label),
-                        act,
+                        Text::literal("Open Mod Folder"),
+                        Act::OpenModFolder,
                     ));
                     out.push(button(cx + 4.0, h - 27.0, 150.0, tr("gui.done"), Act::Done));
                 } else {
@@ -2187,9 +2102,6 @@ impl OptionsUi {
         atlas: &HudAtlas,
         cursor: (f32, f32),
     ) {
-        if self.shader_packs_shown() {
-            self.shader_packs.poll(crate::shader_pack::folder());
-        }
         let (w, h) = (batch.width, batch.height);
         if let Some(error) = &self.resource_error {
             ui::menu_background(batch, atlas, 0.0, 0.0, w, h, self.in_world);
@@ -2237,7 +2149,9 @@ impl OptionsUi {
             let blink = self.pack_focus.elapsed().as_millis() as u64;
             let m = crate::screen_draw::Measure(&atlas.font);
             let mouse = (cursor.0.floor() as i32, cursor.1.floor() as i32);
-            let draws = self.packs(atlas, (w, h)).draw(&m, mouse, blink);
+            let packs = self.packs(atlas, (w, h));
+            let mut draws = packs.draw(&m, mouse, blink);
+            packs.bind_icons(&mut draws, atlas, &mut batch.patches);
             crate::screen_draw::paint(batch, atlas, &draws);
             return;
         }
@@ -2490,7 +2404,6 @@ impl OptionsUi {
                     Action::ButtonClick => events.push(Event::ButtonClick),
                     Action::Changed => events.push(Event::Changed),
                     Action::OpenAdvanced => self.push(Page::GraphicsAdvanced),
-                    Action::OpenShaderPacks => self.push(Page::ShaderPacks),
                     Action::OpenSimple => {
                         if self.stack.len() >= 2
                             && self.stack[self.stack.len() - 2] == Page::Graphics
@@ -2662,11 +2575,6 @@ impl OptionsUi {
                             events.push(Event::Changed);
                         }
                         Act::OpenModFolder => events.push(Event::OpenModFolder),
-                        Act::ToggleShaderPack(i) => {
-                            self.toggle_shader_pack(s, i);
-                            events.push(Event::Changed);
-                        }
-                        Act::OpenShaderPackFolder => events.push(Event::OpenShaderPackFolder),
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
                         Act::None => {}
@@ -3113,109 +3021,6 @@ mod tests {
             vec![Event::ButtonClick]
         );
         assert!(ui.resource_error.is_none());
-    }
-
-    /// The Shader Packs page (Video Settings > Shader Packs..., or the
-    /// Shader Pack row of Advanced graphics): the folder's path, Open Shader
-    /// Pack Folder, and a switch per pack (#941, #925).
-    #[test]
-    fn classic_shader_packs_page_shows_the_folder_and_picks_a_pack() {
-        let atlas = atlas();
-        let mut s = Settings::default();
-        let mut ui = OptionsUi::default();
-        let size = (480.0, 240.0);
-        let dir = std::env::temp_dir().join(format!("horizon-shaderpacks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let find = |ui: &mut OptionsUi, s: &Settings, act: &dyn Fn(&Act) -> bool| {
-            ui.layout(s, size.0, size.1)
-                .0
-                .into_iter()
-                .find(|w| matches!(&w.kind, WKind::Button { act: a, active: true, .. } if act(a)))
-        };
-        ui.show(Page::Video);
-        let open = find(&mut ui, &s, &|a| *a == Act::Push(Page::ShaderPacks)).unwrap();
-        ui.click(
-            &mut s,
-            &atlas,
-            open.x + 1.0,
-            open.y + 1.0,
-            size,
-            [480, 240],
-            false,
-            false,
-        );
-        assert_eq!(ui.page(), Page::ShaderPacks);
-
-        ui.shader_packs.poll(dir.clone());
-        let empty = ui.layout(&s, size.0, size.1).0;
-        let path = dir.display().to_string();
-        for line in [path.as_str(), "No shader packs"] {
-            assert!(
-                empty.iter().any(
-                    |w| matches!(&w.kind, WKind::Text { text, .. } if text.plain().contains(line))
-                ),
-                "{line}"
-            );
-        }
-        let folder = find(&mut ui, &s, &|a| *a == Act::OpenShaderPackFolder).unwrap();
-        assert_eq!(
-            ui.click(
-                &mut s,
-                &atlas,
-                folder.x + 1.0,
-                folder.y + 1.0,
-                size,
-                [480, 240],
-                false,
-                false
-            ),
-            vec![Event::ButtonClick, Event::OpenShaderPackFolder]
-        );
-
-        std::fs::write(dir.join("Pack.zip"), b"").unwrap();
-        ui.shader_packs = Default::default();
-        ui.shader_packs.poll(dir.clone());
-        let pack = find(&mut ui, &s, &|a| *a == Act::ToggleShaderPack(0)).unwrap();
-        let events = ui.click(
-            &mut s,
-            &atlas,
-            pack.x + 1.0,
-            pack.y + 1.0,
-            size,
-            [480, 240],
-            false,
-            false,
-        );
-        assert!(events.contains(&Event::Changed));
-        assert_eq!(s.horizon.shader_pack, "Pack.zip");
-        ui.shader_pack_error = Some(("Pack.zip".into(), "broken".into()));
-        let label = |ui: &mut OptionsUi, s: &Settings| match find(ui, s, &|a| {
-            *a == Act::ToggleShaderPack(0)
-        })
-        .unwrap()
-        .kind
-        {
-            WKind::Button { label, .. } => label.plain(),
-            _ => unreachable!(),
-        };
-        assert!(
-            label(&mut ui, &s).ends_with("(Failed)"),
-            "{}",
-            label(&mut ui, &s)
-        );
-        ui.click(
-            &mut s,
-            &atlas,
-            pack.x + 1.0,
-            pack.y + 1.0,
-            size,
-            [480, 240],
-            false,
-            false,
-        );
-        assert_eq!(s.horizon.shader_pack, "", "a second click turns it off");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4328,7 +4133,6 @@ mod tests {
             [
                 Page::Graphics,
                 Page::GraphicsAdvanced,
-                Page::ShaderPacks,
                 Page::Controller,
                 Page::Extras,
                 Page::Mods,
@@ -4362,7 +4166,7 @@ mod tests {
         // Vanilla's own pages keep the Horizon pages they had.
         ui.stack = vec![Page::Main, Page::Video];
         let video = pushes(&mut ui);
-        for page in [Page::Graphics, Page::GraphicsAdvanced, Page::ShaderPacks] {
+        for page in [Page::Graphics, Page::GraphicsAdvanced] {
             assert!(video.contains(&page), "{page:?}");
         }
         ui.stack = vec![Page::Main, Page::Controls];

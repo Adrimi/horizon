@@ -1039,6 +1039,11 @@ impl Game<'_> {
                             .play("minecraft:entity.item.pickup", Some(p), 0.2, pitch);
                     }
                 }
+                // containerMenu.broadcastChanges: InventoryChangeTrigger
+                // (and its announcement) comes before the command's message.
+                if g.player.is_some() {
+                    g.check_inventory_trigger();
+                }
             });
         }
         // The prototype stack: one item.
@@ -1077,6 +1082,8 @@ impl Game<'_> {
                 self.for_player(t, |g| g.teleport_to(Target::Player, pos, rotation));
             }
             Target::Player => {
+                // ServerPlayer.teleport: removeVehicle before placing the player.
+                self.stop_riding();
                 if let Some(p) = self.player.as_mut() {
                     p.position = v;
                     p.velocity = Vec3::new(0.0, 0.0, 0.0);
@@ -1778,8 +1785,11 @@ impl Game<'_> {
             self.level_set(pos, state)
                 .map_err(|e| CommandError::new(Text::literal(e.to_string())))?;
         }
+        // LevelChunk.setBlockState creates it when the block, not the state, is still
+        // there after onPlace: a powered hopper turns itself `enabled=false`.
+        let landed = self.world.block(pos[0], pos[1], pos[2]);
         if old != new
-            && self.world.block(pos[0], pos[1], pos[2]) == state
+            && self.res.facts().get(landed).name == new
             && let Some(entity) = horizon_client::containers::BlockEntity::for_block(&new)
         {
             self.world.block_entities.insert(key, entity);

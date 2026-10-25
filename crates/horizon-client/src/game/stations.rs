@@ -1731,7 +1731,8 @@ impl Game<'_> {
         }
         let keys = &self.mods.tooltip_keys;
         keys.borrow_mut().clear();
-        let enchantment_lines = |levels: &[(std::sync::Arc<str>, u32)], lines: &mut Vec<(String, u32)>| {
+        let enchantment_lines = |levels: &[(std::sync::Arc<str>, u32)],
+                                 lines: &mut Vec<(String, u32)>| {
             for (id, text, curse) in e.tooltip_entries(levels) {
                 keys.borrow_mut()
                     .push((lines.len(), format!("enchantment.{}", id.replace(':', "."))));

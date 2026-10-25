@@ -143,7 +143,10 @@ mod tests {
         assert_eq!(cache.get_with((0, 0), &chunk, |id| id == 1).len(), 0);
         Arc::make_mut(&mut chunk).sections[section_count() - 1] = Arc::new(Section::default());
         cache.clear(); // resource reload, with changed facts for the same state IDs
-        assert_eq!(cache.get_with((0, 0), &chunk, |id| id == 0).len(), section_count());
+        assert_eq!(
+            cache.get_with((0, 0), &chunk, |id| id == 0).len(),
+            section_count()
+        );
         cache.remove(&(0, 0));
         assert!(cache.chunks.is_empty());
     }
@@ -184,7 +187,11 @@ mod tests {
             cache
                 .get_with((0, 0), &chunk, |id| id == 299)
                 .collect::<Vec<_>>(),
-            [MIN_Y, MIN_Y + 9 * 16, MIN_Y + (section_count() as i32 - 1) * 16]
+            [
+                MIN_Y,
+                MIN_Y + 9 * 16,
+                MIN_Y + (section_count() as i32 - 1) * 16
+            ]
         );
         let sections = cache.get_with((0, 0), &chunk, |id| id == 299);
         let top = MIN_Y + (section_count() as i32 - 1) * 16;

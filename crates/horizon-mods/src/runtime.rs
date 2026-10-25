@@ -24,7 +24,9 @@ pub use bindings::horizon::mods::{
         Decoration as ChatDecoration, Picture as ChatPicture, Place as ChatPlace,
         Region as ChatRegion, Source as ChatSource, Style as ChatStyle,
     },
-    entity::{Detail as EntityDetail, Entity as WorldEntity, EntityKind, Face, TypeInfo as EntityType},
+    entity::{
+        Detail as EntityDetail, Entity as WorldEntity, EntityKind, Face, TypeInfo as EntityType,
+    },
     game::{Clock, FoodStats, Player},
     game::{Health, InputState, Session},
     hud::{BarIcon, Bars},
@@ -102,9 +104,6 @@ const STORAGE_MAX_KEYS: usize = 64;
 /// a cheap-in-fuel loop replacing one key with large payloads needs its own
 /// cap, separate from the on-disk quota it would otherwise stay under.
 const STORAGE_WRITE_BUDGET: u64 = 1 << 20;
-/// A mod's data, beside its `horizon-mods` folder (`find`'s `path.parent()`
-/// never has a manifest there, so `find` never mistakes it for a mod).
-const STORAGE_DIR: &str = ".horizon-mod-data";
 /// A mod's screen: how many shapes it may draw, how many images it may
 /// upload and how big they are.
 pub const SCREEN_SHAPES: usize = 4096;
@@ -814,23 +813,6 @@ pub struct TextureSet {
     pub rules: Vec<(String, TextureRule)>,
 }
 
-/// The `.hmod` files and mod folders in `dir`, by name.
-pub fn find(dir: &Path) -> Vec<PathBuf> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<PathBuf> = read
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension().is_some_and(|e| e == "hmod")
-                || p.join(crate::manifest::MANIFEST).is_file()
-        })
-        .collect();
-    found.sort();
-    found
-}
-
 impl Mods {
     /// Reads every mod at `paths` and starts those `enabled` says are on.
     /// A command that `reserved` (vanilla's commands) or an earlier mod
@@ -952,7 +934,7 @@ impl Mods {
         let data_dir = path
             .parent()
             .unwrap_or(Path::new("."))
-            .join(STORAGE_DIR)
+            .join(crate::manifest::STORAGE_DIR)
             .join(&m.id);
         let quota = m
             .storage_quota_mib
