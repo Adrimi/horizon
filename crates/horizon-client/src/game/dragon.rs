@@ -2168,6 +2168,9 @@ impl Game<'_> {
     /// `BossHealthOverlay.extractRenderState`: whatever `publish_boss_bars`
     /// (or a server's packets) put on this client's overlay.
     pub(super) fn draw_boss_bars(&self, batch: &mut HudBatch) {
+        if self.mods.mods.boss_bars_hidden() {
+            return;
+        }
         let bars = self
             .boss_overlay
             .bars(horizon_client::boss_overlay::now_millis());

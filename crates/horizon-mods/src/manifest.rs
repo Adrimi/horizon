@@ -177,9 +177,15 @@ pub enum Capability {
     /// The use button on items the mod claims, and its own keys
     /// (interface `controls`).
     Controls,
+    /// Hiding the game's boss bars (API 0.1.35): no interface of its own,
+    /// `hud.set-boss-bars-hidden` does nothing without it.
+    HudWrite,
+    /// Having the screen reader read a text (API 0.1.35): no interface of
+    /// its own, `game.narrate` does nothing without it.
+    Narrate,
 }
 impl Capability {
-    pub const ALL: [Capability; 40] = [
+    pub const ALL: [Capability; 42] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -220,6 +226,8 @@ impl Capability {
         Capability::Ui,
         Capability::Render,
         Capability::Controls,
+        Capability::HudWrite,
+        Capability::Narrate,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
     pub fn interface(self) -> &'static str {
@@ -264,6 +272,8 @@ impl Capability {
             Capability::Ui => "ui",
             Capability::Render => "render",
             Capability::Controls => "controls",
+            Capability::HudWrite => "hud",
+            Capability::Narrate => "game",
         }
     }
     /// May change in any release: a mod uses it only with
@@ -319,6 +329,8 @@ impl Capability {
             Capability::Controls => {
                 "see the keys you hold and your clicks, take over the use button on its own items and the mouse wheel, and add keys"
             }
+            Capability::HudWrite => "hide the boss bars",
+            Capability::Narrate => "have your screen reader read texts",
         }
     }
     /// The capability a component import needs, `Ok(None)` for one every
@@ -343,6 +355,8 @@ impl Capability {
                         | Capability::InventoryEdit
                         | Capability::EntityEdit
                         | Capability::SlotDecorate
+                        | Capability::HudWrite
+                        | Capability::Narrate
                 )
             })
             .find(|c| c.interface() == interface)
@@ -393,6 +407,8 @@ impl fmt::Display for Capability {
             Capability::Ui => "ui",
             Capability::Render => "render",
             Capability::Controls => "controls",
+            Capability::HudWrite => "hud-write",
+            Capability::Narrate => "narrate",
         };
         f.write_str(name)
     }

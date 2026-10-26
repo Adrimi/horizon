@@ -34,7 +34,8 @@ pub use bindings::horizon::mods::{
         Region as ChatRegion, Source as ChatSource, Style as ChatStyle,
     },
     entity::{
-        Detail as EntityDetail, Entity as WorldEntity, EntityKind, Face, TypeInfo as EntityType,
+        Detail as EntityDetail, Entity as WorldEntity, EntityExtra, EntityKind, Face,
+        TypeInfo as EntityType,
     },
     game::{Clock, FoodStats, Player},
     game::{Health, InputState, Session},
@@ -45,7 +46,7 @@ pub use bindings::horizon::mods::{
         Crafting, Food, ItemStack as InventoryStack, PlayerInventory, Slot as InventorySlot, Stack,
         Tool as InventoryTool,
     },
-    items::Item,
+    items::{Item, TooltipLine as ItemTooltipLine},
     keys::KeyEvent,
     light_events::Flash as LightFlash,
     overlay::{HudState, Layer as OverlayLayer, WorldElement},
@@ -63,7 +64,9 @@ pub use bindings::horizon::mods::{
         Size as ScreenSize, TextShape, TipLine, WheelTurn,
     },
     slots::{Mark, MarkShape},
-    target::{Block, Effect as TargetEffect, Entity, Fluid as TargetFluid},
+    target::{
+        Block, BlockProperties, Effect as TargetEffect, Entity, Fluid as TargetFluid, FluidEx,
+    },
     texture_rules::{
         BlockFilter as RuleBlock, Connect as RuleConnect, Method as RuleMethod, Rule as TextureRule,
     },
@@ -75,8 +78,8 @@ pub use bindings::horizon::mods::{
     },
     weather::State as WeatherState,
     world::{
-        Biome, BlockBroken, BlockPos, BlockRemoved, ChunkDetails, ChunkSurface, ContainerStack,
-        RandomTick, WorldBlock,
+        Biome, BlockBroken, BlockEntity as WorldBlockEntity, BlockPos, BlockRemoved, ChunkDetails,
+        ChunkSurface, ContainerStack, RandomTick, WorldBlock,
     },
 };
 use bindings::{
@@ -158,9 +161,39 @@ pub const SCREEN_TEXTURE_SIDE: u32 = 512;
 /// The side of an overlay image (API 0.1.7); the screen's grew in 0.1.31.
 pub const OVERLAY_TEXTURE_SIDE: u32 = 256;
 
+/// The game's translation of a key, `None` for a key it has no line for.
+#[derive(Clone, Default)]
+pub struct Translator(pub Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>);
+impl std::fmt::Debug for Translator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Translator")
+    }
+}
+
 /// What mods may read of the game, copied once per tick by the game.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
+    /// More state of the nearest entities, by id (`entity.get-extra`, API 0.1.35).
+    pub entity_extras: Option<Arc<std::collections::HashMap<u32, EntityExtra>>>,
+    /// The loot tables and widths of the entities, and the frozen ones
+    /// (`entity.get-loot-table`, `get-width`, `is-frozen`, API 0.1.35).
+    pub entity_loot: Option<Arc<std::collections::HashMap<u32, String>>>,
+    pub entity_widths: Option<Arc<std::collections::HashMap<u32, f32>>>,
+    pub frozen: Option<Arc<std::collections::HashSet<u32>>>,
+    /// The block entity of the block looked at or broken (`world.get-block-entity`).
+    pub block_entity: Option<([i32; 3], WorldBlockEntity)>,
+    /// The looked-at block's properties and loot table (`target`, API 0.1.35).
+    pub block_properties: Option<BlockProperties>,
+    pub block_loot_table: Option<String>,
+    pub fluid_ex: Option<FluidEx>,
+    /// The display names of mod namespaces (`game.get-mod-name`, API 0.1.35).
+    pub mod_names: Option<Arc<std::collections::HashMap<String, String>>>,
+    /// The game's lines for translation keys (`game.get-translation`, API 0.1.35).
+    pub translator: Translator,
+    /// The narrator's mode (`game.get-narration-mode`, API 0.1.35).
+    pub narration_mode: Option<String>,
+    /// The tooltips of the items by id (`items.get-tooltip`, API 0.1.35).
+    pub item_tooltips: Option<Arc<std::collections::HashMap<String, Vec<ItemTooltipLine>>>>,
     pub player: Option<Player>,
     pub clock: Option<Clock>,
     /// The block under the crosshair (`target`).
@@ -616,6 +649,8 @@ pub enum Output {
     Give { id: String, count: u32 },
     /// `inventory.move-item` (API 0.1.16): move or swap two slots.
     MoveItem { from: u32, to: u32 },
+    /// `game.narrate` (API 0.1.35): the text to have read.
+    Narrate { name: String, text: String },
     /// `hud.show-action-bar` (API 0.1.16).
     ActionBar { text: String, color: u32 },
     /// `world.run-command` (API 0.1.20): the command, without its slash.
@@ -774,6 +809,11 @@ struct State {
     can_give: bool,
     /// The manifest declares `entity-edit`.
     can_edit_entities: bool,
+    /// The manifest declares `hud-write` and `narrate` (API 0.1.35).
+    can_hide_boss_bars: bool,
+    can_narrate: bool,
+    /// The mod hid the game's boss bars (`hud.set-boss-bars-hidden`).
+    boss_bars_hidden: bool,
     /// Particle pictures defined and particles spawned since the game last
     /// took them (`particles`, API 0.1.6).
     new_sprites: Vec<SpriteDef>,
@@ -1081,6 +1121,9 @@ impl Mods {
             ui,
             can_give: m.capabilities.contains(&crate::Capability::InventoryEdit),
             can_edit_entities: m.capabilities.contains(&crate::Capability::EntityEdit),
+            can_hide_boss_bars: m.capabilities.contains(&crate::Capability::HudWrite),
+            can_narrate: m.capabilities.contains(&crate::Capability::Narrate),
+            boss_bars_hidden: false,
             given: 0,
             moved: 0,
             new_sprites: Vec::new(),
@@ -1408,6 +1451,14 @@ impl Mods {
             .filter_map(|e| e.run.as_ref())
             .flat_map(|r| r.store.data().weather_passthrough.iter().cloned())
             .collect()
+    }
+    /// Whether a running mod hides the game's boss bars (`hud-write`, API 0.1.35).
+    pub fn boss_bars_hidden(&self) -> bool {
+        self.entries.iter().any(|e| {
+            e.run
+                .as_ref()
+                .is_some_and(|r| r.store.data().boss_bars_hidden)
+        })
     }
     /// Whether a running mod has turned the game's own rain and snow columns
     /// off (`weather.set-default-weather`, API 0.1.22).
@@ -2317,6 +2368,46 @@ impl game::Host for State {
     fn get_difficulty(&mut self) -> Option<String> {
         self.snapshot.difficulty.clone()
     }
+    fn get_mod_name(&mut self, namespace: String) -> String {
+        match namespace.as_str() {
+            "minecraft" => "Minecraft".to_owned(),
+            "horizon" => "Horizon".to_owned(),
+            _ => self
+                .snapshot
+                .mod_names
+                .as_ref()
+                .and_then(|names| names.get(&namespace).cloned())
+                .unwrap_or(namespace),
+        }
+    }
+    fn get_translation(&mut self, key: String) -> String {
+        self.snapshot
+            .translator
+            .0
+            .as_ref()
+            .and_then(|t| t(&key))
+            .unwrap_or(key)
+    }
+    fn narrate(&mut self, text: String) {
+        let shown = self
+            .out
+            .iter()
+            .filter(|o| matches!(o, Output::Narrate { .. }))
+            .count();
+        if self.can_narrate && !text.is_empty() && shown < CHAT_PER_CALL {
+            let name = self.name.clone();
+            self.out.push(Output::Narrate {
+                name,
+                text: clip(text),
+            });
+        }
+    }
+    fn get_narration_mode(&mut self) -> String {
+        self.snapshot
+            .narration_mode
+            .clone()
+            .unwrap_or_else(|| "off".into())
+    }
     fn get_main_hand(&mut self) -> String {
         self.snapshot
             .main_hand
@@ -2377,6 +2468,19 @@ impl target::Host for State {
         let (entity, d) = ray.entity.as_ref()?;
         let before_block = ray.block.as_ref().is_none_or(|(_, _, b)| d < b);
         (*d <= reach && before_block).then(|| entity.clone())
+    }
+    fn get_block_properties(&mut self) -> Option<BlockProperties> {
+        self.snapshot.block_properties
+    }
+    fn get_block_loot_table(&mut self) -> Option<String> {
+        self.snapshot.block_loot_table.clone()
+    }
+    fn get_fluid_ex(&mut self, mode: String) -> Option<FluidEx> {
+        match mode.as_str() {
+            "any" => self.snapshot.fluid_ex.clone(),
+            "fallback" if self.snapshot.block.is_none() => self.snapshot.fluid_ex.clone(),
+            _ => None,
+        }
     }
     fn get_fluid(&mut self, mode: String) -> Option<TargetFluid> {
         match mode.as_str() {
@@ -2590,6 +2694,25 @@ impl entity::Host for State {
     }
     fn get_face(&mut self, uuid: String) -> Option<Face> {
         self.snapshot.faces.as_ref()?.get(&uuid).cloned()
+    }
+    fn get_extra(&mut self, id: u32) -> Option<EntityExtra> {
+        self.snapshot.entity_extras.as_ref()?.get(&id).cloned()
+    }
+    fn get_loot_table(&mut self, id: u32) -> Option<String> {
+        self.snapshot.entity_loot.as_ref()?.get(&id).cloned()
+    }
+    fn get_width(&mut self, id: u32) -> f32 {
+        self.snapshot
+            .entity_widths
+            .as_ref()
+            .and_then(|w| w.get(&id).copied())
+            .unwrap_or(0.0)
+    }
+    fn is_frozen(&mut self, id: u32) -> bool {
+        self.snapshot
+            .frozen
+            .as_ref()
+            .is_some_and(|set| set.contains(&id))
     }
     fn get_types(&mut self) -> Vec<EntityType> {
         self.snapshot
@@ -3599,6 +3722,13 @@ impl items::Host for State {
             .find(|item| item.id == id)
             .cloned()
     }
+    fn get_tooltip(&mut self, id: String) -> Vec<ItemTooltipLine> {
+        self.snapshot
+            .item_tooltips
+            .as_ref()
+            .and_then(|t| t.get(&id).cloned())
+            .unwrap_or_default()
+    }
     fn get_name_color(&mut self, id: String) -> Option<u32> {
         self.snapshot.item_colors.as_ref()?.get(&id).copied()
     }
@@ -3609,6 +3739,22 @@ impl recipes::Host for State {
             .recipes
             .as_ref()
             .map_or_else(Vec::new, |recipes| recipes.as_ref().clone())
+    }
+    fn get_for(&mut self, item: String) -> Vec<Recipe> {
+        self.snapshot.recipes.as_ref().map_or_else(Vec::new, |all| {
+            all.iter()
+                .filter(|r| r.output.as_deref() == Some(item.as_str()))
+                .cloned()
+                .collect()
+        })
+    }
+    fn get_uses(&mut self, item: String) -> Vec<Recipe> {
+        self.snapshot.recipes.as_ref().map_or_else(Vec::new, |all| {
+            all.iter()
+                .filter(|r| r.inputs.iter().any(|slot| slot.contains(&item)))
+                .cloned()
+                .collect()
+        })
     }
 }
 impl world::Host for State {
@@ -3804,6 +3950,10 @@ impl world::Host for State {
     fn get_container(&mut self, pos: BlockPos) -> Option<Vec<Option<ContainerStack>>> {
         let (at, stacks) = self.snapshot.container.as_ref()?;
         (*at == [pos.x, pos.y, pos.z]).then(|| stacks.clone())
+    }
+    fn get_block_entity(&mut self, pos: BlockPos) -> Option<WorldBlockEntity> {
+        let (at, entity) = self.snapshot.block_entity.as_ref()?;
+        (*at == [pos.x, pos.y, pos.z]).then(|| entity.clone())
     }
     fn get_chunk_details(&mut self, cx: i32, cz: i32) -> Option<ChunkDetails> {
         self.world.as_ref()?.chunk_details(cx, cz)
@@ -4100,6 +4250,11 @@ impl hud::Host for State {
     }
     fn get_bars(&mut self) -> Option<Bars> {
         self.ui.bars.clone()
+    }
+    fn set_boss_bars_hidden(&mut self, hidden: bool) {
+        if self.can_hide_boss_bars {
+            self.boss_bars_hidden = hidden;
+        }
     }
     fn get_boss_bars(&mut self) -> Vec<BossBarInfo> {
         self.snapshot.boss_bars.clone()

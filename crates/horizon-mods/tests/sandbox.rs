@@ -18,7 +18,7 @@ id = "test_guest"
 name = "Test Guest"
 version = "0.1.0"
 api = "0.1"
-capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules", "chat-decorate", "players", "light-events", "audio", "exchange", "input", "game-edit"]
+capabilities = ["chat", "game-read", "target", "inventory-read", "hotbar", "world-read", "world-edit", "keys", "storage", "screen", "items-read", "recipes-read", "inventory-edit", "weather-read", "settings-read", "particles", "atmosphere", "overlay", "hud", "entity-read", "entity-edit", "slots-read", "slot-decorate", "tooltip", "debug", "lighting", "resource-read", "texture-rules", "chat-decorate", "players", "light-events", "audio", "exchange", "input", "game-edit", "hud-write", "narrate"]
 "#;
 const UI_MANIFEST: &str = r#"
 id = "test_ui_guest"
@@ -1891,6 +1891,130 @@ fn the_look_info_apis_read_effects_rays_fluids_hand_tab_list_and_boss_bars() {
             "minecraft:speed:1:100:false:true|minecraft:stone/north/minecraft:zombie -/-/- minecraft:dirt/up/-|minecraft:water#0 minecraft:water#0 -|left|true|Wither@17|||"
         )]
     );
+}
+
+#[test]
+fn the_look_info_data_apis_read_extras_block_entities_properties_names_and_tooltips() {
+    use horizon_mods::{
+        BlockProperties, EntityExtra, FluidEx, ItemTooltipLine, Recipe, RecipeKind, Translator,
+        WorldBlockEntity,
+    };
+    use std::{collections::HashMap, sync::Arc};
+    let mut mods = load("horizon_mods_test_guest.hmod");
+    assert!(mods.command("lookdatafx"));
+    assert_eq!(
+        mods.drain(),
+        [
+            Output::Narrate {
+                name: "Test Guest".into(),
+                text: "hello".into()
+            },
+            feedback(
+                "none|None 0 false|none|none|None -|none|Minecraft farm effect.minecraft.speed no.such.key|0 0||off"
+            )
+        ]
+    );
+    let extra = EntityExtra {
+        baby: true,
+        age: -20,
+        in_love: false,
+        profession: "minecraft:farmer".into(),
+        profession_level: 3,
+        horse_jump: 0.0,
+        horse_speed: 0.0,
+        pet_armor: None,
+        owner: None,
+        equipment: vec![None; 6],
+        frame_item: None,
+        frame_rotation: 0,
+        painting_motive: None,
+        painting_width: 0,
+        painting_height: 0,
+        falling_block: None,
+        item_count: 0,
+    };
+    mods.set_snapshot(Snapshot {
+        entity_extras: Some(Arc::new(HashMap::from([(1, extra)]))),
+        entity_loot: Some(Arc::new(HashMap::from([(
+            1,
+            "minecraft:entities/zombie".to_owned(),
+        )]))),
+        entity_widths: Some(Arc::new(HashMap::from([(1, 0.6)]))),
+        frozen: Some(Arc::new(std::collections::HashSet::from([1]))),
+        block_entity: Some((
+            [1, 2, 3],
+            WorldBlockEntity {
+                id: "minecraft:jukebox".into(),
+                items: vec![],
+                bees: 2,
+                jukebox_record: Some("minecraft:music_disc_cat".into()),
+                book: None,
+                spawner_entity: None,
+                spawner_cooldown: 0,
+                command: None,
+                sign_lines: vec!["a".into()],
+                waxed: false,
+            },
+        )),
+        block_properties: Some(BlockProperties {
+            explosion_resistance: 6.0,
+            jump_factor: 1.0,
+            speed_factor: 0.4,
+            ignite_odds: 5,
+            burn_odds: 20,
+        }),
+        block_loot_table: Some("minecraft:blocks/stone".into()),
+        fluid_ex: Some(FluidEx {
+            id: "minecraft:water".into(),
+            name: "Water".into(),
+            level: 0,
+            x: 4,
+            y: 5,
+            z: 6,
+            sprite: "minecraft:block/water_still".into(),
+        }),
+        mod_names: Some(Arc::new(HashMap::from([(
+            "farm".to_owned(),
+            "Farm".to_owned(),
+        )]))),
+        translator: Translator(Some(Arc::new(|key: &str| {
+            (key == "effect.minecraft.speed").then(|| "Speed".to_owned())
+        }))),
+        item_tooltips: Some(Arc::new(HashMap::from([(
+            "minecraft:stick".to_owned(),
+            vec![ItemTooltipLine {
+                text: "Stick".into(),
+                color: 0xffff_ffff,
+            }],
+        )]))),
+        recipes: Some(Arc::new(vec![Recipe {
+            kind: RecipeKind::CraftingShapeless,
+            station: "minecraft:crafting_table".into(),
+            inputs: vec![vec!["minecraft:oak_log".into()]],
+            output: Some("minecraft:oak_planks".into()),
+            count: 4,
+            width: 1,
+            height: 1,
+            time: 0,
+            experience: 0.0,
+        }])),
+        narration_mode: Some("off".into()),
+        ..player()
+    });
+    assert!(mods.command("lookdatafx"));
+    assert_eq!(
+        mods.drain(),
+        [
+            Output::Narrate {
+                name: "Test Guest".into(),
+                text: "hello".into()
+            },
+            feedback(
+                "true:-20:minecraft:farmer:3:6:0|Some(\"minecraft:entities/zombie\") 0.6 true|minecraft:jukebox:2:Some(\"minecraft:music_disc_cat\"):[\"a\"]|6:1:0.4:5:20|Some(\"minecraft:blocks/stone\") -|minecraft:water@4,5,6:minecraft:block/water_still|Minecraft Farm Speed no.such.key|1 1|Stick#ffffffff|off"
+            )
+        ]
+    );
+    assert!(mods.boss_bars_hidden());
 }
 
 #[test]

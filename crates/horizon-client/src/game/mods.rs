@@ -87,6 +87,9 @@ pub(super) struct ModsState {
     pub(super) biomes: std::sync::OnceLock<Arc<Vec<String>>>,
     /// The registry's entity types, built once (`entity.get-types`).
     pub(super) entity_types: std::sync::OnceLock<Arc<Vec<horizon_mods::EntityType>>>,
+    /// The tooltips of the items, built once (`items.get-tooltip`).
+    pub(super) item_tooltips:
+        std::sync::OnceLock<Arc<HashMap<String, Vec<horizon_mods::ItemTooltipLine>>>>,
     /// The screen a mod has open (API 0.1.4).
     pub(super) screen: ModScreen,
     /// Every item of the game, for `items.list` (API 0.1.5); built on first use.
@@ -754,6 +757,24 @@ impl Game<'_> {
                 attacking: self.left,
             });
         }
+        if mods.uses(Capability::GameRead) {
+            snapshot.mod_names = Some(Arc::new(
+                self.mods
+                    .mods
+                    .entries()
+                    .iter()
+                    .filter_map(|e| e.manifest.as_ref())
+                    .map(|m| (m.id.clone(), m.name.clone()))
+                    .collect(),
+            ));
+            snapshot.translator = horizon_mods::Translator(Some(Arc::new(|key: &str| {
+                horizon_client::lang::has(key).then(|| horizon_client::lang::get_or(key, key))
+            })));
+            snapshot.narration_mode = Some("off".to_owned());
+        }
+        if mods.uses(Capability::ItemsRead) {
+            snapshot.item_tooltips = Some(self.mod_item_tooltips());
+        }
         if self.player.is_some() {
             snapshot.main_hand = Some(
                 if self.settings.main_hand_left {
@@ -788,6 +809,7 @@ impl Game<'_> {
                     .collect(),
             ));
             snapshot.entity_types = Some(self.mod_entity_types());
+            self.mod_entity_extras(&entities, &mut snapshot);
             snapshot.faces = Some(Arc::new(self.mod_faces(&entities)));
             snapshot.entities = Some(Arc::new(entities));
             snapshot.entities_editable = self.has_singleplayer_server();
@@ -822,6 +844,19 @@ impl Game<'_> {
                 Some((pos, stacks))
             });
             snapshot.block = looked.map(|pos| self.mod_block(pos));
+            snapshot.block_properties = snapshot
+                .block
+                .as_ref()
+                .map(|b| self.mod_block_properties(b));
+            snapshot.block_loot_table = snapshot.block.as_ref().and_then(|b| {
+                let path = b.id.strip_prefix("minecraft:")?;
+                let id = format!("minecraft:blocks/{path}");
+                self.res.items().has_loot_table(&id).then_some(id)
+            });
+            snapshot.block_entity = looked.or(breaking).and_then(|pos| {
+                let entity = self.mod_block_entity(pos)?;
+                Some((pos, entity))
+            });
             snapshot.breaking = breaking.map(|pos| self.mod_block(pos));
             snapshot.breaking_progress = self.mining.as_ref().map(|m| m.progress.min(1.0));
             snapshot.block_name = snapshot.block.as_ref().map(|b| {
@@ -1538,6 +1573,10 @@ impl Game<'_> {
                 }
                 Output::MoveItem { from, to } => {
                     self.mod_move_item(from as usize, to as usize);
+                    continue;
+                }
+                Output::Narrate { name, text } => {
+                    log::info!("[narrator] {name}: {text}");
                     continue;
                 }
                 Output::ActionBar { text, color } => {
@@ -4537,12 +4576,20 @@ impl Game<'_> {
                     .and_then(|s| s.properties.get("level"))
                     .and_then(|l| l.parse().ok())
                     .unwrap_or(0);
+                let name =
+                    horizon_client::lang::get_or(&format!("block.{}", id.replace(':', ".")), id);
+                snapshot.fluid_ex = Some(horizon_mods::FluidEx {
+                    id: id.to_owned(),
+                    name: name.clone(),
+                    level,
+                    x: at[0],
+                    y: at[1],
+                    z: at[2],
+                    sprite: format!("{id}_still").replacen("minecraft:", "minecraft:block/", 1),
+                });
                 snapshot.fluid = Some(horizon_mods::TargetFluid {
                     id: id.to_owned(),
-                    name: horizon_client::lang::get_or(
-                        &format!("block.{}", id.replace(':', ".")),
-                        id,
-                    ),
+                    name,
                     level,
                 });
                 break;
@@ -4582,3 +4629,239 @@ const MOD_UI_COLUMN: f32 = 200.0;
 /// A key row's height with its gap, as the widgets below it space out.
 #[cfg(feature = "mods")]
 const MOD_UI_KEY_ROW: f32 = 26.0;
+/// Entity extras, block entities and properties, item tooltips (API 0.1.35).
+impl Game<'_> {
+    /// `entity.get-extra`, `get-loot-table`, `get-width` and `is-frozen` for
+    /// the entities `nearby` lists; the extras of the 64 nearest only.
+    fn mod_entity_extras(&self, entities: &[horizon_mods::WorldEntity], snapshot: &mut Snapshot) {
+        use horizon_mods::EntityExtra;
+        let uuid = |o: [i32; 4]| {
+            format!(
+                "{:032x}",
+                o.iter()
+                    .fold(0u128, |a, &w| (a << 32) | u128::from(w as u32))
+            )
+        };
+        let items = self.res.items();
+        let (mut extras, mut loot, mut widths, mut frozen) = (
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+        );
+        for (rank, e) in entities.iter().enumerate() {
+            let near = rank < 64;
+            let mut extra = EntityExtra {
+                baby: false,
+                age: 0,
+                in_love: false,
+                profession: String::new(),
+                profession_level: 0,
+                horse_jump: 0.0,
+                horse_speed: 0.0,
+                pet_armor: None,
+                owner: None,
+                equipment: Vec::new(),
+                frame_item: None,
+                frame_rotation: 0,
+                painting_motive: None,
+                painting_width: 0,
+                painting_height: 0,
+                falling_block: None,
+                item_count: 0,
+            };
+            if e.id < 0x8000_0000
+                && let Some(m) = self.mobs.iter().find(|m| m.id == e.id)
+            {
+                widths.insert(e.id, m.dims().0 as f32);
+                if m.ticks_frozen >= 140 {
+                    frozen.insert(e.id);
+                }
+                if let Some(path) = m.kind.id.strip_prefix("minecraft:") {
+                    let table = format!("minecraft:entities/{path}");
+                    if items.has_loot_table(&table) {
+                        loot.insert(e.id, table);
+                    }
+                }
+                extra.baby = m.is_baby();
+                extra.age = m.extra.age;
+                extra.in_love = m.extra.in_love > 0;
+                let villager = matches!(
+                    m.species(),
+                    horizon_client::mobs::Species::Villager
+                        | horizon_client::mobs::Species::ZombieVillager
+                );
+                if villager {
+                    let list = horizon_client::mobs::render::PROFESSIONS;
+                    extra.profession =
+                        format!("minecraft:{}", list[m.extra.variant2 as usize % list.len()]);
+                    extra.profession_level = u32::from(m.extra.variant3).max(1);
+                }
+                if horizon_client::mobs::equine::is_equine(m.species()) {
+                    extra.horse_jump = m.extra.vector[0] as f32;
+                    extra.horse_speed = m.attrs.speed as f32;
+                }
+                if (horizon_client::mobs::equine::is_equine(m.species())
+                    || m.species() == horizon_client::mobs::Species::Wolf)
+                    && let Some(armor) = m.extra.chest.as_ref()
+                {
+                    extra.pet_armor = Some(armor.to_string());
+                }
+                extra.owner = m.extra.owner.map(uuid);
+                extra.equipment = [
+                    &m.extra.head,
+                    &m.extra.chest,
+                    &m.extra.legs,
+                    &m.extra.feet,
+                    &m.extra.main_hand,
+                    &m.extra.off_hand,
+                ]
+                .iter()
+                .map(|s| s.as_ref().map(|s| s.to_string()))
+                .collect();
+            } else if let Some(i) = self.dropped.iter().find(|i| i.id == e.id) {
+                extra.item_count = i.stack.count;
+                widths.insert(e.id, 0.25);
+            } else if let Some(f) = self.item_frames.iter().find(|f| f.id == e.id) {
+                extra.frame_item = f.item.as_ref().map(|s| s.item.to_string());
+                extra.frame_rotation = u32::from(f.rotation);
+                widths.insert(e.id, 0.5);
+            } else if let Some(p) = self.paintings.iter().find(|p| p.id == e.id) {
+                extra.painting_motive = Some(p.variant.to_string());
+                extra.painting_width = p.width.max(0) as u32 / 16;
+                extra.painting_height = p.height.max(0) as u32 / 16;
+            } else if let Some(f) = self.falling.iter().find(|f| f.id == e.id && f.id != 0) {
+                extra.falling_block = Some(self.res.facts().get(f.state).name.to_string());
+                widths.insert(e.id, 0.98);
+            }
+            if near {
+                extras.insert(e.id, extra);
+            }
+        }
+        snapshot.entity_extras = Some(Arc::new(extras));
+        snapshot.entity_loot = Some(Arc::new(loot));
+        snapshot.entity_widths = Some(Arc::new(widths));
+        snapshot.frozen = Some(Arc::new(frozen));
+    }
+    /// `target.get-block-properties`: `BlockBehaviour.Properties` of a block.
+    fn mod_block_properties(&self, block: &Block) -> horizon_mods::BlockProperties {
+        let state = self.world.block(block.x, block.y, block.z);
+        let facts = self.res.facts().get(state);
+        let id = block.id.strip_prefix("minecraft:").unwrap_or(&block.id);
+        let (jump, speed) = match id {
+            "honey_block" => (0.5, 0.4),
+            "soul_sand" => (1.0, 0.4),
+            _ => (1.0, 1.0),
+        };
+        let tagged = |tag: &str| {
+            self.res
+                .items()
+                .block_tags
+                .get(tag)
+                .is_some_and(|members| members.contains(block.id.as_str()))
+        };
+        // FireBlock.bootStrap: (ignite odds, burn odds).
+        let (ignite, burn) = if tagged("minecraft:planks")
+            || tagged("minecraft:wooden_slabs")
+            || tagged("minecraft:wooden_stairs")
+            || tagged("minecraft:wooden_fences")
+            || tagged("minecraft:fence_gates")
+        {
+            (5, 20)
+        } else if tagged("minecraft:logs") || id.ends_with("_wood") || id.ends_with("_hyphae") {
+            (5, 5)
+        } else if tagged("minecraft:leaves")
+            || tagged("minecraft:wool")
+            || tagged("minecraft:wool_carpets")
+        {
+            (30, 60)
+        } else {
+            match id {
+                "bookshelf" => (30, 20),
+                "tnt" => (15, 100),
+                "hay_block" | "dried_kelp_block" => (60, 20),
+                "coal_block" => (5, 5),
+                "short_grass" | "fern" | "dead_bush" | "tall_grass" | "large_fern" => (60, 100),
+                "vine" => (15, 100),
+                "bamboo" => (60, 60),
+                "sweet_berry_bush" => (60, 100),
+                "lectern" | "composter" | "beehive" | "bee_nest" => (30, 20),
+                _ => (0, 0),
+            }
+        };
+        horizon_mods::BlockProperties {
+            explosion_resistance: facts.explosion_resistance,
+            jump_factor: jump,
+            speed_factor: speed,
+            ignite_odds: ignite,
+            burn_odds: burn,
+        }
+    }
+    /// `world.get-block-entity` for the block at `pos`.
+    fn mod_block_entity(&self, pos: [i32; 3]) -> Option<horizon_mods::WorldBlockEntity> {
+        use horizon_client::containers::BlockEntity;
+        let block_id = self
+            .res
+            .facts()
+            .get(self.world.block(pos[0], pos[1], pos[2]))
+            .name
+            .to_string();
+        let entity = self.world.block_entities.get(&(pos[0], pos[1], pos[2]))?;
+        let mut out = horizon_mods::WorldBlockEntity {
+            id: block_id,
+            items: self.mod_container(pos).unwrap_or_default(),
+            bees: 0,
+            jukebox_record: None,
+            book: None,
+            spawner_entity: None,
+            spawner_cooldown: 0,
+            command: None,
+            sign_lines: Vec::new(),
+            waxed: false,
+        };
+        match entity {
+            BlockEntity::Beehive(h) => out.bees = h.bees.len() as u32,
+            BlockEntity::Jukebox(j) => {
+                out.jukebox_record = j.record.as_ref().map(|s| s.item.to_string());
+            }
+            BlockEntity::Lectern(l) => out.book = l.book.as_ref().map(|s| s.item.to_string()),
+            BlockEntity::Spawner(s) => {
+                out.spawner_cooldown = s.spawn_delay.max(0) as u32;
+                out.spawner_entity = s.potentials.first().and_then(|(data, _)| data.id());
+            }
+            BlockEntity::CommandBlock(c) => out.command = Some(c.command.clone()),
+            BlockEntity::Sign(s) => {
+                out.sign_lines = s.front.lines.to_vec();
+                out.waxed = s.waxed;
+            }
+            _ => {}
+        }
+        Some(out)
+    }
+    /// The tooltip of each item as a plain stack, built once.
+    fn mod_item_tooltips(&self) -> Arc<HashMap<String, Vec<horizon_mods::ItemTooltipLine>>> {
+        self.mods
+            .item_tooltips
+            .get_or_init(|| {
+                let items = self.res.items();
+                Arc::new(
+                    items
+                        .order
+                        .iter()
+                        .map(|id| {
+                            let lines = self
+                                .stack_tooltip(&horizon_client::items::ItemStack::new(id, 1))
+                                .into_iter()
+                                .map(|(text, color)| horizon_mods::ItemTooltipLine {
+                                    text: text.plain(),
+                                    color,
+                                })
+                                .collect();
+                            (id.to_string(), lines)
+                        })
+                        .collect(),
+                )
+            })
+            .clone()
+    }
+}
