@@ -2160,6 +2160,9 @@ impl Game<'_> {
     /// `BossHealthOverlay`: the dragon's pink bar, then the withers', the
     /// raids' and the custom bars, in that order.
     pub(super) fn draw_boss_bars(&self, batch: &mut HudBatch) {
+        if self.mods.mods.boss_bars_hidden() {
+            return;
+        }
         let bars = self.boss_bar_list();
         let draws = hud_overlays::boss_overlay(
             batch.width as i32,

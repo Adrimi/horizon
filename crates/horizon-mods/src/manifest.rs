@@ -160,9 +160,15 @@ pub enum Capability {
     /// New blocks and items from the mod's `data/` (API 0.2): no WIT
     /// interface, the game reads them before the world loads.
     Registries,
+    /// Hiding the game's boss bars (API 0.1.35): no interface of its own,
+    /// `hud.set-boss-bars-hidden` does nothing without it.
+    HudWrite,
+    /// Having the screen reader read a text (API 0.1.35): no interface of
+    /// its own, `game.narrate` does nothing without it.
+    Narrate,
 }
 impl Capability {
-    pub const ALL: [Capability; 36] = [
+    pub const ALL: [Capability; 38] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -199,6 +205,8 @@ impl Capability {
         Capability::GameEdit,
         Capability::TextureRules,
         Capability::Registries,
+        Capability::HudWrite,
+        Capability::Narrate,
     ];
     /// The WIT interface it grants, in `horizon:mods`.
     pub fn interface(self) -> &'static str {
@@ -239,6 +247,8 @@ impl Capability {
             Capability::GameEdit => "game",
             Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
+            Capability::HudWrite => "hud",
+            Capability::Narrate => "game",
         }
     }
     /// What the player reads before turning the mod on: "May <this>".
@@ -280,6 +290,8 @@ impl Capability {
             Capability::GameEdit => "change your hunger and your mining speed",
             Capability::TextureRules => "change the textures of blocks",
             Capability::Registries => "add blocks and items to your worlds",
+            Capability::HudWrite => "hide the boss bars",
+            Capability::Narrate => "have your screen reader read texts",
         }
     }
     /// The capability a component import needs, `Ok(None)` for one every
@@ -304,6 +316,8 @@ impl Capability {
                         | Capability::InventoryEdit
                         | Capability::EntityEdit
                         | Capability::SlotDecorate
+                        | Capability::HudWrite
+                        | Capability::Narrate
                 )
             })
             .find(|c| c.interface() == interface)
@@ -350,6 +364,8 @@ impl fmt::Display for Capability {
             Capability::GameEdit => "game-edit",
             Capability::TextureRules => "texture-rules",
             Capability::Registries => "registries",
+            Capability::HudWrite => "hud-write",
+            Capability::Narrate => "narrate",
         };
         f.write_str(name)
     }

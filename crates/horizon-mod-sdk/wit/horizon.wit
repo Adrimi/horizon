@@ -4,7 +4,7 @@
 /// interface but `log` is a capability: the mod's manifest lists the ones it
 /// uses, the player sees them before turning the mod on, and the game refuses
 /// a component that imports one its manifest does not declare.
-package horizon:mods@0.1.34;
+package horizon:mods@0.1.35;
 
 /// The mod's log, in the game's log under the mod's id. Always granted.
 interface log {
@@ -139,6 +139,24 @@ interface game {
     /// The hand the player holds the main item in, `left` or `right`
     /// (the Main Hand option; API 0.1.34; `game-read`).
     get-main-hand: func() -> string;
+    /// The display name of the mod that owns a namespace: `minecraft` is
+    /// "Minecraft", `horizon` is "Horizon", a loaded mod's namespace is the
+    /// mod's name; the namespace itself when the game knows none (API
+    /// 0.1.35; `game-read`).
+    get-mod-name: func(namespace: string) -> string;
+    /// The game's line for a translation key in the language of the game
+    /// (`effect.minecraft.speed` is "Speed"); the key itself when the
+    /// language has none (API 0.1.35; `game-read`).
+    get-translation: func(key: string) -> string;
+    /// With capability `narrate`: asks for the text to be read aloud (API
+    /// 0.1.35). Horizon has no speech engine yet, so the game only records
+    /// the request in its log (`[narrator] <mod>: <text>`); a speech engine
+    /// will read the same requests. Without the capability it does nothing.
+    narrate: func(text: string);
+    /// The narrator's mode: `off` while the game has no narrator (API
+    /// 0.1.35; `game-read`). A mod that narrates only when it is not `off`
+    /// stays silent until the game gains one.
+    get-narration-mode: func() -> string;
 }
 
 /// Capability `chat`: messages only the local player sees.
@@ -405,6 +423,11 @@ interface hud {
     /// The boss bars the game draws now, from the top; empty when there is
     /// none (API 0.1.34; `hud`). A panel under them starts below the last.
     get-boss-bars: func() -> list<boss-bar>;
+    /// With capability `hud-write`: hides the game's boss bars while the
+    /// mod says so (API 0.1.35). They stay hidden while any running mod
+    /// says so, and come back when the mod says `false` or stops. Without
+    /// the capability it does nothing.
+    set-boss-bars-hidden: func(hidden: bool);
 }
 
 /// Capability `target`: the block the player looks at, and the one they
@@ -505,6 +528,42 @@ interface target {
     /// `fallback` gives it only when the ray hits no block; `none` (and any
     /// other word) gives none, as a game that ignores fluids does.
     get-fluid: func(mode: string) -> option<fluid>;
+
+    /// The `BlockBehaviour.Properties` of the block under the crosshair
+    /// (API 0.1.35).
+    record block-properties {
+        explosion-resistance: f32,
+        /// `jumpFactor`: 1 for most, 0.5 for honey.
+        jump-factor: f32,
+        /// `speedFactor`: 1 for most, 0.4 for soul sand and honey.
+        speed-factor: f32,
+        /// `FireBlock`'s ignite odds, 0 for a block fire does not take.
+        ignite-odds: u32,
+        /// `FireBlock`'s burn odds.
+        burn-odds: u32,
+    }
+    /// The properties of the block under the crosshair; none as `get-block`
+    /// (API 0.1.35; `target`).
+    get-block-properties: func() -> option<block-properties>;
+    /// The loot table of the block under the crosshair
+    /// (`minecraft:blocks/stone`); none as `get-block`, and for a block
+    /// without one (API 0.1.35).
+    get-block-loot-table: func() -> option<string>;
+
+    /// A fluid under the crosshair and where it is (API 0.1.35).
+    record fluid-ex {
+        id: string,
+        name: string,
+        level: u32,
+        /// The block the fluid is in.
+        x: s32,
+        y: s32,
+        z: s32,
+        /// The block texture of the fluid (`minecraft:block/water_still`).
+        sprite: string,
+    }
+    /// As `get-fluid`, with the fluid's block and sprite (API 0.1.35).
+    get-fluid-ex: func(mode: string) -> option<fluid-ex>;
 }
 
 /// Capability `inventory-read`: the player's hotbar (API 0.1.1).
@@ -1223,6 +1282,38 @@ interface %world {
     /// world this game runs or whose contents the game knows; none for any
     /// other position or block (API 0.1.9).
     get-container: func(pos: block-pos) -> option<list<option<container-stack>>>;
+
+    /// What a block entity keeps (API 0.1.35).
+    record block-entity {
+        /// What it is: `minecraft:beehive`, `minecraft:jukebox`,
+        /// `minecraft:lectern`, `minecraft:mob_spawner`, `minecraft:sign`,
+        /// `minecraft:command_block`, ...
+        id: string,
+        /// The same slots as `get-container` (empty for a block entity
+        /// that is not a container).
+        items: list<option<container-stack>>,
+        /// The bees inside a beehive or a bee nest.
+        bees: u32,
+        /// The record in a jukebox (`minecraft:music_disc_cat`).
+        jukebox-record: option<string>,
+        /// The book on a lectern (its item id).
+        book: option<string>,
+        /// A spawner's first entity (`minecraft:zombie`).
+        spawner-entity: option<string>,
+        /// A spawner's ticks to the next spawn.
+        spawner-cooldown: u32,
+        /// A command block's command.
+        command: option<string>,
+        /// The four lines of a sign's front, empty for the other blocks.
+        sign-lines: list<string>,
+        /// A sign is waxed.
+        waxed: bool,
+    }
+    /// The block entity at `pos`, as `get-container`: the block the player
+    /// looks at or is breaking, a world this game runs or whose contents
+    /// the game knows; none for another position or a block without one
+    /// (API 0.1.35; `world-read`). A superset of `get-container`.
+    get-block-entity: func(pos: block-pos) -> option<block-entity>;
 }
 
 /// Capability `items-read`: the items of the game, vanilla's and the content
@@ -1247,6 +1338,16 @@ interface items {
     /// by its rarity, white for common, yellow, aqua or light purple above.
     /// None for an unknown id.
     get-name-color: func(id: string) -> option<u32>;
+    /// One line of an item's tooltip (API 0.1.35).
+    record tooltip-line {
+        text: string,
+        /// 0xAARRGGBB.
+        color: u32,
+    }
+    /// The tooltip lines of one item by id, as the game draws a plain
+    /// stack of it (the name in its rarity's colour, then the lines the
+    /// game adds); empty for an unknown id (API 0.1.35; `items-read`).
+    get-tooltip: func(id: string) -> list<tooltip-line>;
 }
 
 /// Capability `recipes-read`: the recipes of the game, vanilla's and the
@@ -1290,6 +1391,10 @@ interface recipes {
     }
     /// Every recipe of the game.
     %list: func() -> list<recipe>;
+    /// The recipes that make the item (API 0.1.35; `recipes-read`).
+    get-for: func(item: string) -> list<recipe>;
+    /// The recipes that take the item in a slot (API 0.1.35).
+    get-uses: func(item: string) -> list<recipe>;
 }
 
 /// Capability `weather-read`: the weather over the player (API 0.1.6).
@@ -1785,6 +1890,62 @@ interface %entity {
     /// (API 0.1.33; `entity-read`); false for an id `nearby` did not list.
     /// A separate function: `detail` is a published record and stays as it is.
     is-invisible: func(id: u32) -> bool;
+
+    /// More state of one entity (API 0.1.35).
+    record entity-extra {
+        /// A baby (`AgeableMob.isBaby`: a baby zombie, a calf, ...).
+        baby: bool,
+        /// `AgeableMob.getAge`: negative while a baby grows up, 0 or more
+        /// for an adult's breeding cooldown; 0 for the others.
+        age: s32,
+        /// `Animal.isInLove`.
+        in-love: bool,
+        /// A villager's or zombie villager's profession key
+        /// (`minecraft:farmer`); empty for the others.
+        profession: string,
+        /// A villager's level, 1 to 5; 0 for the others.
+        profession-level: u32,
+        /// A horse's jump strength (the base value); 0 for the others.
+        horse-jump: f32,
+        /// A horse's movement speed (the base value); 0 for the others.
+        horse-speed: f32,
+        /// The armour a wolf or a horse wears; none when it wears none.
+        pet-armor: option<string>,
+        /// The owner of a tamed animal as the UUID in 32 hexadecimal
+        /// characters; none when it has none.
+        owner: option<string>,
+        /// Head, chest, legs, feet, main hand and off hand; none for an
+        /// empty slot.
+        equipment: list<option<string>>,
+        /// An item frame's item and rotation (0 to 7); none and 0 for the
+        /// others.
+        frame-item: option<string>,
+        frame-rotation: u32,
+        /// A painting's motive (`minecraft:kebab`) and its size in blocks;
+        /// none and 0 for the others.
+        painting-motive: option<string>,
+        painting-width: u32,
+        painting-height: u32,
+        /// The block a falling block is (`minecraft:sand`).
+        falling-block: option<string>,
+        /// The count of an item entity's stack; 0 for the others.
+        item-count: u32,
+    }
+    /// The extra state of the entity with that id, as of the last tick;
+    /// none for an id `nearby` did not list, and for the entities farther
+    /// than the 64 nearest (API 0.1.35; `entity-read`).
+    get-extra: func(id: u32) -> option<entity-extra>;
+    /// The loot table of the entity with that id (`minecraft:entities/zombie`);
+    /// none for an id `nearby` did not list and for an entity without one
+    /// (API 0.1.35; `entity-read`).
+    get-loot-table: func(id: u32) -> option<string>;
+    /// The width of the entity's box (`Entity.getBbWidth`); 0 for an id
+    /// `nearby` did not list (API 0.1.35; `entity-read`).
+    get-width: func(id: u32) -> f32;
+    /// The mob is fully frozen (`LivingEntity.isFullyFrozen`: 140 ticks in
+    /// powder snow); false for an id `nearby` did not list (API 0.1.35;
+    /// `entity-read`).
+    is-frozen: func(id: u32) -> bool;
 }
 
 /// Capabilities `slots-read` and `slot-decorate`: the game's own slots, the

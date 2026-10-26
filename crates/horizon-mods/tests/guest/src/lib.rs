@@ -71,6 +71,7 @@ impl Mod for Guest {
             "detailfx",
             "typesfx",
             "parityfx",
+            "lookdatafx",
             "rainfx",
             "restfx",
             "sndfx",
@@ -815,6 +816,66 @@ impl Mod for Guest {
                     )
                 }));
                 Ok(Some(lines.join("|")))
+            }
+            "lookdatafx" => {
+                let x = entity::get_extra(1)
+                    .map(|e| {
+                        format!(
+                            "{}:{}:{}:{}:{}:{}",
+                            e.baby,
+                            e.age,
+                            e.profession,
+                            e.profession_level,
+                            e.equipment.len(),
+                            e.item_count
+                        )
+                    })
+                    .unwrap_or_else(|| "none".into());
+                let be = world::get_block_entity(world::BlockPos { x: 1, y: 2, z: 3 })
+                    .map(|b| {
+                        format!(
+                            "{}:{}:{:?}:{:?}",
+                            b.id, b.bees, b.jukebox_record, b.sign_lines
+                        )
+                    })
+                    .unwrap_or_else(|| "none".into());
+                let bp = target::get_block_properties()
+                    .map(|p| {
+                        format!(
+                            "{}:{}:{}:{}:{}",
+                            p.explosion_resistance,
+                            p.jump_factor,
+                            p.speed_factor,
+                            p.ignite_odds,
+                            p.burn_odds
+                        )
+                    })
+                    .unwrap_or_else(|| "none".into());
+                let fluid = target::get_fluid_ex("any")
+                    .map(|f| format!("{}@{},{},{}:{}", f.id, f.x, f.y, f.z, f.sprite))
+                    .unwrap_or_else(|| "none".into());
+                game::narrate("hello");
+                hud::set_boss_bars_hidden(true);
+                let tip = items::get_tooltip("minecraft:stick")
+                    .iter()
+                    .map(|l| format!("{}#{:x}", l.text, l.color))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                Ok(Some(format!(
+                    "{x}|{:?} {} {}|{be}|{bp}|{:?} {}|{fluid}|{} {} {} {}|{} {}|{tip}|{}",
+                    entity::get_loot_table(1),
+                    entity::get_width(1),
+                    entity::is_frozen(1),
+                    target::get_block_loot_table(),
+                    "-",
+                    game::get_mod_name("minecraft".into()),
+                    game::get_mod_name("farm".into()),
+                    game::get_translation("effect.minecraft.speed".into()),
+                    game::get_translation("no.such.key".into()),
+                    recipes::get_for("minecraft:oak_planks").len(),
+                    recipes::get_uses("minecraft:oak_log").len(),
+                    game::get_narration_mode(),
+                )))
             }
             "parityfx" => {
                 let effects = target::get_entity_effects()

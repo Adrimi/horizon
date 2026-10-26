@@ -1,7 +1,7 @@
 <!-- Generated from crates/horizon-mod-sdk/wit/horizon.wit and the manifest's capabilities by crates/horizon-mods/tests/api_reference.rs; a test fails when this file is out of date. Update it with: HORIZON_WRITE_DOCS=1 cargo test -p horizon-mods --features pack --test api_reference -->
 # Mod API reference
 
-The contract between Horizon and its mods: the WIT package `horizon:mods@0.1.34`, every interface, type, function and hook in it, and the capabilities a manifest may list. The guide is [mods.md](../mods.md); stability and versions: [stability.md](stability.md). Manifest `api` lines this game serves: `0.1`, `0.2`.
+The contract between Horizon and its mods: the WIT package `horizon:mods@0.1.35`, every interface, type, function and hook in it, and the capabilities a manifest may list. The guide is [mods.md](../mods.md); stability and versions: [stability.md](stability.md). Manifest `api` lines this game serves: `0.1`, `0.2`.
 
 ## Capabilities
 
@@ -43,6 +43,8 @@ The contract between Horizon and its mods: the WIT package `horizon:mods@0.1.34`
 | `game-edit` | [`game`](#game) | change your hunger and your mining speed |
 | `texture-rules` | [`texture-rules`](#texture-rules) | change the textures of blocks |
 | `registries` | data files (`assets/`, `data/`), no interface | add blocks and items to your worlds |
+| `hud-write` | [`hud`](#hud) | hide the boss bars |
+| `narrate` | [`game`](#game) | have your screen reader read texts |
 
 ## World `horizon-mod`
 
@@ -162,6 +164,10 @@ The player's health (API 0.1.11).
 | `get-effects` | `func() -> list<string>` | The ids of the effects on the player (`minecraft:poison`, `minecraft:regeneration`, ...); empty when there is none (API 0.1.11). |
 | `get-difficulty` | `func() -> option<string>` | The world's difficulty: `peaceful`, `easy`, `normal` or `hard`; none outside a world (API 0.1.11). |
 | `get-main-hand` | `func() -> string` | The hand the player holds the main item in, `left` or `right` (the Main Hand option; API 0.1.34; `game-read`). |
+| `get-mod-name` | `func(namespace: string) -> string` | The display name of the mod that owns a namespace: `minecraft` is "Minecraft", `horizon` is "Horizon", a loaded mod's namespace is the mod's name; the namespace itself when the game knows none (API 0.1.35; `game-read`). |
+| `get-translation` | `func(key: string) -> string` | The game's line for a translation key in the language of the game (`effect.minecraft.speed` is "Speed"); the key itself when the language has none (API 0.1.35; `game-read`). |
+| `narrate` | `func(text: string)` | With capability `narrate`: asks for the text to be read aloud (API 0.1.35). Horizon has no speech engine yet, so the game only records the request in its log (`[narrator] <mod>: <text>`); a speech engine will read the same requests. Without the capability it does nothing. |
+| `get-narration-mode` | `func() -> string` | The narrator's mode: `off` while the game has no narrator (API 0.1.35; `game-read`). A mod that narrates only when it is not `off` stays silent until the game gains one. |
 
 ## `chat`
 
@@ -409,6 +415,7 @@ A boss bar the game draws at the top of the screen (API 0.1.34).
 | `show-action-bar` | `func(text: string, color: u32)` | Shows a line over the hotbar, as vanilla's action bar does (API 0.1.16); it fades after about three seconds, and a new one replaces it. `color` is 0xRRGGBB; the text may have `§` formatting. An empty text does nothing. |
 | `get-bars` | `func() -> option<bars>` | Where the bars are; none when the game draws none (creative, spectator, the HUD hidden). One frame old (API 0.1.7). |
 | `get-boss-bars` | `func() -> list<boss-bar>` | The boss bars the game draws now, from the top; empty when there is none (API 0.1.34; `hud`). A panel under them starts below the last. |
+| `set-boss-bars-hidden` | `func(hidden: bool)` | With capability `hud-write`: hides the game's boss bars while the mod says so (API 0.1.35). They stay hidden while any running mod says so, and come back when the mod says `false` or stops. Without the capability it does nothing. |
 
 ## `target`
 
@@ -462,6 +469,32 @@ A fluid under the crosshair (API 0.1.34).
 | `name` | `string` | The name in the game's language. |
 | `level` | `u32` | The block state's `level`: 0 for a source, 1 to 7 for flowing fluid (more is lower), 8 and up for falling fluid. |
 
+### record `block-properties`
+
+The `BlockBehaviour.Properties` of the block under the crosshair (API 0.1.35).
+
+| Field | Type | |
+| --- | --- | --- |
+| `explosion-resistance` | `f32` |  |
+| `jump-factor` | `f32` | `jumpFactor`: 1 for most, 0.5 for honey. |
+| `speed-factor` | `f32` | `speedFactor`: 1 for most, 0.4 for soul sand and honey. |
+| `ignite-odds` | `u32` | `FireBlock`'s ignite odds, 0 for a block fire does not take. |
+| `burn-odds` | `u32` | `FireBlock`'s burn odds. |
+
+### record `fluid-ex`
+
+A fluid under the crosshair and where it is (API 0.1.35).
+
+| Field | Type | |
+| --- | --- | --- |
+| `id` | `string` |  |
+| `name` | `string` |  |
+| `level` | `u32` |  |
+| `x` | `s32` | The block the fluid is in. |
+| `y` | `s32` |  |
+| `z` | `s32` |  |
+| `sprite` | `string` | The block texture of the fluid (`minecraft:block/water_still`). |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `get-block` | `func() -> option<block>` | The block under the crosshair within reach; none on air, an entity or the title screen. |
@@ -477,6 +510,9 @@ A fluid under the crosshair (API 0.1.34).
 | `get-block-face-ex` | `func(reach: f32, from-eye: bool) -> option<string>` | The face of that block, as `get-block-face` (API 0.1.34). |
 | `get-entity-ex` | `func(reach: f32, from-eye: bool) -> option<entity>` | The mob under that ray, nearer than the block it hits (API 0.1.34). |
 | `get-fluid` | `func(mode: string) -> option<fluid>` | The fluid the crosshair is on, within the game's reach (API 0.1.34). `mode`: `any` gives the first fluid on the ray, even before a block; `fallback` gives it only when the ray hits no block; `none` (and any other word) gives none, as a game that ignores fluids does. |
+| `get-block-properties` | `func() -> option<block-properties>` | The properties of the block under the crosshair; none as `get-block` (API 0.1.35; `target`). |
+| `get-block-loot-table` | `func() -> option<string>` | The loot table of the block under the crosshair (`minecraft:blocks/stone`); none as `get-block`, and for a block without one (API 0.1.35). |
+| `get-fluid-ex` | `func(mode: string) -> option<fluid-ex>` | As `get-fluid`, with the fluid's block and sprite (API 0.1.35). |
 
 ## `inventory`
 
@@ -1034,6 +1070,23 @@ One stack in a container (API 0.1.9).
 | `count` | `u32` |  |
 | `damage` | `u32` | The durability used; 0 for an item that does not wear out. |
 
+### record `block-entity`
+
+What a block entity keeps (API 0.1.35).
+
+| Field | Type | |
+| --- | --- | --- |
+| `id` | `string` | What it is: `minecraft:beehive`, `minecraft:jukebox`, `minecraft:lectern`, `minecraft:mob_spawner`, `minecraft:sign`, `minecraft:command_block`, ... |
+| `items` | `list<option<container-stack>>` | The same slots as `get-container` (empty for a block entity that is not a container). |
+| `bees` | `u32` | The bees inside a beehive or a bee nest. |
+| `jukebox-record` | `option<string>` | The record in a jukebox (`minecraft:music_disc_cat`). |
+| `book` | `option<string>` | The book on a lectern (its item id). |
+| `spawner-entity` | `option<string>` | A spawner's first entity (`minecraft:zombie`). |
+| `spawner-cooldown` | `u32` | A spawner's ticks to the next spawn. |
+| `command` | `option<string>` | A command block's command. |
+| `sign-lines` | `list<string>` | The four lines of a sign's front, empty for the other blocks. |
+| `waxed` | `bool` | A sign is waxed. |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `get-block` | `func(pos: block-pos) -> option<world-block>` | The block at `pos`; none where no chunk is loaded (and outside a world). Air is `minecraft:air`. |
@@ -1062,6 +1115,7 @@ One stack in a container (API 0.1.9).
 | `get-surface` | `func(pos: block-pos, start-y: s32) -> option<s32>` | Where the ground is in the column of `pos`: the y of the first free space above the first block that stops motion (solid, leaves or a fluid) found going down from `start-y` (`Heightmap.MOTION_BLOCKING`'s idea); none where no chunk is loaded (API 0.1.6). |
 | `is-solid` | `func(pos: block-pos) -> bool` | Whether the block at `pos` has a full collision box (API 0.1.6). |
 | `get-container` | `func(pos: block-pos) -> option<list<option<container-stack>>>` | The items of the container at `pos` (a chest, a barrel, a shulker box, a hopper, a dropper, a dispenser, a crafter; a furnace, a blast furnace or a smoker: input, fuel, result), in slot order, an empty slot none. Only for the block the player looks at or is breaking, in a world this game runs or whose contents the game knows; none for any other position or block (API 0.1.9). |
+| `get-block-entity` | `func(pos: block-pos) -> option<block-entity>` | The block entity at `pos`, as `get-container`: the block the player looks at or is breaking, a world this game runs or whose contents the game knows; none for another position or a block without one (API 0.1.35; `world-read`). A superset of `get-container`. |
 
 ## `items`
 
@@ -1078,11 +1132,21 @@ Capability `items-read`: the items of the game, vanilla's and the content mods' 
 | `max-stack` | `u32` | The stack size: 64 for most items, 1 for tools and armour. |
 | `tags` | `list<string>` | Every tag it is in, as full names without `#`. |
 
+### record `tooltip-line`
+
+One line of an item's tooltip (API 0.1.35).
+
+| Field | Type | |
+| --- | --- | --- |
+| `text` | `string` |  |
+| `color` | `u32` | 0xAARRGGBB. |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `list` | `func() -> list<item>` | Every item of the game, in the order of the creative inventory's search tab. |
 | `get` | `func(id: string) -> option<item>` | One item by id; none for an unknown id. |
 | `get-name-color` | `func(id: string) -> option<u32>` | The colour the game shows the item's name in (API 0.1.20), 0xRRGGBB: by its rarity, white for common, yellow, aqua or light purple above. None for an unknown id. |
+| `get-tooltip` | `func(id: string) -> list<tooltip-line>` | The tooltip lines of one item by id, as the game draws a plain stack of it (the name in its rarity's colour, then the lines the game adds); empty for an unknown id (API 0.1.35; `items-read`). |
 
 ## `recipes`
 
@@ -1121,6 +1185,8 @@ Capability `recipes-read`: the recipes of the game, vanilla's and the content mo
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `list` | `func() -> list<recipe>` | Every recipe of the game. |
+| `get-for` | `func(item: string) -> list<recipe>` | The recipes that make the item (API 0.1.35; `recipes-read`). |
+| `get-uses` | `func(item: string) -> list<recipe>` | The recipes that take the item in a slot (API 0.1.35). |
 
 ## `weather`
 
@@ -1537,6 +1603,30 @@ One entity type of the game's registry (API 0.1.33).
 | `name` | `string` | The display name from the language files (`entity.<ns>.<path>`), empty when the language has none. |
 | `tags` | `list<string>` | The entity tags the type is in, full names without `#` (`minecraft:skeletons`), sorted. |
 
+### record `entity-extra`
+
+More state of one entity (API 0.1.35).
+
+| Field | Type | |
+| --- | --- | --- |
+| `baby` | `bool` | A baby (`AgeableMob.isBaby`: a baby zombie, a calf, ...). |
+| `age` | `s32` | `AgeableMob.getAge`: negative while a baby grows up, 0 or more for an adult's breeding cooldown; 0 for the others. |
+| `in-love` | `bool` | `Animal.isInLove`. |
+| `profession` | `string` | A villager's or zombie villager's profession key (`minecraft:farmer`); empty for the others. |
+| `profession-level` | `u32` | A villager's level, 1 to 5; 0 for the others. |
+| `horse-jump` | `f32` | A horse's jump strength (the base value); 0 for the others. |
+| `horse-speed` | `f32` | A horse's movement speed (the base value); 0 for the others. |
+| `pet-armor` | `option<string>` | The armour a wolf or a horse wears; none when it wears none. |
+| `owner` | `option<string>` | The owner of a tamed animal as the UUID in 32 hexadecimal characters; none when it has none. |
+| `equipment` | `list<option<string>>` | Head, chest, legs, feet, main hand and off hand; none for an empty slot. |
+| `frame-item` | `option<string>` | An item frame's item and rotation (0 to 7); none and 0 for the others. |
+| `frame-rotation` | `u32` |  |
+| `painting-motive` | `option<string>` | A painting's motive (`minecraft:kebab`) and its size in blocks; none and 0 for the others. |
+| `painting-width` | `u32` |  |
+| `painting-height` | `u32` |  |
+| `falling-block` | `option<string>` | The block a falling block is (`minecraft:sand`). |
+| `item-count` | `u32` | The count of an item entity's stack; 0 for the others. |
+
 | Function | Signature | What it does |
 | --- | --- | --- |
 | `nearby` | `func(type-id: string, radius: f64) -> list<entity>` | The entities of the kind (`minecraft:experience_orb`, ...) within `radius` blocks of the player (at most 512 blocks); every kind when `type-id` is empty. The nearest first, at most 1024. Empty outside a world. |
@@ -1546,6 +1636,10 @@ One entity type of the game's registry (API 0.1.33).
 | `get-detail` | `func(id: u32) -> option<detail>` | The state of the entity with that id (API 0.1.20; `entity-read`); none for an id `nearby` did not list. |
 | `get-types` | `func() -> list<type-info>` | Every entity type of the registry, sorted by id (API 0.1.33; `entity-read`). `BuiltInRegistries.ENTITY_TYPE`, not only the types that were seen near the player. |
 | `is-invisible` | `func(id: u32) -> bool` | Whether the entity with that id is invisible (`Entity.isInvisible`: the Invisibility effect or the invisible flag), as of the last tick (API 0.1.33; `entity-read`); false for an id `nearby` did not list. A separate function: `detail` is a published record and stays as it is. |
+| `get-extra` | `func(id: u32) -> option<entity-extra>` | The extra state of the entity with that id, as of the last tick; none for an id `nearby` did not list, and for the entities farther than the 64 nearest (API 0.1.35; `entity-read`). |
+| `get-loot-table` | `func(id: u32) -> option<string>` | The loot table of the entity with that id (`minecraft:entities/zombie`); none for an id `nearby` did not list and for an entity without one (API 0.1.35; `entity-read`). |
+| `get-width` | `func(id: u32) -> f32` | The width of the entity's box (`Entity.getBbWidth`); 0 for an id `nearby` did not list (API 0.1.35; `entity-read`). |
+| `is-frozen` | `func(id: u32) -> bool` | The mob is fully frozen (`LivingEntity.isFullyFrozen`: 140 ticks in powder snow); false for an id `nearby` did not list (API 0.1.35; `entity-read`). |
 
 ## `slots`
 
