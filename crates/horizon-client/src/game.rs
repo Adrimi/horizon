@@ -105,6 +105,7 @@ mod mod_world;
 mod mods;
 mod mount_menu;
 mod mounts;
+mod moved_extras;
 mod moving_pistons;
 mod music;
 mod names;
@@ -132,6 +133,7 @@ mod pumpkin;
 mod raids;
 mod recipe_book;
 mod remote;
+mod remote_chunks;
 mod remote_mob_data;
 mod remote_mob_use;
 mod remote_objects;
@@ -565,6 +567,8 @@ struct GameLevel<'w> {
     /// Where the chunk tickets let blocks tick.
     tickets: horizon_client::ticket_levels::Levels,
     random_tick_sections: &'w mut horizon_client::random_tick_sections::RandomTickSections,
+    /// Players with each chest open (a trapped chest's signal).
+    lid_openers: &'w HashMap<(i32, i32, i32), i32>,
 }
 struct PlayerCollision {
     y: f64,
@@ -700,6 +704,10 @@ impl LevelAccess for GameLevel<'_> {
         _state: BlockStateId,
         _direction: Direction,
     ) -> i32 {
+        // TrappedChestBlock.getSignal: the players with it open, at most 15.
+        if let Some(count) = self.lid_openers.get(&(pos.x, pos.y, pos.z)) {
+            return (*count).clamp(0, 15);
+        }
         jukebox::jukebox_signals(self.world, self.items, pos).map_or(0, |(signal, _)| signal)
     }
     fn biome_name(&self, pos: BlockPos) -> Option<&str> {
@@ -1517,7 +1525,7 @@ struct Game<'a> {
     pending_bench: Option<(Instant, std::sync::mpsc::Sender<String>)>,
     /// Recent frame times for the performance overlay.
     frame_graph: horizon_client::perf_overlay::FrameGraph,
-    /// Horizon's extras (zoom, FPS counter, keystrokes): `game/extras.rs`.
+    /// Horizon's extras (minimap, auto-reconnect; mods' counters): `game/extras.rs`.
     extras: extras::ExtrasState,
     /// Horizon mods (`game/mods.rs`), none running unless turned on.
     mods: mods::ModsState,
@@ -2215,7 +2223,7 @@ impl Game<'_> {
         self.player_drop(thrown);
     }
     /// `Player.drop`: the statistics and a thrown item entity in front of the player.
-    fn player_drop(&mut self, thrown: ItemStack) {
+    pub(super) fn player_drop(&mut self, thrown: ItemStack) {
         let Some(eye) = self.eye_position() else {
             return;
         };
@@ -2277,7 +2285,13 @@ impl Game<'_> {
                 let speed = self.world.random.next_float() * 0.2 + 0.1;
                 item.move_towards_closest_space(&self.world, self.res.facts(), speed);
             }
-            let alive = item.tick(&self.world, self.res.facts(), self.collision, no_physics);
+            let alive = item.tick(
+                &self.world,
+                self.res.facts(),
+                self.collision,
+                no_physics,
+                &self.res.motion().fluids,
+            );
             cells.moved(i, item.previous, item.position);
             // ItemEntity.tick: merge every 2 ticks while moving between
             // blocks, every 40 otherwise, before the lifetime check.
@@ -2486,6 +2500,7 @@ impl Game<'_> {
             spill: &mut self.spill,
             tickets: self.tickets.levels(),
             random_tick_sections: &mut self.random_tick_sections,
+            lid_openers: &self.lid_openers,
         };
         let result = f(self.res.behaviours(), &mut level, &mut self.block_ticks);
         self.flush_spill();
@@ -4201,6 +4216,9 @@ impl Game<'_> {
         self.with_level(|b, level, ticks| b.notify_written(level, ticks, position, flags));
     }
     fn tick(&mut self) -> Result<()> {
+        if self.agent.hold_server {
+            return Ok(());
+        }
         self.tick_debug_keys()?;
         self.tick_debug_charts();
         if self.remote.is_some() {
@@ -5628,6 +5646,8 @@ impl Game<'_> {
         self.craft_size = 2;
         self.craft_table = None;
         if let Some(key) = self.container.take() {
+            // A cart's or chest boat's items go back to it.
+            self.close_cart_container(key);
             self.container_opener_event(key, false);
             self.post_block_game_event(
                 "minecraft:container_close",
@@ -5667,7 +5687,6 @@ impl Game<'_> {
             self.world.modified.insert((key.0 >> 4, key.2 >> 4));
         }
         self.close_ender_chest();
-        self.close_cart_container();
     }
     /// `quickMoveStack` of the open plain menu for a shift-click.
     fn inventory_quick_move(&mut self, slot: usize) -> bool {
@@ -6547,7 +6566,11 @@ impl Game<'_> {
         use horizon_client::menu::Input;
         let button = i32::from(right);
         if self.remote.is_some() {
-            self.remote_throw(right, input);
+            if self.screen == Screen::Creative {
+                self.remote_creative_drop(right);
+            } else {
+                self.remote_throw(right, input);
+            }
             return;
         }
         let before = self.carried.clone();
@@ -10551,7 +10574,10 @@ impl Game<'_> {
             menu_blur: self.menu_blur(),
         };
         let result = match self.renderer.as_mut() {
-            Some(renderer) => horizon_client::spans::time("renderer", || renderer.render(&frame)),
+            Some(renderer) => {
+                renderer.set_pass_timing(self.debug);
+                horizon_client::spans::time("renderer", || renderer.render(&frame))
+            }
             None => Err("renderer".into()),
         };
         // Restore storage even when rendering fails (for example, a lost surface).
@@ -11396,7 +11422,6 @@ impl ApplicationHandler for Game<'_> {
                         && self.player.is_some()
                         && !self.mods.mods.wheel_captured()
                         && !self.mod_wheel(d)
-                        && !self.extras_scroll(d)
                         && let Some((wheel, (_, vertical_steps))) =
                             self.mouse
                                 .on_scroll(raw_x, raw_y, discrete, wheel_sensitivity)
@@ -11819,8 +11844,6 @@ impl ApplicationHandler for Game<'_> {
                     let PhysicalKey::Code(key) = event.physical_key else {
                         return Ok(());
                     };
-                    self.extras_key(key, event.state == ElementState::Pressed, event.repeat);
-                    // The mods' own key bindings (API 0.1.4).
                     self.mod_key(key, event.state == ElementState::Pressed, event.repeat);
                     // key.smoothCamera toggles the cinematic camera.
                     if self.screen == Screen::Playing
@@ -11913,6 +11936,7 @@ impl ApplicationHandler for Game<'_> {
                     }
                     self.extras_frame(elapsed);
                     self.mods_frame(elapsed);
+                    self.poll_moved_extras();
                     self.extras_retry()?;
                     self.apply_mouse_look();
                     self.pad_look(elapsed.as_secs_f32());
@@ -13273,6 +13297,7 @@ fn start_game<'a>(
     // Benchmarks measure the game alone.
     if game.options.benchmark.is_none() {
         game.mods.dev = game.options.dev_mods.clone();
+        game.start_moved_extras();
         game.start_mods();
     }
     game.start_agent_control()?;

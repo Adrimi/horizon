@@ -2,9 +2,11 @@
 //! examples and a guest
 //! that misbehaves on command. Needs `rustup target add wasm32-unknown-unknown`.
 use horizon_mods::{
-    Block, BlockBroken, BlockPos, Clock, Corner, Entity, Food, FoodStats, HeldItem, ItemTags, Mods,
-    Output, Package, Player, Shape, Snapshot, Stack, Status, WorldAccess, WorldBlock,
+    Block, BlockBroken, BlockPos, Clock, Corner, Entity, Food, FoodStats, GameMode, HeldItem,
+    ItemTags, Mods, Output, Package, Player, Runs, ServerBlockPos, ServerPlayer, Shape, Snapshot,
+    Stack, Status, WorldAccess, WorldBlock,
     manifest::componentize,
+    testing::{Script, TestGame},
 };
 use std::{
     path::{Path, PathBuf},
@@ -44,6 +46,8 @@ fn mods_dir() -> &'static Path {
                 "-p",
                 "predator-missile",
                 "-p",
+                "welcome",
+                "-p",
                 "horizon-mods-test-guest",
                 "-p",
                 "horizon-mods-test-ui-guest",
@@ -66,6 +70,7 @@ fn mods_dir() -> &'static Path {
         let mods = [
             ("coords_hud", example("coords-hud")),
             ("predator_missile", example("predator-missile")),
+            ("welcome", example("welcome")),
             ("horizon_mods_test_guest", GUEST_MANIFEST.to_string()),
             ("horizon_mods_test_ui_guest", UI_MANIFEST.to_string()),
         ];
@@ -396,6 +401,73 @@ fn the_target_api_names_the_block_its_progress_and_the_mob() {
         error: false,
     };
     assert_eq!(mods.drain(), [none]);
+}
+
+/// A mod calling a function this Horizon doesn't have is refused with
+/// "update Horizon", not a linking error; the test mods' levels are read
+/// from the functions they import.
+#[test]
+fn a_mod_for_a_newer_horizon_is_refused() {
+    use horizon_mods::api_level::{imports, needed};
+    use wit_parser::{ManglingAndAbi, Resolve};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let wit = std::fs::read_to_string(root.join("crates/horizon-mod-sdk/wit/horizon.wit"))
+        .unwrap()
+        .replace(
+            "    set-minimap: func(minimap: option<minimap>);",
+            "    set-minimap: func(minimap: option<minimap>);\n    set-sky: func(on: bool);",
+        );
+    let mut resolve = Resolve::default();
+    let package = resolve.push_str("horizon.wit", &wit).unwrap();
+    let world = resolve
+        .select_world(&[package], Some("horizon-ui-mod"))
+        .unwrap();
+    let mut module = wit_component::dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+    wit_component::embed_component_metadata(
+        &mut module,
+        &resolve,
+        world,
+        wit_component::StringEncoding::UTF8,
+    )
+    .unwrap();
+    let wasm = wit_component::ComponentEncoder::default()
+        .module(&module)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let functions = imports(&wasm).unwrap();
+    assert!(functions.iter().any(|f| f == "render.set-sky"));
+    let dir = mods_dir().join("too_new");
+    std::fs::create_dir_all(&dir).unwrap();
+    let caps: Vec<_> = horizon_mods::manifest::Capability::ALL
+        .into_iter()
+        .filter(|c| *c != horizon_mods::manifest::Capability::Registries)
+        .collect();
+    let list = |only_experimental: bool| {
+        caps.iter()
+            .filter(|c| !only_experimental || c.is_experimental())
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let manifest = format!(
+        "id = \"too_new\"\nname = \"Too New\"\nversion = \"0.1.0\"\napi = \"0.1\"\ncapabilities = [{}]\nexperimental = [{}]\n",
+        list(false),
+        list(true)
+    );
+    std::fs::write(dir.join("horizon-mod.toml"), manifest).unwrap();
+    std::fs::write(dir.join("mod.wasm"), wasm).unwrap();
+    let mods = Mods::load(&[dir], |_| true, |_| false);
+    let refused = "made for a newer Horizon (it uses render.set-sky): update Horizon to run it";
+    assert_eq!(mods.entries()[0].status, Status::Failed(refused.into()));
+
+    let level = |file: &str| {
+        let wasm = Package::read(&mods_dir().join(file)).unwrap().wasm.unwrap();
+        needed(imports(&wasm).unwrap().iter().map(String::as_str)).0
+    };
+    assert_eq!(level("coords_hud.hmod"), 0);
+    // The UI guest shows a minimap (`render.set-minimap`).
+    assert_eq!(level("horizon_mods_test_ui_guest.hmod"), 1);
 }
 
 #[test]
@@ -836,6 +908,32 @@ fn render_zoom_is_clamped_and_the_strongest_counts() {
     assert_eq!(zoom(&mut mods, "1 0 1"), None);
     assert_eq!(zoom(&mut mods, "0.5 0 1"), None);
     assert_eq!(zoom(&mut mods, "x 0 1"), None);
+}
+
+#[test]
+fn render_minimap_is_clamped_and_hidden() {
+    let mut mods = load("horizon_mods_test_ui_guest.hmod");
+    let map = |mods: &mut Mods, args: &str| {
+        assert!(mods.command(&format!("minimap {args}")));
+        mods.minimap()
+            .map(|m| (m.corner, m.size, m.blocks_per_pixel, m.rotate, m.round))
+    };
+    assert!(mods.minimap().is_none());
+    let corner = horizon_mods::RenderCorner::BottomLeft;
+    assert_eq!(
+        map(&mut mods, "96 2 1 0"),
+        Some((corner, 96.0, 2.0, true, false))
+    );
+    // The side and the scale are clamped; NaN takes the smallest.
+    assert_eq!(
+        map(&mut mods, "999 0.1 0 1"),
+        Some((corner, 256.0, 0.5, false, true))
+    );
+    assert_eq!(
+        map(&mut mods, "x 9 0 0"),
+        Some((corner, 16.0, 4.0, false, false))
+    );
+    assert_eq!(map(&mut mods, "off"), None);
 }
 
 #[test]
@@ -2624,4 +2722,160 @@ fn the_food_hud_apis_read_the_player_keep_tooltips_and_debug_lines() {
     assert_eq!(content[0].1.elements.len(), 1);
     assert!(mods.tooltip_content("minecraft:bread").is_empty());
     assert_eq!(mods.debug_lines(), ["hunger: 20"]);
+}
+
+/// `cargo horizon-mod test` on the examples: their own `tests/*.toml` pass.
+#[test]
+fn the_examples_test_scripts_pass() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../horizon-mod-sdk/examples");
+    let mut ran = 0;
+    for (example, hmod) in [("coords-hud", "coords_hud"), ("welcome", "welcome")] {
+        for entry in std::fs::read_dir(examples.join(example).join("tests")).unwrap() {
+            let path = entry.unwrap().path();
+            let script = Script::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let mut game = TestGame::load(&mods_dir().join(format!("{hmod}.hmod"))).unwrap();
+            script
+                .run(&mut game)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            ran += 1;
+        }
+    }
+    assert_eq!(ran, 4);
+}
+
+#[test]
+fn a_test_script_says_which_step_failed_and_why() {
+    let script = Script::parse(
+        r#"
+        [[step]]
+        ticks = 3
+        command = "hello there"
+        expect.chat = ["hello there after 2 ticks"]
+        "#,
+    )
+    .unwrap();
+    let mut game = TestGame::load(&mods_dir().join("horizon_mods_test_guest.hmod")).unwrap();
+    assert_eq!(
+        script.run(&mut game).unwrap_err(),
+        "step 1 (3 ticks, /hello there): chat\n    expected: [\"hello there after 2 ticks\"]\n    \
+         got:      [\"hello there after 3 ticks\"]"
+    );
+    assert!(
+        Script::parse("[[step]]\ntick = 1").is_err(),
+        "a typo is an error"
+    );
+
+    let mut game = TestGame::load(&mods_dir().join("welcome.hmod")).unwrap();
+    let script = "[[step]]\njoin = \"Alex\"\n\n[[step]]\nas = \"Steve\"\ncommand = \"mined\"";
+    assert_eq!(
+        Script::parse(script).unwrap().run(&mut game).unwrap_err(),
+        "step 2 (/mined): Steve is not on the server"
+    );
+}
+
+#[test]
+fn a_test_script_reloads_and_expects_a_stop() {
+    let script = Script::parse(
+        r#"
+        [[step]]
+        command = "save kept"
+        expect.feedback = "saved"
+
+        [[step]]
+        reload = true
+        command = "load"
+        expect.chat = ["kept"]
+
+        [[step]]
+        command = "panic"
+        expect.stopped = "panic"
+
+        [[step]]
+        reload = true
+        command = "nope"
+        "#,
+    )
+    .unwrap();
+    let mut game = TestGame::load(&mods_dir().join("horizon_mods_test_guest.hmod")).unwrap();
+    let dir = game.hmod().parent().unwrap().to_path_buf();
+    assert_eq!(
+        script.run(&mut game).unwrap_err(),
+        "step 4 (reload, /nope): the mod owns no command /nope"
+    );
+    drop(game);
+    assert!(
+        !dir.exists(),
+        "the scratch copy and its storage are removed"
+    );
+}
+
+fn alex() -> ServerPlayer {
+    ServerPlayer {
+        id: "00000000-0000-4000-8000-000000000001".into(),
+        name: "Alex".into(),
+        x: 0.5,
+        y: 64.0,
+        z: 0.5,
+        dimension: "minecraft:the_nether".into(),
+        game_mode: GameMode::Survival,
+        health: 20.0,
+    }
+}
+
+#[test]
+fn a_server_mod_runs_only_where_the_world_does() {
+    // A fresh folder: what the mod stored in an earlier run is beside it.
+    let dir = mods_dir().join("server");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("welcome.hmod");
+    std::fs::copy(mods_dir().join("welcome.hmod"), &path).unwrap();
+    let paths = std::slice::from_ref(&path);
+    let window = Mods::load_for(Runs::Client, paths, |_| true, |_| false, None);
+    assert_eq!(window.entries()[0].status, Status::Elsewhere);
+    assert!(!window.is_running());
+
+    let mut mods = Mods::load_for(Runs::Server, paths, |_| true, |c| c == "give", None);
+    assert!(mods.runs_server());
+    assert_eq!(
+        mods.server_commands().collect::<Vec<_>>(),
+        ["online", "mined"]
+    );
+    assert_eq!(mods.commands().count(), 0, "not the window's chat commands");
+    let alex = alex();
+    mods.set_snapshot(Snapshot {
+        server_players: vec![alex.clone()],
+        ..Snapshot::default()
+    });
+    mods.player_joined(&alex);
+    let greeted = [
+        Output::Tell {
+            name: "Welcome".into(),
+            player: alex.id.clone(),
+            text: "Welcome, Alex! 0 other player(s) online.".into(),
+        },
+        Output::Broadcast {
+            name: "Welcome".into(),
+            text: "Alex is here for the first time".into(),
+        },
+    ];
+    assert_eq!(mods.drain(), greeted);
+    let stone = ServerBlockPos { x: 1, y: 63, z: 0 };
+    mods.block_broken(&alex, stone, "minecraft:stone");
+    assert!(mods.server_command(&alex, "mined"));
+    assert!(mods.server_command(&alex, "online"));
+    let reply = |text: &str| Output::Reply {
+        player: alex.id.clone(),
+        text: text.into(),
+        error: false,
+    };
+    assert_eq!(
+        mods.drain(),
+        [reply("You broke 1 block(s)"), reply("Alex (the_nether)")]
+    );
+    assert!(!mods.server_command(&alex, "where"));
+    assert!(
+        !mods.command("online"),
+        "a server command isn't the window's"
+    );
 }

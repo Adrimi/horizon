@@ -16,7 +16,10 @@ pub const API: &str = "0.1";
 /// The manifest `api` lines this build loads. 0.2 is 0.1 plus content:
 /// `assets/` and `data/` in the `.hmod`, with blocks and items declared in
 /// `data/<id>/horizon/` (docs/modpacks.md). Code still links API 0.1.
-pub const APIS: [&str; 2] = [API, "0.2"];
+/// 0.3 is a server mod (experimental): the `horizon-server-mod` world.
+pub const APIS: [&str; 3] = [API, "0.2", SERVER_API];
+/// The line of server mods, experimental: `side = "server"`.
+pub const SERVER_API: &str = "0.3";
 /// Namespaces no mod may claim: vanilla's, the convention tags' (mods add
 /// to those, docs/mods.md) and the game's own.
 const RESERVED_NAMESPACES: [&str; 3] = ["minecraft", "c", "horizon"];
@@ -81,7 +84,7 @@ pub enum Side {
     /// Runs in the player's game only (HUD, keys, chat commands).
     #[default]
     Client,
-    /// Runs where the world is simulated (rules, blocks); not run yet.
+    /// Runs where the world is simulated (rules, blocks): `api = "0.3"`.
     Server,
     /// Both, and the server tells clients which version it expects.
     Both,
@@ -229,6 +232,10 @@ impl Capability {
         Capability::HudWrite,
         Capability::Narrate,
     ];
+    /// Whether a server mod may have it: the others act on a local player.
+    pub fn on_server(self) -> bool {
+        matches!(self, Capability::Storage | Capability::Players)
+    }
     /// The WIT interface it grants, in `horizon:mods`.
     pub fn interface(self) -> &'static str {
         match self {
@@ -345,6 +352,9 @@ impl Capability {
         if interface == "log" {
             return Ok(None);
         }
+        if interface == "server-players" {
+            return Ok(Some(Capability::Players));
+        }
         Capability::ALL
             .into_iter()
             .filter(|c| {
@@ -451,6 +461,18 @@ impl Manifest {
         }
         if m.storage_max_keys.is_some_and(|k| !(1..=4096).contains(&k)) {
             return Err(format!("{MANIFEST}: storage_max_keys is 1 to 4096"));
+        }
+        let server = m.side == Side::Server;
+        if server != (m.api == SERVER_API) {
+            return Err(format!(
+                "{MANIFEST}: a server mod is side = \"server\" with api = \"{SERVER_API}\", and only it"
+            ));
+        }
+        if let Some(c) = m.capabilities.iter().find(|c| {
+            c.on_server() != server && !matches!(c, Capability::Storage | Capability::Players)
+        }) {
+            let side = if server { "client" } else { "server" };
+            return Err(format!("{MANIFEST}: capability {c} is for {side} mods"));
         }
         if let Some(c) = m
             .capabilities
@@ -758,10 +780,31 @@ capabilities = ["keys", "storage", "screen"]
     fn refuses_bad_ids_and_apis() {
         let bad_id = EXAMPLE.replace("coords_hud", "Coords HUD");
         assert!(Manifest::parse(&bad_id).unwrap_err().contains("is not"));
-        let bad_api = EXAMPLE.replace("api = \"0.1\"", "api = \"0.3\"");
-        assert!(Manifest::parse(&bad_api).unwrap_err().contains("API 0.3"));
+        let bad_api = EXAMPLE.replace("api = \"0.1\"", "api = \"0.4\"");
+        assert!(Manifest::parse(&bad_api).unwrap_err().contains("API 0.4"));
         let unknown = format!("{EXAMPLE}network = true\n");
         assert!(Manifest::parse(&unknown).is_err());
+    }
+
+    #[test]
+    fn server_mods_are_api_0_3_with_server_capabilities() {
+        let server = |api: &str, side: &str, caps: &str| {
+            Manifest::parse(&format!(
+                "id = \"w\"\nname = \"W\"\nversion = \"1\"\napi = \"{api}\"\nside = \"{side}\"\ncapabilities = [{caps}]\n"
+            ))
+        };
+        let m = server("0.3", "server", "\"players\", \"storage\"").unwrap();
+        let imports = [
+            "horizon:mods/server-players@0.1.0",
+            "horizon:mods/storage@0.1.0",
+        ];
+        assert_eq!(m.check_imports(imports), Ok(()));
+        for (api, side) in [("0.3", "client"), ("0.3", "both"), ("0.1", "server")] {
+            let e = server(api, side, "").unwrap_err();
+            assert!(e.contains("a server mod is side"), "{e}");
+        }
+        let e = server("0.3", "server", "\"hud\"").unwrap_err();
+        assert!(e.contains("capability hud is for client mods"), "{e}");
     }
 
     #[test]

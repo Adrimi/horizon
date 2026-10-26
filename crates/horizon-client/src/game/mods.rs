@@ -31,8 +31,8 @@ use {
     },
     horizon_mods::{
         Block, Capability, Clock, Food, FoodStats, GameScreen, Item, ItemTags, KeyEvent, ModKey,
-        Modifiers, Mods, Output, Player, Point, Recipe, RecipeKind, ScreenElement, ScreenEvent,
-        ScreenShape, Snapshot, Stack, Status, Ui, UiScreen, UiWidget,
+        Modifiers, Mods, Output, Player, Point, Recipe, RecipeKind, Runs, ScreenElement,
+        ScreenEvent, ScreenShape, Snapshot, Stack, Status, Ui, UiScreen, UiWidget,
     },
     horizon_mods::{KeyPress, MouseMove, MousePress, WheelTurn},
     horizon_world::registry::BlockStateId,
@@ -159,6 +159,9 @@ pub(super) struct ModsState {
     /// The HUD font's advances for `render.text-width`, made once.
     #[cfg(feature = "mods")]
     font_widths: std::sync::Arc<[f32]>,
+    /// Extras that are official mods now, being installed.
+    #[cfg(feature = "mods")]
+    pub(super) moved: super::moved_extras::MovedState,
     /// Playing at the last frame, for `mod_input_frame`.
     #[cfg(feature = "mods")]
     pub(super) playing: bool,
@@ -418,7 +421,8 @@ impl Game<'_> {
             .collect();
         let enabled = &self.settings.mods.enabled;
         let on = |id: &str| enabled.contains(id) || dev_ids.iter().any(|d| d == id);
-        let mods = Mods::load_with(
+        let mods = Mods::load_for(
+            Runs::Client,
             &paths,
             on,
             vanilla_command,
@@ -1613,6 +1617,8 @@ impl Game<'_> {
                     }
                     continue;
                 }
+                // Server mods' lines: this game runs no server mod yet.
+                Output::Tell { .. } | Output::Broadcast { .. } | Output::Reply { .. } => continue,
             };
             // Not through system_message: a mod must not hear its own lines.
             // Written by this client, so the Chat option doesn't hide it.
