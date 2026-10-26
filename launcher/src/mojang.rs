@@ -103,8 +103,8 @@ fn java_platform() -> Option<&'static str> {
 /// Downloads Mojang's Java runtime `component` (the version JSON's `javaVersion.component`, e.g.
 /// `java-runtime-epsilon`) into the game directory's `runtime` folder, as the official launcher
 /// lays it out: `<component>/<platform>/<component>/`. Each file is checked against its sha1;
-/// files already there and whole are kept. Mojang's runtimes are whole JDKs, javac included,
-/// which is what the exporters need.
+/// files already there and whole are kept. These also include javac for older release preparers;
+/// current releases can use an already installed runtime without it.
 pub fn java_runtime(
     component: &str,
     runtime: &Path,
@@ -181,12 +181,16 @@ pub fn java_runtime(
     Ok(home)
 }
 
+// Used by the unix link step below; the path-traversal check itself is tested on every
+// platform, so these stay compiled and are allowed to look unused elsewhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn name_in<'a>(home: &Path, path: &'a Path) -> &'a Path {
     path.strip_prefix(home).unwrap_or(path)
 }
 
 /// Whether a link at `link` (relative to the runtime's home) pointing at `target` stays in the
 /// home.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn link_stays_inside(link: &Path, target: &str) -> bool {
     let mut depth = link.components().count().saturating_sub(1);
     for c in Path::new(target).components() {

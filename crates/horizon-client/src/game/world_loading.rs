@@ -22,6 +22,23 @@ pub(super) struct PreparedWorld {
 }
 
 impl WorldRequest {
+    pub fn new(
+        folder: &str,
+        name: Option<&str>,
+        seed: Option<i64>,
+        creative: bool,
+        create: Option<&horizon_client::title::WorldOptions>,
+    ) -> Result<Self> {
+        Ok(Self {
+            save_root: std::env::current_dir()?.join("saves").join(folder),
+            folder: folder.to_owned(),
+            name: name.map(str::to_owned),
+            seed,
+            creative,
+            create: create.cloned(),
+        })
+    }
+
     pub fn prepare(
         self,
         res: &Resources,
@@ -266,6 +283,9 @@ pub(super) fn make_streaming(
                     .unwrap_or(horizon_client::chunk::DEFAULT_HEIGHT),
             );
         }
+        if dim == Dim::Overworld && structures {
+            inner.search_rings_behind();
+        }
         locator = Some(inner.clone());
         Streaming::new(
             Arc::new(Persistent {
@@ -287,7 +307,7 @@ pub(super) fn make_streaming(
     streaming.nether_shading = dim == Dim::Nether;
     // A server draws nothing: neither the integrated server nor the
     // dedicated one meshes sections.
-    streaming.mesh = !options.integrated && options.dedicated.is_none();
+    streaming.mesh = options.execution_role.is_client();
     Ok((streaming, save, locator))
 }
 

@@ -720,6 +720,8 @@ impl Mesher<'_> {
         let info = &self.tables.info;
         // Connected textures: the rules the mods gave (API 0.1.14).
         let mod_rules = Some(&*self.render.mod_rules).filter(|r| !r.is_empty());
+        let catalog = &self.render.model_catalog;
+        let mut models = Vec::new();
         for y in 0..16 {
             for z in 0..16 {
                 for x in 0..16 {
@@ -749,13 +751,15 @@ impl Mesher<'_> {
                         continue;
                     }
                     let world = BlockPos::new(center.x * 16 + x, base_y + y, center.z * 16 + z);
-                    let Ok(models) = self.render.model_catalog.collect(BlockStateId(id), world)
-                    else {
+                    if catalog
+                        .models_at(BlockStateId(id), world, &mut models)
+                        .is_err()
+                    {
                         continue;
-                    };
+                    }
                     // ModelBlockRenderer: the first part decides smooth lighting
                     // for all; light-emitting blocks are always lit flat.
-                    let Some((_, first)) = models.first() else {
+                    let Some(first) = models.first() else {
                         continue;
                     };
                     let ao = self.smooth_lighting && state.emission == 0 && first.ambient_occlusion;
@@ -785,7 +789,7 @@ impl Mesher<'_> {
                                 )
                                 .unwrap_or(true);
                     }
-                    for (_, model) in &models {
+                    for model in &models {
                         for face in &model.faces {
                             if face.quad.cull.is_some_and(|d| !visible[d as usize]) {
                                 continue;

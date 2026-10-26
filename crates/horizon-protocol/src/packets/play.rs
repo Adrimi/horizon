@@ -13,8 +13,9 @@ use crate::{
     packets::{
         Empty,
         configuration::{
-            ClientInformation, CustomPayload, Disconnect, KeepAlive, Ping, ResourcePackPop,
-            ResourcePackPush, ResourcePackResponse, UpdateTags,
+            ClientInformation, CookieRequest, CookieResponse, CustomClickAction, CustomPayload,
+            Disconnect, KeepAlive, Ping, ResourcePackPop, ResourcePackPush, ResourcePackResponse,
+            StoreCookie, Transfer, UpdateTags,
         },
         login::Property,
     },
@@ -175,6 +176,9 @@ packet!(
     }
 );
 packet!(ContainerSetData { container: i32 => VarInt, id: i16 => Short, value: i16 => Short });
+// ClientboundCooldownPacket: the cooldown group (an identifier) and the ticks
+// its entry lasts (0 ends it).
+packet!(Cooldown { group: String => Ident, duration: i32 => VarInt });
 packet!(ContainerSetSlot { container: i32 => VarInt, state: i32 => VarInt, slot: i16 => Short, item: Option<Stack> => Slot });
 /// A holder reference: registry id + 1, or 0 for an inline value (unsupported).
 pub struct HolderId;
@@ -189,6 +193,35 @@ impl Codec<i32> for HolderId {
         w.varint(v + 1)
     }
 }
+/// `Holder<Dialog>` as Dialog.STREAM_CODEC sends it: an entry of the
+/// `minecraft:dialog` registry the server sent in configuration, or the
+/// dialog itself.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DialogHolder {
+    Registry(i32),
+    Direct(Tag),
+}
+impl Codec<DialogHolder> for DialogHolder {
+    fn read(r: &mut Reader) -> Result<Self> {
+        Ok(match r.varint()? {
+            0 => Self::Direct(r.nbt()?),
+            id => Self::Registry(id - 1),
+        })
+    }
+    fn write(v: &Self, w: &mut Writer) {
+        match v {
+            Self::Registry(id) => w.varint(id + 1),
+            Self::Direct(tag) => {
+                w.varint(0);
+                w.nbt(tag);
+            }
+        }
+    }
+}
+packet!(
+    /// ClientboundShowDialogPacket.
+    ShowDialog { dialog: DialogHolder => DialogHolder }
+);
 packet!(
     /// ChatType.Bound.
     ChatTypeBound { chat_type: i32 => HolderId, name: Tag => Nbt, target: Option<Tag> => Opt<Nbt> }
@@ -1616,6 +1649,125 @@ impl Codec<Vec<(i32, i32, i32)>> for StatList {
     }
 }
 
+/// `ClientboundBossEventPacket` (`boss_event`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BossAction {
+    Add {
+        name: Tag,
+        progress: f32,
+        /// `BossBarColor` ordinal.
+        color: i32,
+        /// `BossBarOverlay` ordinal.
+        overlay: i32,
+        darken: bool,
+        music: bool,
+        fog: bool,
+    },
+    Remove,
+    UpdateProgress {
+        progress: f32,
+    },
+    UpdateName {
+        name: Tag,
+    },
+    UpdateStyle {
+        color: i32,
+        overlay: i32,
+    },
+    UpdateProperties {
+        darken: bool,
+        music: bool,
+        fog: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BossEvent {
+    pub id: u128,
+    pub action: BossAction,
+}
+fn boss_flags(darken: bool, music: bool, fog: bool) -> u8 {
+    u8::from(darken) | (u8::from(music) << 1) | (u8::from(fog) << 2)
+}
+fn split_flags(flags: u8) -> (bool, bool, bool) {
+    (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0)
+}
+impl Codec<BossEvent> for BossEvent {
+    fn read(r: &mut Reader) -> Result<BossEvent> {
+        let id = r.uuid()?;
+        let action = match r.varint()? {
+            0 => {
+                let name = r.nbt()?;
+                let progress = r.f32()?;
+                let color = r.varint()?;
+                let overlay = r.varint()?;
+                let (darken, music, fog) = split_flags(r.u8()?);
+                BossAction::Add {
+                    name,
+                    progress,
+                    color,
+                    overlay,
+                    darken,
+                    music,
+                    fog,
+                }
+            }
+            1 => BossAction::Remove,
+            2 => BossAction::UpdateProgress { progress: r.f32()? },
+            3 => BossAction::UpdateName { name: r.nbt()? },
+            4 => BossAction::UpdateStyle {
+                color: r.varint()?,
+                overlay: r.varint()?,
+            },
+            5 => {
+                let (darken, music, fog) = split_flags(r.u8()?);
+                BossAction::UpdateProperties { darken, music, fog }
+            }
+            op => return Err(Error::new(format!("unknown boss event operation {op}"))),
+        };
+        Ok(BossEvent { id, action })
+    }
+    fn write(v: &BossEvent, w: &mut Writer) {
+        w.uuid(v.id);
+        match &v.action {
+            BossAction::Add {
+                name,
+                progress,
+                color,
+                overlay,
+                darken,
+                music,
+                fog,
+            } => {
+                w.varint(0);
+                w.nbt(name);
+                w.f32(*progress);
+                w.varint(*color);
+                w.varint(*overlay);
+                w.u8(boss_flags(*darken, *music, *fog));
+            }
+            BossAction::Remove => w.varint(1),
+            BossAction::UpdateProgress { progress } => {
+                w.varint(2);
+                w.f32(*progress);
+            }
+            BossAction::UpdateName { name } => {
+                w.varint(3);
+                w.nbt(name);
+            }
+            BossAction::UpdateStyle { color, overlay } => {
+                w.varint(4);
+                w.varint(*color);
+                w.varint(*overlay);
+            }
+            BossAction::UpdateProperties { darken, music, fog } => {
+                w.varint(5);
+                w.u8(boss_flags(*darken, *music, *fog));
+            }
+        }
+    }
+}
+
 packet_enum!(Clientbound, crate::ids::play::clientbound {
     BundleDelimiter(Empty) = BUNDLE_DELIMITER,
     AddEntity(AddEntity) = ADD_ENTITY,
@@ -1626,6 +1778,7 @@ packet_enum!(Clientbound, crate::ids::play::clientbound {
     BlockEntityData(BlockEntityData) = BLOCK_ENTITY_DATA,
     BlockEvent(BlockEvent) = BLOCK_EVENT,
     BlockUpdate(BlockUpdate) = BLOCK_UPDATE,
+    BossEvent(BossEvent) = BOSS_EVENT,
     ChangeDifficulty(ChangeDifficulty) = CHANGE_DIFFICULTY,
     ChunkBatchFinished(ChunkBatchFinished) = CHUNK_BATCH_FINISHED,
     ChunkBatchStart(Empty) = CHUNK_BATCH_START,
@@ -1639,6 +1792,8 @@ packet_enum!(Clientbound, crate::ids::play::clientbound {
     ContainerSetContent(ContainerSetContent) = CONTAINER_SET_CONTENT,
     ContainerSetData(ContainerSetData) = CONTAINER_SET_DATA,
     ContainerSetSlot(ContainerSetSlot) = CONTAINER_SET_SLOT,
+    CookieRequest(CookieRequest) = COOKIE_REQUEST,
+    Cooldown(Cooldown) = COOLDOWN,
     CustomPayload(CustomPayload) = CUSTOM_PAYLOAD,
     Disconnect(Disconnect) = DISCONNECT,
     DisguisedChat(DisguisedChat) = DISGUISED_CHAT,
@@ -1716,6 +1871,7 @@ packet_enum!(Clientbound, crate::ids::play::clientbound {
     SoundEntity(SoundEntity) = SOUND_ENTITY,
     StopSound(StopSound) = STOP_SOUND,
     StartConfiguration(Empty) = START_CONFIGURATION,
+    StoreCookie(StoreCookie) = STORE_COOKIE,
     SwingAnimation(SwingAnimation) = SWING_ANIMATION,
     SystemChat(SystemChat) = SYSTEM_CHAT,
     TabList(TabList) = TAB_LIST,
@@ -1723,6 +1879,7 @@ packet_enum!(Clientbound, crate::ids::play::clientbound {
     TeleportEntity(TeleportEntity) = TELEPORT_ENTITY,
     TickingState(TickingState) = TICKING_STATE,
     TickingStep(TickingStep) = TICKING_STEP,
+    Transfer(Transfer) = TRANSFER,
     UpdateAdvancements(UpdateAdvancements) = UPDATE_ADVANCEMENTS,
     UpdateAttributes(UpdateAttributes) = UPDATE_ATTRIBUTES,
     LevelParticles(LevelParticles) = LEVEL_PARTICLES,
@@ -1730,6 +1887,8 @@ packet_enum!(Clientbound, crate::ids::play::clientbound {
     UpdateMobEffect(UpdateMobEffect) = UPDATE_MOB_EFFECT,
     UpdateTags(UpdateTags) = UPDATE_TAGS,
     TrackedWaypoint(TrackedWaypoint) = WAYPOINT,
+    ClearDialog(Empty) = CLEAR_DIALOG,
+    ShowDialog(ShowDialog) = SHOW_DIALOG,
 });
 packet!(
     /// ClientboundClearTitlesPacket: whether to also reset the timings.
@@ -2103,7 +2262,9 @@ packet_enum!(Serverbound, crate::ids::play::serverbound {
     ContainerButtonClick(ContainerButtonClick) = CONTAINER_BUTTON_CLICK,
     ContainerClick(ContainerClick) = CONTAINER_CLICK,
     ContainerClose(ContainerClose) = CONTAINER_CLOSE,
+    CookieResponse(CookieResponse) = COOKIE_RESPONSE,
     CustomPayload(CustomPayload) = CUSTOM_PAYLOAD,
+    CustomClickAction(CustomClickAction) = CUSTOM_CLICK_ACTION,
     EditBook(EditBook) = EDIT_BOOK,
     Interact(Interact) = INTERACT,
     KeepAlive(KeepAlive) = KEEP_ALIVE,
@@ -2770,6 +2931,24 @@ mod tests {
     }
 
     #[test]
+    fn a_cooldown_packet_carries_its_group_and_ticks() {
+        let packet = Clientbound::Cooldown(Cooldown {
+            group: "minecraft:ender_pearl".into(),
+            duration: 20,
+        });
+        round_trip(packet, Clientbound::encode, Clientbound::decode);
+        // The group is an identifier, the ticks a VarInt; a duration of 0
+        // removes the entry.
+        let body = Clientbound::encode(&Clientbound::Cooldown(Cooldown {
+            group: "minecraft:ender_pearl".into(),
+            duration: 0,
+        }));
+        assert_eq!(body[0], crate::ids::play::clientbound::COOLDOWN as u8);
+        assert_eq!(&body[1..3], [21, b'm']);
+        assert_eq!(body[body.len() - 1], 0);
+    }
+
+    #[test]
     fn change_game_mode_uses_the_game_type_varint() {
         for mode in 0..=3 {
             let packet = Serverbound::ChangeGameMode(ChangeGameMode { mode });
@@ -2798,10 +2977,11 @@ mod tests {
 
     #[test]
     fn unknown_packets_keep_their_payload() {
-        let p = Clientbound::decode(crate::ids::play::clientbound::BOSS_EVENT, &[1, 2, 3]).unwrap();
+        let p =
+            Clientbound::decode(crate::ids::play::clientbound::PLAYER_LOOK_AT, &[1, 2, 3]).unwrap();
         assert_eq!(
             p,
-            Clientbound::Unknown(crate::ids::play::clientbound::BOSS_EVENT, vec![1, 2, 3])
+            Clientbound::Unknown(crate::ids::play::clientbound::PLAYER_LOOK_AT, vec![1, 2, 3])
         );
         assert_eq!(p.encode()[1..], [1, 2, 3]);
     }
@@ -2897,5 +3077,67 @@ mod tests {
         let mut w = Writer::new();
         w.varint(101);
         assert!(BookPages::read(&mut Reader::new(&w.data)).is_err());
+    }
+
+    #[test]
+    fn boss_event_round_trips() {
+        let add = Clientbound::BossEvent(BossEvent {
+            id: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+            action: BossAction::Add {
+                name: Tag::String("Wither".into()),
+                progress: 0.5,
+                color: 5,
+                overlay: 0,
+                darken: true,
+                music: false,
+                fog: true,
+            },
+        });
+        let body = add.encode();
+        // Packet id 9, then the uuid, operation 0, and the property byte
+        // (darken 1, fog 4).
+        assert_eq!(body[0], 9);
+        assert_eq!(*body.last().unwrap(), 5);
+        round_trip(add, Clientbound::encode, Clientbound::decode);
+        round_trip(
+            Clientbound::BossEvent(BossEvent {
+                id: 7,
+                action: BossAction::UpdateProgress { progress: 0.25 },
+            }),
+            Clientbound::encode,
+            Clientbound::decode,
+        );
+        round_trip(
+            Clientbound::BossEvent(BossEvent {
+                id: 7,
+                action: BossAction::Remove,
+            }),
+            Clientbound::encode,
+            Clientbound::decode,
+        );
+    }
+
+    /// A registry entry is its id + 1, the dialog itself a 0 then its NBT.
+    #[test]
+    fn dialogs_round_trip() {
+        let notice = Tag::compound([("type", Tag::String("minecraft:notice".into()))]);
+        for dialog in [DialogHolder::Registry(3), DialogHolder::Direct(notice)] {
+            crate::packets::round_trip(
+                Clientbound::ShowDialog(ShowDialog { dialog }),
+                Clientbound::encode,
+                Clientbound::decode,
+            );
+        }
+        let mut w = Writer::new();
+        DialogHolder::write(&DialogHolder::Registry(3), &mut w);
+        assert_eq!(w.data, [4]);
+        crate::packets::round_trip(
+            Serverbound::CustomClickAction(CustomClickAction {
+                id: "minecraft:custom".into(),
+                payload: None,
+            }),
+            Serverbound::encode,
+            Serverbound::decode,
+        );
     }
 }

@@ -11,6 +11,7 @@ use horizon_client::{
     hud::{HudBatch, rgba},
     items::ItemStack,
     stations::{self, AnvilResult, EnchantOffers},
+    text::Text,
 };
 use horizon_core::random::{LegacyRandom, RandomSource};
 
@@ -277,15 +278,10 @@ fn argb(c: i32) -> u32 {
 }
 
 impl Game<'_> {
-    fn data(&self) -> &stations::StationData {
-        self.res.stations()
-    }
+    /// `Component.translatable`: the selected language (which `lang` layers
+    /// over `en_us`), the caller's English text last.
     pub(super) fn translate(&self, key: &str, fallback: &str) -> String {
-        self.data()
-            .enchantments
-            .translate(key)
-            .unwrap_or(fallback)
-            .to_owned()
+        horizon_client::lang::get_or(key, fallback)
     }
     fn brewing_open(&self) -> bool {
         matches!(self.container_kind(), Some(BlockEntity::Brewing(_)))
@@ -421,7 +417,8 @@ impl Game<'_> {
     pub(super) fn anvil_item_name(&self, s: &Station) -> String {
         match &s.inputs[0] {
             Some(input)
-                if input.custom_name().is_none() && s.name == self.pack.names.item(&input.item) =>
+                if input.custom_name().is_none()
+                    && s.name == self.pack.names.display_item(&input.item) =>
             {
                 String::new()
             }
@@ -462,7 +459,7 @@ impl Game<'_> {
                 let name = self.anvil_item_name(&s);
                 let hover = s.inputs[0]
                     .as_ref()
-                    .map(|i| stations::hover_name(&|id| self.pack.names.item(id), i))
+                    .map(|i| stations::hover_name(&|id| self.pack.names.display_item(id), i))
                     .unwrap_or_default();
                 s.anvil = stations::anvil_result(
                     &data.enchantments,
@@ -895,7 +892,7 @@ impl Game<'_> {
             s.anvil_last = s.inputs[0].clone();
             s.name = s.inputs[0]
                 .as_ref()
-                .map(|i| stations::hover_name(&|id| self.pack.names.item(id), i))
+                .map(|i| stations::hover_name(&|id| self.pack.names.display_item(id), i))
                 .unwrap_or_default();
         }
         self.station_changed();
@@ -1096,7 +1093,7 @@ impl Game<'_> {
         }
         let (ox, oy) = self.inventory_origin(batch);
         let local = (self.cursor.0 - ox, self.cursor.1 - oy);
-        let mut tooltip: Option<Vec<(String, u32)>> = None;
+        let mut tooltip: Option<Vec<(horizon_client::text::Text, u32)>> = None;
         let mut stack_tip: Option<ItemStack> = None;
         {
             let atlas = &self.gui.atlas;
@@ -1165,15 +1162,15 @@ impl Game<'_> {
                 }
             }
             let default = self.translate("container.brewing", "Brewing Stand");
-            let title = self
-                .station
-                .as_ref()
-                .and_then(|s| self.world.block_names.get(&(s.pos[0], s.pos[1], s.pos[2])))
-                .cloned()
-                .or_else(|| self.remote_menu_title())
-                .unwrap_or(default);
-            let tw = HudBatch::text_width(atlas, &title);
-            batch.text(
+            let title = self.remote_menu_title().unwrap_or_else(|| {
+                let named = self
+                    .station
+                    .as_ref()
+                    .and_then(|s| self.world.block_names.get(&(s.pos[0], s.pos[1], s.pos[2])));
+                Text::literal(named.cloned().unwrap_or(default)).resolve_legacy()
+            });
+            let tw = atlas.font.width_text(&title);
+            batch.text_styled(
                 atlas,
                 &title,
                 ox + (176.0 - tw) / 2.0,
@@ -1200,7 +1197,10 @@ impl Game<'_> {
                 }
             }
         } else if let Some(kind) = self.station.as_ref().map(|s| s.kind) {
-            let title = self.translate(kind.title_key(), "");
+            // A server's menu has the title it was given.
+            let title = self
+                .remote_menu_title()
+                .unwrap_or_else(|| Text::literal(self.translate(kind.title_key(), "")));
             {
                 let atlas = &self.gui.atlas;
                 Self::part(
@@ -1212,7 +1212,7 @@ impl Game<'_> {
                     (ox, oy),
                 );
                 let (tx, ty) = kind.title_pos();
-                batch.text(atlas, &title, ox + tx, oy + ty, GREY, false);
+                batch.text_styled(atlas, &title, ox + tx, oy + ty, GREY, false);
                 batch.text(atlas, &inventory_label, ox + 8.0, oy + 72.0, GREY, false);
             }
             if kind == Kind::Cartography {
@@ -1346,16 +1346,19 @@ impl Game<'_> {
                             let clue = self
                                 .translate("container.enchant.clue", "%s . . . ?")
                                 .replace("%s", &name);
-                            let mut lines = vec![(clue, u32::MAX)];
+                            let mut lines =
+                                vec![(horizon_client::text::Text::literal(clue), u32::MAX)];
                             if !self.creative {
-                                lines.push((String::new(), u32::MAX));
+                                lines.push((horizon_client::text::Text::literal(""), u32::MAX));
                                 if level < cost {
                                     lines.push((
-                                        self.translate(
-                                            "container.enchant.level.requirement",
-                                            "Level Requirement: %s",
-                                        )
-                                        .replace("%s", &cost.to_string()),
+                                        horizon_client::text::Text::literal(
+                                            self.translate(
+                                                "container.enchant.level.requirement",
+                                                "Level Requirement: %s",
+                                            )
+                                            .replace("%s", &cost.to_string()),
+                                        ),
                                         rgba(255, 85, 85, 255),
                                     ));
                                 } else {
@@ -1373,7 +1376,7 @@ impl Game<'_> {
                                         .replace("%s", &n.to_string())
                                     };
                                     lines.push((
-                                        lapis,
+                                        horizon_client::text::Text::literal(lapis),
                                         if gold >= n as i32 {
                                             rgba(170, 170, 170, 255)
                                         } else {
@@ -1392,7 +1395,10 @@ impl Game<'_> {
                                         )
                                         .replace("%s", &n.to_string())
                                     };
-                                    lines.push((levels, rgba(170, 170, 170, 255)));
+                                    lines.push((
+                                        horizon_client::text::Text::literal(levels),
+                                        rgba(170, 170, 170, 255),
+                                    ));
                                 }
                             }
                             tooltip = Some(lines);
@@ -1501,10 +1507,10 @@ impl Game<'_> {
                         );
                         if inside(local, 65.0, 46.0, 28.0, 21.0) {
                             tooltip = Some(vec![(
-                                self.translate(
+                                horizon_client::text::Text::literal(self.translate(
                                     "container.upgrade.error_tooltip",
                                     "Item can't be upgraded this way",
-                                ),
+                                )),
                                 u32::MAX,
                             )]);
                         }
@@ -1634,14 +1640,12 @@ impl Game<'_> {
 
     // ---------------------------------------------------------------- tooltips
 
-    /// `ItemStack.getTooltipLines` subset: name in rarity colour, potion
-    /// effects, enchantments (gray, curses red), stored enchantments, trims.
-    pub(super) fn stack_tooltip(&self, stack: &ItemStack) -> Vec<(String, u32)> {
-        self.stack_tooltip_with(stack)
-    }
-    /// `stack_tooltip`; `preview` leaves out the container lines that the
-    /// shulker box preview grid replaces.
-    fn stack_tooltip_with(&self, stack: &ItemStack) -> Vec<(String, u32)> {
+    /// `ItemStack.getTooltipLines` subset: name in rarity colour, lore,
+    /// potion effects, enchantments (gray, curses red), stored enchantments, trims.
+    pub(super) fn stack_tooltip(
+        &self,
+        stack: &ItemStack,
+    ) -> Vec<(horizon_client::text::Text, u32)> {
         let e: &Enchantments = &self.res.stations().enchantments;
         let props = e.props(&stack.item);
         let rarity = horizon_client::item_tooltip::rarity(
@@ -1657,39 +1661,43 @@ impl Game<'_> {
         let name = if let Some(n) = stack.custom_name() {
             n.to_owned()
         } else if stack.data().is_some_and(|d| d.ominous_banner) {
-            e.translate("block.minecraft.ominous_banner")
-                .map_or_else(|| "Ominous Banner".to_owned(), str::to_owned)
+            self.translate("block.minecraft.ominous_banner", "Ominous Banner")
         } else if stack.data().and_then(|d| d.potion.as_ref()).is_some()
             || stack.item.ends_with("potion")
             || &*stack.item == "minecraft:tipped_arrow"
         {
             let key = brewing::potion_name_key(&stack.item, stack.potion());
-            e.translate(&key)
-                .map_or_else(|| self.pack.names.item(&stack.item), str::to_owned)
+            self.pack
+                .names
+                .display_get(&key)
+                .unwrap_or_else(|| self.pack.names.display_item(&stack.item))
         } else {
-            self.pack.names.item(&stack.item)
+            self.pack.names.display_item(&stack.item)
         };
         let display = horizon_client::item_tooltip::TooltipDisplay::for_stack(stack);
         let mut lines = Vec::new();
         if display.name_visible(self.screen == Screen::Creative) {
-            lines.push((name, color));
+            lines.push((horizon_client::text::Text::legacy(&name), color));
         }
-        let translate = |k: &str| e.translate(k).map(str::to_owned);
+        let translate = |k: &str| self.pack.names.display_get(k);
+        let push = |lines: &mut Vec<(horizon_client::text::Text, u32)>, s: String, c: u32| {
+            lines.push((horizon_client::text::Text::legacy(&s), c));
+        };
         // ItemContainerContents.addToTooltip.
         let hover_name = |s: &ItemStack| {
             s.custom_name()
-                .map_or_else(|| self.pack.names.item(&s.item), str::to_owned)
+                .map_or_else(|| self.pack.names.display_item(&s.item), str::to_owned)
         };
         if display.shows("minecraft:container") {
-            for line in
+            for text in
                 horizon_client::item_tooltip::container_lines(stack, &hover_name, &translate)
             {
-                lines.push((line, u32::MAX));
+                push(&mut lines, text, u32::MAX);
             }
         }
         // Fireworks / FireworkExplosion.addToTooltip.
-        for line in horizon_client::item_tooltip::firework_lines(stack, &translate) {
-            lines.push((line, rgba(170, 170, 170, 255)));
+        for text in horizon_client::item_tooltip::firework_lines(stack, &translate) {
+            push(&mut lines, text, rgba(170, 170, 170, 255));
         }
         if display.shows("minecraft:potion_contents")
             && (stack.item.ends_with("potion") || &*stack.item == "minecraft:tipped_arrow")
@@ -1699,7 +1707,7 @@ impl Game<'_> {
                 "minecraft:tipped_arrow" => 0.125,
                 _ => 1.0,
             };
-            for (line, cat) in brewing::tooltip(stack.potion(), scale, &|k| {
+            for (text, cat) in brewing::tooltip(stack.potion(), scale, &|k| {
                 e.translate(k).map(str::to_owned)
             }) {
                 let c = match cat {
@@ -1707,18 +1715,19 @@ impl Game<'_> {
                     brewing::Category::Harmful => rgba(255, 85, 85, 255),
                     brewing::Category::Neutral => rgba(170, 170, 170, 255),
                 };
-                lines.push((line, c));
+                push(&mut lines, text, c);
             }
         }
         if display.shows("minecraft:trim")
             && let Some((material, pattern)) = stack.data().and_then(|d| d.trim.clone())
         {
-            lines.push((
+            push(
+                &mut lines,
                 e.translate("item.minecraft.smithing_template.upgrade")
                     .unwrap_or("Upgrade:")
                     .to_owned(),
                 rgba(170, 170, 170, 255),
-            ));
+            );
             let short = |s: &str| s.trim_start_matches("minecraft:").to_owned();
             let p = e
                 .translate(&format!("trim_pattern.minecraft.{}", short(&pattern)))
@@ -1726,26 +1735,28 @@ impl Game<'_> {
             let m = e
                 .translate(&format!("trim_material.minecraft.{}", short(&material)))
                 .map_or_else(|| short(&material), str::to_owned);
-            lines.push((format!(" {p}"), rgba(170, 170, 170, 255)));
-            lines.push((format!(" {m}"), rgba(170, 170, 170, 255)));
+            push(&mut lines, format!(" {p}"), rgba(170, 170, 170, 255));
+            push(&mut lines, format!(" {m}"), rgba(170, 170, 170, 255));
         }
         let keys = &self.mods.tooltip_keys;
         keys.borrow_mut().clear();
-        let enchantment_lines = |levels: &[(std::sync::Arc<str>, u32)],
-                                 lines: &mut Vec<(String, u32)>| {
-            for (id, text, curse) in e.tooltip_entries(levels) {
-                keys.borrow_mut()
-                    .push((lines.len(), format!("enchantment.{}", id.replace(':', "."))));
-                lines.push((
-                    text,
-                    if curse {
-                        rgba(255, 85, 85, 255)
-                    } else {
-                        rgba(170, 170, 170, 255)
-                    },
-                ));
-            }
-        };
+        let enchantment_lines =
+            |levels: &[(std::sync::Arc<str>, u32)],
+             lines: &mut Vec<(horizon_client::text::Text, u32)>| {
+                for (id, text, curse) in e.tooltip_entries(levels) {
+                    keys.borrow_mut()
+                        .push((lines.len(), format!("enchantment.{}", id.replace(':', "."))));
+                    push(
+                        lines,
+                        text,
+                        if curse {
+                            rgba(255, 85, 85, 255)
+                        } else {
+                            rgba(170, 170, 170, 255)
+                        },
+                    );
+                }
+            };
         if display.shows("minecraft:stored_enchantments") {
             enchantment_lines(stack.stored_enchantments(), &mut lines);
         }
@@ -1756,7 +1767,18 @@ impl Game<'_> {
         if display.shows("minecraft:banner_patterns") {
             for layer in horizon_client::banner::tooltip_layers(stack).iter().take(6) {
                 let key = self.res.stations().banners.layer_key(layer);
-                lines.push((self.translate(&key, &key), rgba(170, 170, 170, 255)));
+                push(
+                    &mut lines,
+                    self.translate(&key, &key),
+                    rgba(170, 170, 170, 255),
+                );
+            }
+        }
+        // ItemLore.addToTooltip: after the enchantments, before the attributes
+        // (ItemStack.addDetailsToTooltip).
+        if display.shows("minecraft:lore") {
+            for text in horizon_client::item_tooltip::lore_texts(stack) {
+                lines.push((text, u32::MAX));
             }
         }
         // Spawner.appendHoverText: what a spawner or trial spawner item spawns.
@@ -1770,15 +1792,15 @@ impl Game<'_> {
             match block_entity_item::spawner_entity(stack) {
                 Some(id) => {
                     let key = format!("entity.{}", id.replacen(':', ".", 1));
-                    lines.push((self.translate(&key, &id), gray));
+                    push(&mut lines, self.translate(&key, &id), gray);
                 }
                 None => {
-                    lines.push((String::new(), u32::MAX));
+                    push(&mut lines, String::new(), u32::MAX);
                     let desc1 =
                         self.translate("block.minecraft.spawner.desc1", "Interact with Spawn Egg:");
-                    lines.push((desc1, gray));
+                    push(&mut lines, desc1, gray);
                     let desc2 = self.translate("block.minecraft.spawner.desc2", "Sets Mob Type");
-                    lines.push((format!(" {desc2}"), rgba(85, 85, 255, 255)));
+                    push(&mut lines, format!(" {desc2}"), rgba(85, 85, 255, 255));
                 }
             }
         }
@@ -1806,11 +1828,13 @@ impl Game<'_> {
                     horizon_client::attack_strength::BASE_ATTACK_SPEED,
                 ),
             ];
-            lines.extend(horizon_client::item_tooltip::attribute_lines(
+            for (text, c) in horizon_client::item_tooltip::attribute_lines(
                 &info.modifiers,
                 Some(player_base),
                 &translate,
-            ));
+            ) {
+                push(&mut lines, text, c);
+            }
         }
         if display.shows("minecraft:damage")
             && let Some(info) = self.res.items().get(&stack.item)
@@ -1818,14 +1842,15 @@ impl Game<'_> {
             && stack.damage > 0
             && self.options_advanced_tooltips()
         {
-            lines.push((
+            push(
+                &mut lines,
                 format!(
                     "Durability: {} / {}",
                     info.max_damage - stack.damage,
                     info.max_damage
                 ),
                 u32::MAX,
-            ));
+            );
         }
         // ItemStack.OP_NBT_WARNING, for a player with game master permission.
         if self.ui.registries.permission >= 2 && block_entity_item::op_warning(stack) {
@@ -1840,7 +1865,11 @@ impl Game<'_> {
                     "Do not use unless you know the exact contents!",
                 ),
             ] {
-                lines.push((self.translate(key, fallback), rgba(255, 85, 85, 255)));
+                push(
+                    &mut lines,
+                    self.translate(key, fallback),
+                    rgba(255, 85, 85, 255),
+                );
             }
         }
         lines
@@ -1871,10 +1900,10 @@ impl Game<'_> {
         self.settings.file.bool("advancedItemTooltips")
     }
     /// `TooltipRenderUtil`: dark box with the purple border, first line spaced.
-    pub(super) fn draw_tooltip_lines(
+    pub(super) fn draw_tooltip_lines<T: Clone + Into<horizon_client::text::Text>>(
         &self,
         batch: &mut HudBatch,
-        lines: &[(String, u32)],
+        lines: &[(T, u32)],
         x: f32,
         y: f32,
     ) {
@@ -1882,10 +1911,10 @@ impl Game<'_> {
     }
     /// `draw_tooltip_lines` with room for an `extra` (width, height) image
     /// below the text; returns where that image goes.
-    pub(super) fn draw_tooltip_box(
+    pub(super) fn draw_tooltip_box<T: Clone + Into<horizon_client::text::Text>>(
         &self,
         batch: &mut HudBatch,
-        lines: &[(String, u32)],
+        lines: &[(T, u32)],
         x: f32,
         y: f32,
         extra: (f32, f32),
@@ -1893,10 +1922,17 @@ impl Game<'_> {
         if lines.is_empty() {
             return None;
         }
+        let lines: Vec<_> = lines
+            .iter()
+            .map(|(text, color)| {
+                let text: horizon_client::text::Text = text.clone().into();
+                (text.resolve_legacy(), *color)
+            })
+            .collect();
         let atlas = &self.gui.atlas;
         let w = lines
             .iter()
-            .map(|(t, _)| HudBatch::text_width(atlas, t))
+            .map(|(t, _)| atlas.font.width_text(t))
             .fold(extra.0, f32::max);
         let text_h = if lines.len() == 1 {
             8.0
@@ -1957,7 +1993,7 @@ impl Game<'_> {
         );
         let mut ty = y;
         for (i, (text, color)) in lines.iter().enumerate() {
-            batch.text(atlas, text, x, ty, *color, true);
+            batch.text_styled(atlas, text, x, ty, *color, true);
             ty += if i == 0 { 12.0 } else { 10.0 };
         }
         Some((x, y + text_h + 2.0))
@@ -1983,7 +2019,12 @@ impl Game<'_> {
         if let Some(stack) = stack {
             self.draw_stack_tooltip(batch, &stack);
         } else if let Some(text) = self.crafter_tooltip(slot) {
-            self.draw_tooltip_lines(batch, &[(text, u32::MAX)], self.cursor.0, self.cursor.1);
+            self.draw_tooltip_lines(
+                batch,
+                &[(horizon_client::text::Text::literal(text), u32::MAX)],
+                self.cursor.0,
+                self.cursor.1,
+            );
         }
     }
 
